@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      1.8.0
+// @version      1.12.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles in readability format, convert to markdown, and publish to NOSTR
@@ -35,7 +35,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '1.8.0',
+    version: '1.12.0',
     debug: true,
     
     // NSecBunker settings
@@ -104,8 +104,31 @@
     normalizeUrl: (url) => {
       try {
         const parsed = new URL(url);
-        // Remove tracking parameters
-        const trackingParams = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'gclid'];
+        // Remove tracking parameters - comprehensive list
+        const trackingParams = [
+          // UTM parameters
+          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+          // Facebook/Meta
+          'fbclid',
+          // Google
+          'gclid', '_ga', '_gl',
+          // General referrer/source
+          'ref', 'source', 'src',
+          // Mailchimp
+          'mc_cid', 'mc_eid',
+          // Yandex
+          'yclid',
+          // Microsoft/Bing
+          'msclkid',
+          // Twitter
+          'twclid',
+          // Instagram
+          'igshid',
+          // Various share trackers
+          's', 'share',
+          // Ad platforms
+          'campaign_id', 'ad_id', 'adset_id'
+        ];
         trackingParams.forEach(param => parsed.searchParams.delete(param));
         // Remove fragment
         parsed.hash = '';
@@ -125,6 +148,30 @@
       } catch (e) {
         return url;
       }
+    },
+    
+    // Get canonical URL from page metadata
+    getCanonicalUrl: () => {
+      // Priority 1: <link rel="canonical">
+      const canonicalLink = document.querySelector('link[rel="canonical"]');
+      if (canonicalLink && canonicalLink.href) {
+        return canonicalLink.href;
+      }
+      
+      // Priority 2: og:url meta tag
+      const ogUrl = document.querySelector('meta[property="og:url"]');
+      if (ogUrl && ogUrl.content) {
+        return ogUrl.content;
+      }
+      
+      // Priority 3: twitter:url meta tag
+      const twitterUrl = document.querySelector('meta[name="twitter:url"]');
+      if (twitterUrl && twitterUrl.content) {
+        return twitterUrl.content;
+      }
+      
+      // Fallback: browser URL
+      return window.location.href;
     },
     
     // Extract domain from URL
@@ -364,6 +411,25 @@
           Utils.error('Failed to import keypairs:', e);
           return false;
         }
+      }
+    },
+    
+    // Capturing user management - the person who submitted/captured the article
+    capturingUser: {
+      get: () => {
+        return GM_getValue('nac_capturing_user', null);
+      },
+      set: (pubkey, npub, name) => {
+        GM_setValue('nac_capturing_user', { pubkey, npub, name, enabled: true });
+      },
+      setEnabled: (enabled) => {
+        const current = GM_getValue('nac_capturing_user', null);
+        if (current) {
+          GM_setValue('nac_capturing_user', { ...current, enabled });
+        }
+      },
+      clear: () => {
+        GM_deleteValue('nac_capturing_user');
       }
     }
   };
@@ -796,9 +862,12 @@
         return null;
       }
       
-      // Add additional metadata
-      article.url = Utils.normalizeUrl(window.location.href);
-      article.domain = Utils.getDomain(window.location.href);
+      // Add additional metadata - use canonical URL when available
+      const canonicalUrl = Utils.getCanonicalUrl();
+      article.url = Utils.normalizeUrl(canonicalUrl);
+      article.sourceUrl = window.location.href; // Keep original browser URL for reference
+      article.urlSource = canonicalUrl !== window.location.href ? 'canonical' : 'browser';
+      article.domain = Utils.getDomain(article.url);
       article.extractedAt = Math.floor(Date.now() / 1000);
       
       // Try to get publication date
@@ -1011,6 +1080,93 @@
       }
       
       return result;
+    },
+    
+    // Extract people quoted and organizations referenced from article content
+    extractEntities: (content, textContent) => {
+      const entities = {
+        people: [],
+        organizations: []
+      };
+      
+      // Helper function to validate person names
+      const isValidPersonName = (name) => {
+        if (!name || name.length < 3) return false;
+        // Must have at least two parts (first and last name)
+        const parts = name.trim().split(/\s+/);
+        if (parts.length < 2) return false;
+        // Each part should start with capital letter
+        const validParts = parts.every(part => /^[A-Z][a-zA-Z'-]+$/.test(part));
+        if (!validParts) return false;
+        // Filter common false positives
+        const skipWords = ['The', 'This', 'That', 'These', 'Those', 'When', 'Where', 'What', 'Which', 'While', 'After', 'Before', 'During', 'According', 'However', 'Meanwhile', 'Furthermore', 'Therefore', 'Nevertheless'];
+        if (skipWords.some(word => parts[0] === word)) return false;
+        return true;
+      };
+      
+      // Pattern 1: Attribution patterns like "said John Smith" or "John Smith said"
+      const quotePatterns = [
+        // "said John Smith", "told reporters Jane Doe"
+        /(?:said|told|explained|stated|noted|added|confirmed|denied|claimed|argued|suggested|announced|revealed|warned|emphasized|insisted|acknowledged|admitted|declared|mentioned|reported|described|commented|responded|replied|asked|questioned|wondered|believed|thought|felt|expressed)\s+(?:that\s+)?([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)/gi,
+        // "John Smith said", "Jane Doe told reporters"
+        /([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)\s+(?:said|told|explained|stated|noted|added|confirmed|denied|claimed|argued|suggested|announced|revealed|warned|emphasized|insisted|acknowledged|admitted|declared|mentioned|reported|described|commented|responded|replied|asked|questioned|wondered|believed|thought|felt|expressed)/gi,
+        // "according to John Smith"
+        /according\s+to\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)/gi,
+        // "Dr. John Smith" or "Prof. Jane Doe" (with titles)
+        /(?:Dr\.|Prof\.|Mr\.|Mrs\.|Ms\.|Sen\.|Rep\.|Gov\.|Pres\.|Gen\.|Col\.|Capt\.)\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/gi
+      ];
+      
+      // Extract quoted people
+      const foundPeople = new Set();
+      for (const pattern of quotePatterns) {
+        let match;
+        const text = textContent || content.replace(/<[^>]+>/g, ' ');
+        while ((match = pattern.exec(text)) !== null) {
+          const name = match[1].trim();
+          if (isValidPersonName(name) && !foundPeople.has(name.toLowerCase())) {
+            foundPeople.add(name.toLowerCase());
+            entities.people.push({
+              name: name,
+              context: 'quoted'
+            });
+          }
+        }
+      }
+      
+      // Pattern 2: Organization patterns
+      const orgPatterns = [
+        // Organizations with indicators like Inc., Corp., LLC, etc.
+        /([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)\s+(?:Inc\.|Corp\.|Corporation|LLC|Ltd\.|Company|Co\.|Group|Foundation|Institute|Association|Organization|Agency|Department|Ministry|Commission|Committee|Council|Board|Authority|Bureau|Office|Center|Centre|University|College|School|Hospital|Bank|Fund|Trust)/gi,
+        // "the FBI", "the CIA", "the Department of X"
+        /(?:the\s+)?([A-Z]{2,})\b/g,
+        // "Department of X", "Ministry of Y"
+        /(?:Department|Ministry|Office|Bureau|Agency)\s+of\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)/gi,
+        // "University of X", "X University"
+        /(?:([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)\s+University|University\s+of\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*))/gi
+      ];
+      
+      // Extract organizations
+      const foundOrgs = new Set();
+      const skipOrgs = ['The', 'This', 'That', 'And', 'But', 'For', 'Not', 'You', 'All', 'Can', 'Had', 'Her', 'Was', 'One', 'Our', 'Out'];
+      
+      for (const pattern of orgPatterns) {
+        let match;
+        const text = textContent || content.replace(/<[^>]+>/g, ' ');
+        while ((match = pattern.exec(text)) !== null) {
+          const org = (match[1] || match[2] || '').trim();
+          if (org && org.length >= 2 && !foundOrgs.has(org.toLowerCase()) && !skipOrgs.includes(org)) {
+            // Skip if it looks like a person name (2-3 words with common name patterns)
+            if (isValidPersonName(org)) continue;
+            foundOrgs.add(org.toLowerCase());
+            entities.organizations.push({
+              name: org
+            });
+          }
+        }
+      }
+      
+      Utils.log('Extracted entities:', entities);
+      return entities;
     }
   };
 
@@ -1316,6 +1472,49 @@
       display: flex;
       align-items: center;
       gap: 4px;
+    }
+    
+    /* URL Source Info - shown when canonical differs from browser URL */
+    .nac-url-source-info {
+      margin-top: 12px;
+      padding: 10px;
+      background: var(--nac-surface);
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    
+    .nac-url-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    
+    .nac-url-item:last-child {
+      margin-bottom: 0;
+    }
+    
+    .nac-url-label {
+      color: var(--nac-text-muted);
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    
+    .nac-url-value {
+      color: var(--nac-text);
+      word-break: break-all;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 11px;
+    }
+    
+    .nac-url-canonical .nac-url-label {
+      color: var(--nac-success);
+    }
+    
+    .nac-url-browser .nac-url-value {
+      color: var(--nac-text-dim);
+      text-decoration: line-through;
+      opacity: 0.7;
     }
     
     /* Publish Section */
@@ -2303,6 +2502,457 @@
       color: var(--nac-text-dim);
       margin-top: 4px;
     }
+    
+    /* Publishing Options Section */
+    .nac-publishing-options {
+      margin: 15px 0;
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    
+    .nac-options-header {
+      padding: 10px 15px;
+      background: var(--nac-surface);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--nac-text);
+      user-select: none;
+    }
+    
+    .nac-options-header:hover {
+      background: var(--nac-surface-hover);
+    }
+    
+    .nac-toggle-icon {
+      transition: transform 0.2s ease;
+      font-size: 10px;
+    }
+    
+    .nac-publishing-options.expanded .nac-toggle-icon {
+      transform: rotate(180deg);
+    }
+    
+    .nac-options-content {
+      padding: 15px;
+      display: none;
+      background: var(--nac-background);
+      border-top: 1px solid var(--nac-border);
+    }
+    
+    .nac-publishing-options.expanded .nac-options-content {
+      display: block;
+    }
+    
+    .nac-option-row {
+      margin: 12px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    
+    .nac-option-row:first-child {
+      margin-top: 0;
+    }
+    
+    .nac-option-row:last-child {
+      margin-bottom: 0;
+    }
+    
+    .nac-option-row label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--nac-text);
+      cursor: pointer;
+    }
+    
+    .nac-option-row label input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+    
+    .nac-option-row label input[type="checkbox"]:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+    
+    .nac-option-row input[type="text"] {
+      flex: 1;
+      min-width: 200px;
+      padding: 6px 10px;
+      border: 1px solid var(--nac-border);
+      border-radius: 4px;
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      font-size: 13px;
+    }
+    
+    .nac-option-row input[type="text"]:focus {
+      outline: none;
+      border-color: var(--nac-primary);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+    }
+    
+    .nac-option-row button {
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      transition: all 0.2s ease;
+    }
+    
+    .nac-option-row button:hover {
+      background: var(--nac-surface-hover);
+      border-color: var(--nac-primary);
+    }
+    
+    .nac-option-row .nac-pubkey-display {
+      font-size: 12px;
+      color: var(--nac-text-muted);
+      font-family: monospace;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    
+    .nac-option-row .nac-name-display {
+      font-size: 13px;
+      color: var(--nac-text);
+      font-weight: 500;
+    }
+    
+    .nac-option-row .nac-not-set {
+      font-size: 12px;
+      color: var(--nac-text-dim);
+      font-style: italic;
+    }
+    
+    .nac-option-description {
+      font-size: 11px;
+      color: var(--nac-text-dim);
+      margin-top: 4px;
+      margin-left: 24px;
+    }
+    
+    /* Entity Extraction Styles */
+    .nac-entities-section {
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+    
+    .nac-entities-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+    
+    .nac-entities-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--nac-text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .nac-entities-title svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+    
+    .nac-entities-toggle {
+      transition: transform 0.2s ease;
+    }
+    
+    .nac-entities-section.collapsed .nac-entities-toggle {
+      transform: rotate(-90deg);
+    }
+    
+    .nac-entities-content {
+      margin-top: 12px;
+      display: grid;
+      gap: 12px;
+    }
+    
+    .nac-entities-section.collapsed .nac-entities-content {
+      display: none;
+    }
+    
+    .nac-entity-group {
+      background: var(--nac-background);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    
+    .nac-entity-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    
+    .nac-entity-group-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    
+    .nac-entity-group-title svg {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+    }
+    
+    .nac-entity-count {
+      font-size: 11px;
+      background: var(--nac-primary);
+      color: white;
+      padding: 2px 6px;
+      border-radius: 10px;
+      font-weight: 500;
+    }
+    
+    .nac-entity-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    
+    .nac-entity-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 16px;
+      padding: 4px 8px 4px 10px;
+      font-size: 12px;
+      color: var(--nac-text);
+      transition: all 0.15s ease;
+    }
+    
+    .nac-entity-tag:hover {
+      border-color: var(--nac-primary);
+      background: var(--nac-surface-hover);
+    }
+    
+    .nac-entity-tag.person {
+      border-color: #4ade80;
+      background: rgba(74, 222, 128, 0.1);
+    }
+    
+    .nac-entity-tag.organization {
+      border-color: #60a5fa;
+      background: rgba(96, 165, 250, 0.1);
+    }
+    
+    .nac-entity-tag-remove {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      border: none;
+      background: transparent;
+      color: var(--nac-text-muted);
+      cursor: pointer;
+      border-radius: 50%;
+      padding: 0;
+      font-size: 14px;
+      line-height: 1;
+      transition: all 0.15s ease;
+    }
+    
+    .nac-entity-tag-remove:hover {
+      background: var(--nac-error);
+      color: white;
+    }
+    
+    .nac-entity-add {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    
+    .nac-entity-add-input {
+      flex: 1;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--nac-text);
+      outline: none;
+    }
+    
+    .nac-entity-add-input:focus {
+      border-color: var(--nac-primary);
+    }
+    
+    .nac-entity-add-input::placeholder {
+      color: var(--nac-text-dim);
+    }
+    
+    .nac-entity-add-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      background: var(--nac-primary);
+      border: none;
+      border-radius: 6px;
+      color: white;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    
+    .nac-entity-add-btn:hover {
+      background: var(--nac-primary-hover);
+    }
+    
+    .nac-entity-add-btn svg {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+    }
+    
+    .nac-entity-empty {
+      font-size: 12px;
+      color: var(--nac-text-dim);
+      font-style: italic;
+      padding: 4px 0;
+    }
+    
+    /* Edit Mode Styles */
+    .nac-article-header {
+      margin-bottom: 15px;
+    }
+    .nac-article-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .nac-field-group {
+      margin-bottom: 15px;
+    }
+    .nac-field-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 5px;
+      color: var(--nac-text);
+    }
+    .nac-field-preview {
+      padding: 10px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      min-height: 20px;
+      color: var(--nac-text);
+    }
+    .nac-content-preview {
+      max-height: 300px;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .nac-field-edit {
+      width: 100%;
+      padding: 10px;
+      border: 2px solid var(--nac-primary);
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 14px;
+      box-sizing: border-box;
+      background: var(--nac-background);
+      color: var(--nac-text);
+    }
+    .nac-field-edit:focus {
+      outline: none;
+      border-color: var(--nac-secondary);
+      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+    }
+    .nac-content-edit {
+      min-height: 250px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      resize: vertical;
+    }
+    .nac-edit-tools {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 10px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    .nac-tools-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+    }
+    .nac-edit-tools button {
+      padding: 4px 8px;
+      font-size: 11px;
+      border: 1px solid var(--nac-border);
+      border-radius: 4px;
+      background: var(--nac-background);
+      color: var(--nac-text);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .nac-edit-tools button:hover {
+      background: var(--nac-surface-hover);
+      border-color: var(--nac-primary);
+    }
+    .nac-btn-danger {
+      background: var(--nac-error) !important;
+      color: white !important;
+      border-color: var(--nac-error) !important;
+    }
+    .nac-btn-danger:hover {
+      background: #d32f2f !important;
+      border-color: #d32f2f !important;
+    }
+    .nac-edit-char-count {
+      font-weight: normal;
+      font-size: 11px;
+      color: var(--nac-text-muted);
+    }
+    .nac-excerpt-preview {
+      font-style: italic;
+      color: var(--nac-text-muted);
+    }
   `;
 
   // ============================================
@@ -2315,7 +2965,13 @@
       isOpen: false,
       activeTab: 'readable',
       article: null,
-      markdown: ''
+      markdown: '',
+      entities: {
+        people: [],
+        organizations: []
+      },
+      editMode: false,
+      originalArticle: null
     },
     
     // SVG Icons
@@ -2497,6 +3153,58 @@
             </div>
           </div>
           
+          <!-- Entities Section (People & Organizations) -->
+          <div class="nac-entities-section" id="nac-entities-section">
+            <div class="nac-entities-header" id="nac-entities-header">
+              <div class="nac-entities-title">
+                ${UI.icons.person}
+                <span>People & Organizations</span>
+              </div>
+              <span class="nac-entities-toggle">${UI.icons.chevronDown}</span>
+            </div>
+            <div class="nac-entities-content">
+              <!-- People Quoted -->
+              <div class="nac-entity-group">
+                <div class="nac-entity-group-header">
+                  <div class="nac-entity-group-title">
+                    ${UI.icons.person}
+                    <span>People Quoted</span>
+                  </div>
+                  <span class="nac-entity-count" id="nac-people-count">0</span>
+                </div>
+                <div class="nac-entity-tags" id="nac-people-tags">
+                  <span class="nac-entity-empty">No people detected</span>
+                </div>
+                <div class="nac-entity-add">
+                  <input type="text" class="nac-entity-add-input" id="nac-add-person-input" placeholder="Add person name...">
+                  <button class="nac-entity-add-btn" id="nac-add-person-btn" title="Add person">
+                    ${UI.icons.add}
+                  </button>
+                </div>
+              </div>
+              
+              <!-- Organizations Referenced -->
+              <div class="nac-entity-group">
+                <div class="nac-entity-group-header">
+                  <div class="nac-entity-group-title">
+                    ${UI.icons.business}
+                    <span>Organizations Referenced</span>
+                  </div>
+                  <span class="nac-entity-count" id="nac-orgs-count">0</span>
+                </div>
+                <div class="nac-entity-tags" id="nac-orgs-tags">
+                  <span class="nac-entity-empty">No organizations detected</span>
+                </div>
+                <div class="nac-entity-add">
+                  <input type="text" class="nac-entity-add-input" id="nac-add-org-input" placeholder="Add organization name...">
+                  <button class="nac-entity-add-btn" id="nac-add-org-btn" title="Add organization">
+                    ${UI.icons.add}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
           <!-- Media Handling -->
           <div class="nac-form-group">
             <label class="nac-form-label">Media Handling</label>
@@ -2527,6 +3235,46 @@
                   </label>
                 `).join('')}
               </div>
+            </div>
+          </div>
+          
+          <!-- Publishing Options (Multi-Pubkey) -->
+          <div class="nac-publishing-options" id="nac-publishing-options">
+            <div class="nac-options-header" id="nac-options-header">
+              ⚙️ Publishing Options <span class="nac-toggle-icon">▼</span>
+            </div>
+            <div class="nac-options-content">
+              <!-- Publication pubkey - always shown, this is the signer -->
+              <div class="nac-option-row">
+                <label>
+                  <input type="checkbox" id="nac-include-publication" checked disabled>
+                  📰 Publication (signer):
+                </label>
+                <span id="nac-publication-name" class="nac-name-display">Select above</span>
+              </div>
+              <div class="nac-option-description">The publication's key signs and publishes the event</div>
+              
+              <!-- Author pubkey - optional -->
+              <div class="nac-option-row">
+                <label>
+                  <input type="checkbox" id="nac-include-author">
+                  ✍️ Author pubkey:
+                </label>
+                <input type="text" id="nac-author-pubkey" placeholder="npub1... or hex pubkey">
+                <button id="nac-lookup-author" title="Lookup author pubkey from NOSTR">🔍</button>
+              </div>
+              <div class="nac-option-description">Add author's NOSTR pubkey as a p-tag with 'author' marker</div>
+              
+              <!-- Capturing user pubkey - optional -->
+              <div class="nac-option-row">
+                <label>
+                  <input type="checkbox" id="nac-include-capturer">
+                  👤 Capturing user (you):
+                </label>
+                <button id="nac-set-capturer">Set from NIP-07</button>
+                <span id="nac-capturer-display" class="nac-not-set">Not set</span>
+              </div>
+              <div class="nac-option-description">Credit yourself as the person who captured this article</div>
             </div>
           </div>
           
@@ -2562,13 +3310,26 @@
       document.getElementById('nac-download').addEventListener('click', () => UI.downloadMarkdown());
       
       // Publication selector
-      document.getElementById('nac-publication').addEventListener('change', (e) => {
+      document.getElementById('nac-publication').addEventListener('change', async (e) => {
         const newPubForm = document.getElementById('nac-new-publication');
         if (e.target.value === '__new__') {
           newPubForm.style.display = 'block';
           newPubForm.classList.add('open');
+          UI.updatePublicationDisplay(null, null);
+        } else if (e.target.value === '__nip07__') {
+          newPubForm.style.display = 'none';
+          // For NIP-07, show a placeholder until we get the pubkey
+          UI.updatePublicationDisplay('NIP-07 Extension', 'Will be retrieved at publish time');
+        } else if (e.target.value) {
+          newPubForm.style.display = 'none';
+          // Load publication and update display
+          const pub = await Storage.publications.get(e.target.value);
+          if (pub) {
+            UI.updatePublicationDisplay(pub.name, pub.pubkey);
+          }
         } else {
           newPubForm.style.display = 'none';
+          UI.updatePublicationDisplay(null, null);
         }
         UI.updatePublishButton();
       });
@@ -2611,6 +3372,88 @@
       
       // Publish button
       document.getElementById('nac-publish-btn').addEventListener('click', () => UI.publish());
+      
+      // Publishing options toggle
+      document.getElementById('nac-options-header').addEventListener('click', () => {
+        const optionsEl = document.getElementById('nac-publishing-options');
+        optionsEl.classList.toggle('expanded');
+      });
+      
+      // Set capturer from NIP-07 button
+      document.getElementById('nac-set-capturer').addEventListener('click', async () => {
+        await UI.setCapturerFromNIP07();
+      });
+      
+      // Lookup author pubkey button
+      document.getElementById('nac-lookup-author').addEventListener('click', () => {
+        UI.lookupAuthorPubkey();
+      });
+      
+      // Author pubkey checkbox
+      document.getElementById('nac-include-author').addEventListener('change', (e) => {
+        const pubkeyInput = document.getElementById('nac-author-pubkey');
+        pubkeyInput.disabled = !e.target.checked;
+      });
+      
+      // Capturer checkbox
+      document.getElementById('nac-include-capturer').addEventListener('change', (e) => {
+        const capturer = Storage.capturingUser.get();
+        if (capturer) {
+          Storage.capturingUser.setEnabled(e.target.checked);
+        }
+      });
+      
+      // Load saved capturer on panel open
+      UI.loadCapturerSettings();
+      
+      // Entities section toggle
+      document.getElementById('nac-entities-header').addEventListener('click', () => {
+        document.getElementById('nac-entities-section').classList.toggle('collapsed');
+      });
+      
+      // Add person button
+      document.getElementById('nac-add-person-btn').addEventListener('click', () => {
+        const input = document.getElementById('nac-add-person-input');
+        const name = input.value.trim();
+        if (name) {
+          UI.addEntity('person', name);
+          input.value = '';
+        }
+      });
+      
+      // Add person on Enter
+      document.getElementById('nac-add-person-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const name = e.target.value.trim();
+          if (name) {
+            UI.addEntity('person', name);
+            e.target.value = '';
+          }
+        }
+      });
+      
+      // Add organization button
+      document.getElementById('nac-add-org-btn').addEventListener('click', () => {
+        const input = document.getElementById('nac-add-org-input');
+        const name = input.value.trim();
+        if (name) {
+          UI.addEntity('organization', name);
+          input.value = '';
+        }
+      });
+      
+      // Add organization on Enter
+      document.getElementById('nac-add-org-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const name = e.target.value.trim();
+          if (name) {
+            UI.addEntity('organization', name);
+            e.target.value = '';
+          }
+        }
+      });
       
       // Escape key to close panel
       document.addEventListener('keydown', (e) => {
@@ -2656,6 +3499,10 @@
     loadArticle: async () => {
       const contentArea = document.getElementById('nac-content');
       
+      // Reset edit mode state for new article
+      UI.state.editMode = false;
+      UI.state.originalArticle = null;
+      
       // Show loading
       contentArea.innerHTML = `
         <div class="nac-empty">
@@ -2682,6 +3529,11 @@
       UI.state.article = article;
       UI.state.markdown = ContentProcessor.htmlToMarkdown(article.content);
       
+      // Extract entities from article content
+      const entities = ContentProcessor.extractEntities(article.content, article.textContent);
+      UI.state.entities = entities;
+      UI.renderEntities();
+      
       // Pre-fill publication domain
       document.getElementById('nac-pub-domain').value = article.domain;
       
@@ -2702,25 +3554,281 @@
       if (!article) return;
       
       if (UI.state.activeTab === 'readable') {
+        // Build URL info section - show both URLs if they differ
+        let urlInfoHtml = '';
+        if (article.urlSource === 'canonical' && article.sourceUrl !== article.url) {
+          urlInfoHtml = `
+            <div class="nac-url-source-info">
+              <div class="nac-url-item nac-url-canonical">
+                <span class="nac-url-label">📎 Canonical URL:</span>
+                <span class="nac-url-value">${Utils.escapeHtml(article.url)}</span>
+              </div>
+              <div class="nac-url-item nac-url-browser">
+                <span class="nac-url-label">🔗 Browser URL:</span>
+                <span class="nac-url-value">${Utils.escapeHtml(article.sourceUrl)}</span>
+              </div>
+            </div>
+          `;
+        } else {
+          urlInfoHtml = `<span>🔗 ${article.domain}</span>`;
+        }
+        
+        // Calculate content preview (truncated for display)
+        const contentPreview = UI.state.markdown.replace(/\n/g, '<br>').substring(0, 2000) +
+          (UI.state.markdown.length > 2000 ? '...' : '');
+        
         contentArea.innerHTML = `
           <div class="nac-content-readable">
+            <!-- Edit Mode Header -->
+            <div class="nac-article-header">
+              <div class="nac-article-actions">
+                <button id="nac-edit-toggle" class="nac-btn nac-btn-secondary">
+                  ✏️ Edit
+                </button>
+                <button id="nac-revert-btn" class="nac-btn nac-btn-danger" style="display: none;">
+                  ↩️ Revert
+                </button>
+              </div>
+            </div>
+            
+            <!-- Quick Clean Tools (only visible in edit mode) -->
+            <div class="nac-edit-tools" id="nac-edit-tools" style="display: none;">
+              <span class="nac-tools-label">Quick Clean:</span>
+              <button id="nac-clean-ads" title="Remove common ad patterns">🚫 Remove Ads</button>
+              <button id="nac-clean-related" title="Remove 'Related Articles' sections">📰 Remove Related</button>
+              <button id="nac-clean-social" title="Remove social share prompts">📱 Remove Social</button>
+              <button id="nac-clean-whitespace" title="Clean up extra whitespace">📄 Fix Spacing</button>
+            </div>
+            
+            <!-- Title Section -->
+            <div class="nac-field-group">
+              <label class="nac-field-label">Title</label>
+              <div class="nac-field-preview" id="nac-title-preview">${Utils.escapeHtml(article.title)}</div>
+              <input type="text" class="nac-field-edit" id="nac-title-edit" style="display: none;" value="">
+            </div>
+            
+            <!-- Excerpt/Summary Section -->
+            <div class="nac-field-group">
+              <label class="nac-field-label">Excerpt/Summary</label>
+              <div class="nac-field-preview nac-excerpt-preview" id="nac-excerpt-preview">${article.excerpt ? Utils.escapeHtml(article.excerpt) : '<em>No excerpt</em>'}</div>
+              <textarea class="nac-field-edit" id="nac-excerpt-edit" rows="3" style="display: none;"></textarea>
+            </div>
+            
+            <!-- Content Body Section -->
+            <div class="nac-field-group">
+              <label class="nac-field-label">
+                Article Content
+                <span class="nac-edit-char-count" id="nac-content-chars">(${UI.state.markdown.length} chars)</span>
+              </label>
+              <div class="nac-field-preview nac-content-preview" id="nac-content-preview">${contentPreview}</div>
+              <textarea class="nac-field-edit nac-content-edit" id="nac-content-edit" rows="15" style="display: none;"></textarea>
+            </div>
+            
+            <!-- Article Info -->
             <div class="nac-article-meta">
-              <h1 class="nac-article-title">${Utils.escapeHtml(article.title)}</h1>
               <div class="nac-article-info">
                 ${article.byline ? `<span>${UI.icons.person} ${Utils.escapeHtml(article.byline)}</span>` : ''}
                 ${article.publishedAt ? `<span>📅 ${Utils.formatDate(article.publishedAt)}</span>` : ''}
-                <span>🔗 ${article.domain}</span>
+                ${article.urlSource !== 'canonical' ? `<span>🔗 ${article.domain}</span>` : ''}
               </div>
+              ${urlInfoHtml}
             </div>
-            ${article.content}
           </div>
         `;
+        
+        // Attach edit mode event listeners
+        UI.attachEditModeListeners();
+        
       } else if (UI.state.activeTab === 'markdown') {
         contentArea.innerHTML = `
           <div class="nac-content-markdown">${Utils.escapeHtml(UI.state.markdown)}</div>
         `;
       } else if (UI.state.activeTab === 'metadata') {
         UI.displayMetadataTab();
+      }
+    },
+    
+    // Attach edit mode event listeners
+    attachEditModeListeners: () => {
+      const editToggle = document.getElementById('nac-edit-toggle');
+      const revertBtn = document.getElementById('nac-revert-btn');
+      const contentEdit = document.getElementById('nac-content-edit');
+      
+      if (editToggle) {
+        editToggle.addEventListener('click', UI.toggleEditMode);
+      }
+      if (revertBtn) {
+        revertBtn.addEventListener('click', UI.revertChanges);
+      }
+      if (contentEdit) {
+        contentEdit.addEventListener('input', UI.updateCharCount);
+      }
+      
+      // Quick clean buttons
+      document.getElementById('nac-clean-ads')?.addEventListener('click', () => UI.cleanContent('ads'));
+      document.getElementById('nac-clean-related')?.addEventListener('click', () => UI.cleanContent('related'));
+      document.getElementById('nac-clean-social')?.addEventListener('click', () => UI.cleanContent('social'));
+      document.getElementById('nac-clean-whitespace')?.addEventListener('click', () => UI.cleanContent('whitespace'));
+    },
+    
+    // Toggle edit mode
+    toggleEditMode: () => {
+      UI.state.editMode = !UI.state.editMode;
+      
+      const editBtn = document.getElementById('nac-edit-toggle');
+      const revertBtn = document.getElementById('nac-revert-btn');
+      const editTools = document.getElementById('nac-edit-tools');
+      
+      if (UI.state.editMode) {
+        // Entering edit mode - save original and show edit fields
+        if (!UI.state.originalArticle) {
+          UI.state.originalArticle = {
+            title: UI.state.article.title,
+            excerpt: UI.state.article.excerpt || '',
+            content: UI.state.markdown
+          };
+        }
+        
+        editBtn.textContent = '👁️ Preview';
+        editBtn.classList.add('nac-btn-primary');
+        editBtn.classList.remove('nac-btn-secondary');
+        revertBtn.style.display = 'inline-block';
+        if (editTools) editTools.style.display = 'flex';
+        
+        // Show edit fields, hide previews
+        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'block');
+        
+        // Populate edit fields
+        document.getElementById('nac-title-edit').value = UI.state.article.title;
+        document.getElementById('nac-excerpt-edit').value = UI.state.article.excerpt || '';
+        document.getElementById('nac-content-edit').value = UI.state.markdown;
+      } else {
+        // Exiting edit mode - update article from fields and show previews
+        UI.state.article.title = document.getElementById('nac-title-edit').value;
+        UI.state.article.excerpt = document.getElementById('nac-excerpt-edit').value;
+        UI.state.markdown = document.getElementById('nac-content-edit').value;
+        
+        editBtn.textContent = '✏️ Edit';
+        editBtn.classList.remove('nac-btn-primary');
+        editBtn.classList.add('nac-btn-secondary');
+        if (editTools) editTools.style.display = 'none';
+        
+        // Show previews, hide edit fields
+        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
+        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'none');
+        
+        // Update previews with new content
+        UI.updatePreviews();
+      }
+    },
+    
+    // Update preview displays
+    updatePreviews: () => {
+      const titlePreview = document.getElementById('nac-title-preview');
+      const excerptPreview = document.getElementById('nac-excerpt-preview');
+      const contentPreview = document.getElementById('nac-content-preview');
+      const charCount = document.getElementById('nac-content-chars');
+      
+      if (titlePreview) {
+        titlePreview.textContent = UI.state.article.title;
+      }
+      if (excerptPreview) {
+        excerptPreview.innerHTML = UI.state.article.excerpt ?
+          Utils.escapeHtml(UI.state.article.excerpt) : '<em>No excerpt</em>';
+      }
+      if (contentPreview) {
+        // Render markdown content as HTML for preview (basic line breaks)
+        contentPreview.innerHTML = UI.state.markdown.replace(/\n/g, '<br>').substring(0, 2000) +
+          (UI.state.markdown.length > 2000 ? '...' : '');
+      }
+      if (charCount) {
+        charCount.textContent = `(${UI.state.markdown.length} chars)`;
+      }
+    },
+    
+    // Revert changes to original
+    revertChanges: () => {
+      if (UI.state.originalArticle) {
+        UI.state.article.title = UI.state.originalArticle.title;
+        UI.state.article.excerpt = UI.state.originalArticle.excerpt;
+        UI.state.markdown = UI.state.originalArticle.content;
+        UI.state.originalArticle = null;
+        UI.state.editMode = false;
+        
+        // Update UI
+        const editBtn = document.getElementById('nac-edit-toggle');
+        const revertBtn = document.getElementById('nac-revert-btn');
+        const editTools = document.getElementById('nac-edit-tools');
+        
+        editBtn.textContent = '✏️ Edit';
+        editBtn.classList.remove('nac-btn-primary');
+        editBtn.classList.add('nac-btn-secondary');
+        revertBtn.style.display = 'none';
+        if (editTools) editTools.style.display = 'none';
+        
+        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
+        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'none');
+        
+        UI.updatePreviews();
+        UI.showToast('Changes reverted', 'info');
+      }
+    },
+    
+    // Clean content with various patterns
+    cleanContent: (type) => {
+      const contentEdit = document.getElementById('nac-content-edit');
+      if (!contentEdit) return;
+      
+      let content = contentEdit.value;
+      
+      switch(type) {
+        case 'ads':
+          // Remove common ad patterns
+          content = content.replace(/\[?advertisement\]?/gi, '');
+          content = content.replace(/sponsored content/gi, '');
+          content = content.replace(/\[?promoted\]?/gi, '');
+          content = content.replace(/click here to .*/gi, '');
+          content = content.replace(/\[ad\]/gi, '');
+          content = content.replace(/advertisement/gi, '');
+          break;
+        case 'related':
+          // Remove "Related Articles" type sections
+          content = content.replace(/related articles?:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
+          content = content.replace(/you may also like:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
+          content = content.replace(/read more:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
+          content = content.replace(/more from .+:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
+          content = content.replace(/recommended for you:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
+          break;
+        case 'social':
+          // Remove social share prompts
+          content = content.replace(/share this (article|story|post)/gi, '');
+          content = content.replace(/follow us on .*/gi, '');
+          content = content.replace(/subscribe to our .*/gi, '');
+          content = content.replace(/sign up for .*/gi, '');
+          content = content.replace(/join our .*/gi, '');
+          content = content.replace(/like us on .*/gi, '');
+          break;
+        case 'whitespace':
+          // Clean up whitespace
+          content = content.replace(/\n{3,}/g, '\n\n');
+          content = content.replace(/[ \t]+\n/g, '\n');
+          content = content.replace(/\n[ \t]+/g, '\n');
+          content = content.trim();
+          break;
+      }
+      
+      contentEdit.value = content;
+      UI.updateCharCount();
+      UI.showToast('Content cleaned', 'success');
+    },
+    
+    // Update character count display
+    updateCharCount: () => {
+      const contentEdit = document.getElementById('nac-content-edit');
+      const charCount = document.getElementById('nac-content-chars');
+      if (contentEdit && charCount) {
+        charCount.textContent = `(${contentEdit.value.length} chars)`;
       }
     },
     
@@ -3972,6 +5080,221 @@
       UI.updatePublishButton();
     },
     
+    // Render entities in the UI
+    renderEntities: () => {
+      const { people, organizations } = UI.state.entities;
+      
+      // Render people
+      const peopleContainer = document.getElementById('nac-people-tags');
+      const peopleCount = document.getElementById('nac-people-count');
+      
+      if (people.length === 0) {
+        peopleContainer.innerHTML = '<span class="nac-entity-empty">No people detected</span>';
+      } else {
+        peopleContainer.innerHTML = people.map((person, index) => `
+          <span class="nac-entity-tag person" data-index="${index}" data-type="person">
+            <span class="nac-entity-name">${Utils.escapeHtml(person.name)}</span>
+            ${person.context ? `<span class="nac-entity-context">(${person.context})</span>` : ''}
+            <button class="nac-entity-tag-remove" data-index="${index}" data-type="person" title="Remove">×</button>
+          </span>
+        `).join('');
+        
+        // Add click handlers for remove buttons
+        peopleContainer.querySelectorAll('.nac-entity-tag-remove').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            UI.removeEntity('person', parseInt(btn.dataset.index));
+          });
+        });
+      }
+      peopleCount.textContent = people.length;
+      
+      // Render organizations
+      const orgsContainer = document.getElementById('nac-orgs-tags');
+      const orgsCount = document.getElementById('nac-orgs-count');
+      
+      if (organizations.length === 0) {
+        orgsContainer.innerHTML = '<span class="nac-entity-empty">No organizations detected</span>';
+      } else {
+        orgsContainer.innerHTML = organizations.map((org, index) => `
+          <span class="nac-entity-tag organization" data-index="${index}" data-type="organization">
+            <span class="nac-entity-name">${Utils.escapeHtml(org.name)}</span>
+            <button class="nac-entity-tag-remove" data-index="${index}" data-type="organization" title="Remove">×</button>
+          </span>
+        `).join('');
+        
+        // Add click handlers for remove buttons
+        orgsContainer.querySelectorAll('.nac-entity-tag-remove').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            UI.removeEntity('organization', parseInt(btn.dataset.index));
+          });
+        });
+      }
+      orgsCount.textContent = organizations.length;
+    },
+    
+    // Add a new entity
+    addEntity: (type, name) => {
+      if (!name || name.trim() === '') return;
+      
+      const trimmedName = name.trim();
+      
+      if (type === 'person') {
+        // Check for duplicates
+        const exists = UI.state.entities.people.some(
+          p => p.name.toLowerCase() === trimmedName.toLowerCase()
+        );
+        if (!exists) {
+          UI.state.entities.people.push({ name: trimmedName, context: 'manual' });
+          UI.renderEntities();
+          Utils.log('Added person:', trimmedName);
+        } else {
+          UI.showToast('Person already added', 'warning');
+        }
+      } else if (type === 'organization') {
+        // Check for duplicates
+        const exists = UI.state.entities.organizations.some(
+          o => o.name.toLowerCase() === trimmedName.toLowerCase()
+        );
+        if (!exists) {
+          UI.state.entities.organizations.push({ name: trimmedName });
+          UI.renderEntities();
+          Utils.log('Added organization:', trimmedName);
+        } else {
+          UI.showToast('Organization already added', 'warning');
+        }
+      }
+    },
+    
+    // Remove an entity
+    removeEntity: (type, index) => {
+      if (type === 'person') {
+        const removed = UI.state.entities.people.splice(index, 1);
+        Utils.log('Removed person:', removed[0]?.name);
+      } else if (type === 'organization') {
+        const removed = UI.state.entities.organizations.splice(index, 1);
+        Utils.log('Removed organization:', removed[0]?.name);
+      }
+      UI.renderEntities();
+    },
+    
+    // Set capturing user from NIP-07 extension
+    setCapturerFromNIP07: async () => {
+      const btn = document.getElementById('nac-set-capturer');
+      const displayEl = document.getElementById('nac-capturer-display');
+      const checkbox = document.getElementById('nac-include-capturer');
+      
+      if (!NIP07Client.checkAvailability()) {
+        UI.showToast('No NIP-07 extension detected (install nos2x, Alby, etc.)', 'error');
+        return;
+      }
+      
+      btn.disabled = true;
+      btn.textContent = 'Loading...';
+      
+      try {
+        const pubkey = await window.nostr.getPublicKey();
+        const npub = NostrCrypto.hexToNpub(pubkey);
+        
+        // Try to get profile name from extension or use shortened npub
+        let name = npub.substring(0, 12) + '...';
+        
+        // Store the capturer
+        Storage.capturingUser.set(pubkey, npub, name);
+        
+        // Update UI
+        displayEl.textContent = name;
+        displayEl.title = npub;
+        displayEl.className = 'nac-name-display';
+        checkbox.checked = true;
+        checkbox.disabled = false;
+        
+        UI.showToast('Capturing user set from NIP-07!', 'success');
+      } catch (error) {
+        Utils.error('Failed to get pubkey from NIP-07:', error);
+        UI.showToast('Failed to get pubkey from extension', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Set from NIP-07';
+      }
+    },
+    
+    // Lookup and validate author pubkey
+    lookupAuthorPubkey: () => {
+      const input = document.getElementById('nac-author-pubkey');
+      const checkbox = document.getElementById('nac-include-author');
+      const value = input.value.trim();
+      
+      if (!value) {
+        UI.showToast('Enter an npub or hex pubkey first', 'error');
+        return;
+      }
+      
+      try {
+        let hexPubkey;
+        
+        if (value.startsWith('npub1')) {
+          // Convert npub to hex
+          hexPubkey = NostrCrypto.npubToHex(value);
+        } else if (/^[0-9a-fA-F]{64}$/.test(value)) {
+          // Already hex
+          hexPubkey = value.toLowerCase();
+        } else {
+          throw new Error('Invalid pubkey format');
+        }
+        
+        // Validate by converting back to npub
+        const npub = NostrCrypto.hexToNpub(hexPubkey);
+        
+        // Store the validated hex pubkey
+        input.dataset.hexPubkey = hexPubkey;
+        input.value = npub;
+        checkbox.checked = true;
+        
+        UI.showToast('Author pubkey validated!', 'success');
+      } catch (error) {
+        Utils.error('Invalid pubkey:', error);
+        UI.showToast('Invalid pubkey format. Use npub1... or 64-char hex', 'error');
+        input.dataset.hexPubkey = '';
+      }
+    },
+    
+    // Load saved capturer settings on panel open
+    loadCapturerSettings: () => {
+      const capturer = Storage.capturingUser.get();
+      const displayEl = document.getElementById('nac-capturer-display');
+      const checkbox = document.getElementById('nac-include-capturer');
+      
+      if (capturer && capturer.pubkey) {
+        displayEl.textContent = capturer.name || capturer.npub.substring(0, 12) + '...';
+        displayEl.title = capturer.npub;
+        displayEl.className = 'nac-name-display';
+        checkbox.checked = capturer.enabled !== false;
+        checkbox.disabled = false;
+      } else {
+        displayEl.textContent = 'Not set';
+        displayEl.className = 'nac-not-set';
+        checkbox.checked = false;
+        checkbox.disabled = true;
+      }
+    },
+    
+    // Update publication name display in Publishing Options
+    updatePublicationDisplay: (name, pubkey) => {
+      const displayEl = document.getElementById('nac-publication-name');
+      if (displayEl) {
+        if (name && pubkey) {
+          displayEl.textContent = name;
+          displayEl.title = pubkey;
+          displayEl.className = 'nac-name-display';
+        } else {
+          displayEl.textContent = 'Select above';
+          displayEl.className = 'nac-not-set';
+        }
+      }
+    },
+    
     // Add tag
     addTag: (tag) => {
       const container = document.getElementById('nac-tags-container');
@@ -4257,12 +5580,24 @@
             markdown: UI.state.markdown
           };
           
+          // Get publishing options
+          const includeAuthorOpt = document.getElementById('nac-include-author')?.checked;
+          const authorPubkeyInput = document.getElementById('nac-author-pubkey');
+          const authorPubkeyFromInput = authorPubkeyInput?.dataset?.hexPubkey || null;
+          const includeCapturerOpt = document.getElementById('nac-include-capturer')?.checked;
+          const capturer = Storage.capturingUser.get();
+          const capturerPubkeyVal = (includeCapturerOpt && capturer?.enabled) ? capturer.pubkey : null;
+          
           Utils.log('Building article event...');
           const event = await EventBuilder.buildArticleEvent(article, {
             pubkey: pubkey,
-            authorPubkey: authorPubkey,
+            authorPubkey: authorPubkeyFromInput || authorPubkey,
+            includeAuthor: includeAuthorOpt && !!(authorPubkeyFromInput || authorPubkey),
+            capturerPubkey: capturerPubkeyVal,
+            includeCapturer: includeCapturerOpt && !!capturerPubkeyVal,
             tags: tags,
-            mediaHandling: mediaHandling
+            mediaHandling: mediaHandling,
+            entities: UI.state.entities
           });
           Utils.log('Built unsigned event:', event);
           
@@ -4409,11 +5744,23 @@
             markdown: UI.state.markdown
           };
           
+          // Get publishing options
+          const includeAuthorOpt = document.getElementById('nac-include-author')?.checked;
+          const authorPubkeyInput = document.getElementById('nac-author-pubkey');
+          const authorPubkeyFromInput = authorPubkeyInput?.dataset?.hexPubkey || null;
+          const includeCapturerOpt = document.getElementById('nac-include-capturer')?.checked;
+          const capturer = Storage.capturingUser.get();
+          const capturerPubkeyVal = (includeCapturerOpt && capturer?.enabled) ? capturer.pubkey : null;
+          
           const event = await EventBuilder.buildArticleEvent(article, {
             pubkey: publication.pubkey,
-            authorPubkey: authorPubkey,
+            authorPubkey: authorPubkeyFromInput || authorPubkey,
+            includeAuthor: includeAuthorOpt && !!(authorPubkeyFromInput || authorPubkey),
+            capturerPubkey: capturerPubkeyVal,
+            includeCapturer: includeCapturerOpt && !!capturerPubkeyVal,
             tags: tags,
-            mediaHandling: mediaHandling
+            mediaHandling: mediaHandling,
+            entities: UI.state.entities
           });
           
           // Sign the event with NSecBunker
@@ -5199,8 +6546,12 @@
       const {
         pubkey,
         authorPubkey,
+        includeAuthor = false,
+        capturerPubkey,
+        includeCapturer = false,
         tags: additionalTags = [],
-        mediaHandling = 'reference'
+        mediaHandling = 'reference',
+        entities = { people: [], organizations: [] }
       } = options;
       
       if (!pubkey) {
@@ -5248,9 +6599,14 @@
       // Add original URL as 'r' tag
       tags.push(['r', article.url]);
       
-      // Add author reference if provided
-      if (authorPubkey) {
+      // Add author reference if provided and enabled
+      if (includeAuthor && authorPubkey) {
         tags.push(['p', authorPubkey, '', 'author']);
+      }
+      
+      // Add capturer reference if provided and enabled
+      if (includeCapturer && capturerPubkey) {
+        tags.push(['p', capturerPubkey, '', 'capturer']);
       }
       
       // Add author name as 'author' tag
@@ -5268,6 +6624,19 @@
           tags.push(['t', tag.toLowerCase()]);
         } else if (Array.isArray(tag)) {
           tags.push(tag);
+        }
+      }
+      
+      // Add entity tags (people and organizations)
+      if (entities.people && entities.people.length > 0) {
+        for (const person of entities.people) {
+          tags.push(['person', person.name, person.context || 'referenced']);
+        }
+      }
+      
+      if (entities.organizations && entities.organizations.length > 0) {
+        for (const org of entities.organizations) {
+          tags.push(['org', org.name]);
         }
       }
       
