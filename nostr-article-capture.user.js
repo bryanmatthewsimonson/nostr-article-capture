@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      1.16.0
+// @version      1.17.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles in readability format, convert to markdown, and publish to NOSTR
@@ -7524,7 +7524,7 @@
       if (!reader) return;
       
       // Show reader
-      reader.classList.add('open');
+      reader.classList.add('active');
       document.body.style.overflow = 'hidden';
       UI.state.immersiveReaderOpen = true;
       
@@ -7543,7 +7543,7 @@
       
       const reader = document.getElementById('nac-immersive-reader');
       if (reader) {
-        reader.classList.remove('open');
+        reader.classList.remove('active');
       }
       
       document.body.style.overflow = '';
