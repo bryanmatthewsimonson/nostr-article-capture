@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      1.12.0
+// @version      1.16.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles in readability format, convert to markdown, and publish to NOSTR
@@ -35,7 +35,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '1.12.0',
+    version: '1.16.0',
     debug: true,
     
     // NSecBunker settings
@@ -414,22 +414,41 @@
       }
     },
     
-    // Capturing user management - the person who submitted/captured the article
+    // User identity management - the user's personal NOSTR identity for signing metadata
+    // This is separate from publication identities - used for personal assertions (ratings, annotations, etc.)
+    userIdentity: {
+      get: () => {
+        return GM_getValue('nac_user_identity', null);
+      },
+      set: (data) => {
+        // data: { pubkey, npub, name, signerType: 'nip07'|'local'|'nsecbunker', nsec?: string (encrypted) }
+        GM_setValue('nac_user_identity', { ...data, enabled: true });
+      },
+      clear: () => {
+        GM_deleteValue('nac_user_identity');
+      },
+      isConfigured: () => {
+        const identity = GM_getValue('nac_user_identity', null);
+        return identity !== null && identity.pubkey;
+      }
+    },
+    
+    // Legacy alias for backward compatibility - maps to userIdentity
     capturingUser: {
       get: () => {
-        return GM_getValue('nac_capturing_user', null);
+        return GM_getValue('nac_user_identity', null);
       },
       set: (pubkey, npub, name) => {
-        GM_setValue('nac_capturing_user', { pubkey, npub, name, enabled: true });
+        GM_setValue('nac_user_identity', { pubkey, npub, name, signerType: 'nip07', enabled: true });
       },
       setEnabled: (enabled) => {
-        const current = GM_getValue('nac_capturing_user', null);
+        const current = GM_getValue('nac_user_identity', null);
         if (current) {
-          GM_setValue('nac_capturing_user', { ...current, enabled });
+          GM_setValue('nac_user_identity', { ...current, enabled });
         }
       },
       clear: () => {
-        GM_deleteValue('nac_capturing_user');
+        GM_deleteValue('nac_user_identity');
       }
     }
   };
@@ -870,8 +889,15 @@
       article.domain = Utils.getDomain(article.url);
       article.extractedAt = Math.floor(Date.now() / 1000);
       
-      // Try to get publication date
-      article.publishedAt = ContentProcessor.extractPublishedDate();
+      // Try to get publication date (returns { timestamp, source } or null)
+      const dateResult = ContentProcessor.extractPublishedDate();
+      if (dateResult) {
+        article.publishedAt = dateResult.timestamp;
+        article.publishedAtSource = dateResult.source;
+      } else {
+        article.publishedAt = null;
+        article.publishedAtSource = null;
+      }
       
       // Try to get featured image
       article.featuredImage = ContentProcessor.extractFeaturedImage();
@@ -880,33 +906,152 @@
       return article;
     },
     
-    // Extract published date from meta tags
+    // Extract published date from meta tags with comprehensive detection
     extractPublishedDate: () => {
-      const selectors = [
+      let dateSource = null;
+      
+      // Priority 1: JSON-LD structured data (most reliable)
+      const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const script of jsonLdScripts) {
+        try {
+          const data = JSON.parse(script.textContent);
+          // Handle both single object and array formats
+          const articles = Array.isArray(data) ? data : [data];
+          for (const item of articles) {
+            if (item['@type'] === 'Article' || item['@type'] === 'NewsArticle' || item['@type'] === 'BlogPosting') {
+              if (item.datePublished) {
+                const date = new Date(item.datePublished);
+                if (!isNaN(date.getTime())) {
+                  Utils.log('[NAC] Date from JSON-LD:', date);
+                  return { timestamp: Math.floor(date.getTime() / 1000), source: 'json-ld' };
+                }
+              }
+            }
+            // Check @graph structure (used by some sites)
+            if (item['@graph']) {
+              for (const graphItem of item['@graph']) {
+                if (graphItem.datePublished) {
+                  const date = new Date(graphItem.datePublished);
+                  if (!isNaN(date.getTime())) {
+                    Utils.log('[NAC] Date from JSON-LD @graph:', date);
+                    return { timestamp: Math.floor(date.getTime() / 1000), source: 'json-ld' };
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Invalid JSON, continue to next script
+        }
+      }
+      
+      // Priority 2: Meta tags (specific to general)
+      const metaSelectors = [
         'meta[property="article:published_time"]',
+        'meta[property="article:published"]',  // Substack uses this without _time
         'meta[name="publication_date"]',
         'meta[name="date"]',
-        'time[datetime]',
-        '.published-date',
-        '.post-date'
+        'meta[name="DC.date.issued"]',
+        'meta[property="og:article:published_time"]'
       ];
       
-      for (const selector of selectors) {
-        const element = document.querySelector(selector);
-        if (element) {
-          const date = element.getAttribute('content') || 
-                       element.getAttribute('datetime') ||
-                       element.textContent;
-          if (date) {
-            try {
-              return Math.floor(new Date(date).getTime() / 1000);
-            } catch (e) {
-              continue;
+      for (const selector of metaSelectors) {
+        const meta = document.querySelector(selector);
+        if (meta && meta.content) {
+          const date = new Date(meta.content);
+          if (!isNaN(date.getTime())) {
+            Utils.log('[NAC] Date from meta tag:', selector, date);
+            return { timestamp: Math.floor(date.getTime() / 1000), source: 'meta-tag' };
+          }
+        }
+      }
+      
+      // Priority 3: Platform-specific selectors (Substack, Medium, WordPress, etc.)
+      const platformSelectors = [
+        // Substack
+        '.post-meta time[datetime]',
+        '.post-header time[datetime]',
+        '[data-testid="post-date"]',
+        
+        // Medium
+        '.pw-published-date time[datetime]',
+        'span[data-testid="storyPublishDate"] time[datetime]',
+        
+        // WordPress
+        '.entry-date[datetime]',
+        '.posted-on time[datetime]',
+        '.article-date time[datetime]',
+        
+        // News sites
+        '.article-header time[datetime]',
+        '.byline time[datetime]',
+        '.dateline time[datetime]',
+        
+        // Generic article contexts (more specific before less)
+        'article header time[datetime]',
+        'article .meta time[datetime]',
+        '.article-meta time[datetime]'
+      ];
+      
+      for (const selector of platformSelectors) {
+        const el = document.querySelector(selector);
+        if (el) {
+          const datetime = el.getAttribute('datetime');
+          if (datetime) {
+            const date = new Date(datetime);
+            if (!isNaN(date.getTime())) {
+              Utils.log('[NAC] Date from platform selector:', selector, date);
+              return { timestamp: Math.floor(date.getTime() / 1000), source: 'platform-selector' };
             }
           }
         }
       }
       
+      // Priority 4: Generic time[datetime] - but only if it's likely the article date
+      // Avoid matching comment timestamps, last updated dates, etc.
+      const genericTime = document.querySelector('article time[datetime]:first-of-type, .post time[datetime]:first-of-type');
+      if (genericTime) {
+        const datetime = genericTime.getAttribute('datetime');
+        const date = new Date(datetime);
+        if (!isNaN(date.getTime())) {
+          Utils.log('[NAC] Date from generic time element:', date);
+          return { timestamp: Math.floor(date.getTime() / 1000), source: 'platform-selector' };
+        }
+      }
+      
+      // Priority 5: Text-based date parsing from common date display patterns
+      const textDateSelectors = [
+        '.published-date',
+        '.post-date',
+        '.date',
+        '.byline-date',
+        '[itemprop="datePublished"]'
+      ];
+      
+      for (const selector of textDateSelectors) {
+        const el = document.querySelector(selector);
+        if (el) {
+          // Try datetime attribute first
+          const datetime = el.getAttribute('datetime') || el.getAttribute('content');
+          if (datetime) {
+            const date = new Date(datetime);
+            if (!isNaN(date.getTime())) {
+              Utils.log('[NAC] Date from text selector datetime attr:', selector, date);
+              return { timestamp: Math.floor(date.getTime() / 1000), source: 'text-content' };
+            }
+          }
+          // Try parsing text content
+          const text = el.textContent.trim();
+          const date = new Date(text);
+          if (!isNaN(date.getTime())) {
+            Utils.log('[NAC] Date from text content:', selector, date);
+            return { timestamp: Math.floor(date.getTime() / 1000), source: 'text-content' };
+          }
+        }
+      }
+      
+      // No date found
+      Utils.log('[NAC] No publication date found');
       return null;
     },
     
@@ -2953,6 +3098,769 @@
       font-style: italic;
       color: var(--nac-text-muted);
     }
+    
+    /* Date Field Styles */
+    .nac-date-source {
+      font-weight: normal;
+      font-size: 10px;
+      color: var(--nac-text-muted);
+      margin-left: 10px;
+    }
+    .nac-date-inputs {
+      display: none;
+      gap: 10px;
+      align-items: center;
+    }
+    .nac-date-inputs.nac-field-edit-visible {
+      display: flex !important;
+    }
+    .nac-date-input, .nac-time-input {
+      padding: 8px;
+      border: 2px solid var(--nac-primary);
+      border-radius: 6px;
+      font-size: 14px;
+      background: var(--nac-background);
+      color: var(--nac-text);
+    }
+    .nac-date-input {
+      width: 150px;
+    }
+    .nac-time-input {
+      width: 100px;
+    }
+    .nac-date-input:focus, .nac-time-input:focus {
+      outline: none;
+      border-color: var(--nac-secondary);
+      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+    }
+    
+    /* User Identity Section Styles */
+    .nac-user-identity-section {
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    
+    .nac-user-identity-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    
+    .nac-user-identity-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--nac-text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .nac-user-identity-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--nac-success);
+      color: white;
+    }
+    
+    .nac-user-identity-badge.not-configured {
+      background: var(--nac-warning);
+    }
+    
+    .nac-user-identity-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: var(--nac-background);
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    
+    .nac-user-identity-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--nac-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 18px;
+    }
+    
+    .nac-user-identity-details {
+      flex: 1;
+    }
+    
+    .nac-user-identity-name {
+      font-weight: 600;
+      color: var(--nac-text);
+      margin-bottom: 2px;
+    }
+    
+    .nac-user-identity-pubkey {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      font-family: monospace;
+    }
+    
+    .nac-user-identity-signer {
+      font-size: 11px;
+      color: var(--nac-text-dim);
+      margin-top: 2px;
+    }
+    
+    .nac-user-identity-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    
+    .nac-user-identity-actions .nac-btn {
+      font-size: 12px;
+      padding: 6px 12px;
+    }
+    
+    .nac-user-identity-empty {
+      text-align: center;
+      padding: 20px;
+      color: var(--nac-text-muted);
+    }
+    
+    .nac-user-identity-empty-icon {
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+    
+    .nac-user-identity-empty-text {
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    
+    .nac-user-identity-setup-options {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    
+    .nac-user-identity-setup-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      background: var(--nac-background);
+      color: var(--nac-text);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-align: left;
+    }
+    
+    .nac-user-identity-setup-btn:hover {
+      border-color: var(--nac-primary);
+      background: var(--nac-surface-hover);
+    }
+    
+    .nac-user-identity-setup-btn-icon {
+      font-size: 20px;
+    }
+    
+    .nac-user-identity-setup-btn-content {
+      flex: 1;
+    }
+    
+    .nac-user-identity-setup-btn-title {
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    
+    .nac-user-identity-setup-btn-desc {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+    }
+    
+    /* Sign As Dropdown Styles */
+    .nac-sign-as-section {
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 16px;
+    }
+    
+    .nac-sign-as-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--nac-text);
+      margin-bottom: 8px;
+    }
+    
+    .nac-sign-as-select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-background);
+      color: var(--nac-text);
+      font-size: 14px;
+      cursor: pointer;
+    }
+    
+    .nac-sign-as-info {
+      margin-top: 8px;
+      padding: 8px;
+      background: var(--nac-background);
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--nac-text-muted);
+    }
+    
+    .nac-sign-as-warning {
+      color: var(--nac-warning);
+      font-size: 12px;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    
+    /* ============================================
+       IMMERSIVE READER STYLES
+       ============================================ */
+    
+    /* Fullscreen container */
+    .nac-immersive-reader {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #fafafa;
+      z-index: 999999;
+      overflow-y: auto;
+      display: none;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    }
+    
+    .nac-immersive-reader.active {
+      display: block;
+    }
+    
+    /* Close button */
+    .nac-reader-close {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(0,0,0,0.1);
+      font-size: 20px;
+      cursor: pointer;
+      z-index: 1000001;
+      transition: background 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nac-reader-close:hover {
+      background: rgba(0,0,0,0.2);
+    }
+    
+    /* Main content area - optimal reading width */
+    .nac-reader-content {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 60px 20px 150px 20px;
+    }
+    
+    /* Article header */
+    .nac-reader-header {
+      margin-bottom: 30px;
+    }
+    .nac-reader-title {
+      font-size: 2.5em;
+      font-weight: 800;
+      line-height: 1.2;
+      margin: 0 0 20px 0;
+      color: #1a1a1a;
+    }
+    .nac-reader-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+      color: #666;
+      font-size: 0.95em;
+      margin-bottom: 10px;
+    }
+    .nac-reader-author {
+      font-weight: 600;
+      color: #333;
+    }
+    .nac-reader-url {
+      font-size: 0.85em;
+      color: #888;
+      word-break: break-all;
+    }
+    
+    /* Featured image */
+    .nac-reader-image img {
+      width: 100%;
+      border-radius: 8px;
+      margin-bottom: 30px;
+    }
+    
+    /* Article body */
+    .nac-reader-body {
+      font-size: 1.2em;
+      line-height: 1.8;
+      color: #333;
+    }
+    .nac-reader-body p {
+      margin-bottom: 1.5em;
+    }
+    .nac-reader-body h1, .nac-reader-body h2, .nac-reader-body h3 {
+      margin-top: 2em;
+      margin-bottom: 0.5em;
+      font-weight: 700;
+      color: #1a1a1a;
+    }
+    .nac-reader-body h1 { font-size: 1.8em; }
+    .nac-reader-body h2 { font-size: 1.5em; }
+    .nac-reader-body h3 { font-size: 1.25em; }
+    .nac-reader-body img {
+      max-width: 100%;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+    .nac-reader-body blockquote {
+      border-left: 4px solid #ddd;
+      padding-left: 20px;
+      margin: 1.5em 0;
+      color: #555;
+      font-style: italic;
+    }
+    .nac-reader-body a {
+      color: #667eea;
+      text-decoration: none;
+    }
+    .nac-reader-body a:hover {
+      text-decoration: underline;
+    }
+    .nac-reader-body code {
+      background: #f0f0f0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.9em;
+    }
+    .nac-reader-body pre {
+      background: #f5f5f5;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .nac-reader-body pre code {
+      background: none;
+      padding: 0;
+    }
+    .nac-reader-body ul, .nac-reader-body ol {
+      margin: 1em 0;
+      padding-left: 2em;
+    }
+    .nac-reader-body li {
+      margin-bottom: 0.5em;
+    }
+    
+    /* Floating Action Button */
+    .nac-reader-fab {
+      position: fixed;
+      bottom: 100px;
+      right: 30px;
+      z-index: 1000001;
+    }
+    .nac-fab-main {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: none;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      font-size: 24px;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+      transition: transform 0.2s, box-shadow 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nac-fab-main:hover {
+      transform: scale(1.1);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+    }
+    .nac-fab-menu {
+      position: absolute;
+      bottom: 70px;
+      right: 0;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .nac-fab-menu.open {
+      display: flex;
+    }
+    .nac-fab-item {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: none;
+      background: white;
+      font-size: 20px;
+      cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      transition: transform 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nac-fab-item:hover {
+      transform: scale(1.1);
+    }
+    
+    /* Quick Reaction Bar */
+    .nac-reader-reaction-bar {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      padding: 12px 20px;
+      background: white;
+      border-radius: 30px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      z-index: 1000001;
+    }
+    .nac-reaction-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      background: #f5f5f5;
+      font-size: 20px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nac-reaction-btn:hover {
+      transform: scale(1.2);
+      background: #e8f5e9;
+    }
+    .nac-reaction-btn.selected {
+      border-color: #4caf50;
+      background: #e8f5e9;
+    }
+    
+    /* Reactions display section */
+    .nac-reader-reactions {
+      margin-top: 40px;
+      padding-top: 30px;
+      border-top: 1px solid #eee;
+    }
+    .nac-reactions-title {
+      font-size: 1.1em;
+      font-weight: 600;
+      margin-bottom: 15px;
+      color: #333;
+    }
+    .nac-reactions-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .nac-reaction-display {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 12px;
+      background: #f5f5f5;
+      border-radius: 20px;
+      font-size: 0.95em;
+    }
+    .nac-reaction-emoji {
+      font-size: 1.2em;
+    }
+    .nac-reaction-count {
+      color: #666;
+      font-weight: 600;
+    }
+    
+    /* Comments Section */
+    .nac-reader-comments {
+      margin-top: 30px;
+      padding-top: 30px;
+      border-top: 1px solid #eee;
+    }
+    .nac-comments-title {
+      font-size: 1.1em;
+      font-weight: 600;
+      margin-bottom: 15px;
+      color: #333;
+    }
+    .nac-comment-item {
+      padding: 15px;
+      background: #f9f9f9;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    .nac-comment-author {
+      font-weight: 600;
+      font-size: 0.9em;
+      color: #333;
+      margin-bottom: 5px;
+    }
+    .nac-comment-text {
+      font-size: 0.95em;
+      color: #555;
+      line-height: 1.5;
+    }
+    .nac-comment-date {
+      font-size: 0.8em;
+      color: #999;
+      margin-top: 8px;
+    }
+    
+    /* Collapsible Sidebar */
+    .nac-reader-sidebar {
+      position: fixed;
+      top: 0;
+      right: -450px;
+      width: 450px;
+      height: 100vh;
+      background: white;
+      box-shadow: -5px 0 30px rgba(0,0,0,0.2);
+      z-index: 1000002;
+      transition: right 0.3s ease;
+      display: flex;
+      flex-direction: column;
+    }
+    .nac-reader-sidebar.open {
+      right: 0;
+    }
+    .nac-sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fafafa;
+    }
+    .nac-sidebar-title {
+      font-size: 1.2em;
+      font-weight: 600;
+      color: #333;
+    }
+    .nac-sidebar-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      color: #666;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+    }
+    .nac-sidebar-close:hover {
+      background: #eee;
+    }
+    .nac-sidebar-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+    
+    /* Sidebar form styles */
+    .nac-sidebar-form-group {
+      margin-bottom: 20px;
+    }
+    .nac-sidebar-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 8px;
+    }
+    .nac-sidebar-input,
+    .nac-sidebar-textarea,
+    .nac-sidebar-select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+    .nac-sidebar-input:focus,
+    .nac-sidebar-textarea:focus,
+    .nac-sidebar-select:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    .nac-sidebar-textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: inherit;
+    }
+    .nac-sidebar-btn {
+      width: 100%;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .nac-sidebar-btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    .nac-sidebar-btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    .nac-sidebar-btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .nac-sidebar-btn-secondary {
+      background: #f5f5f5;
+      color: #333;
+      border: 1px solid #ddd;
+    }
+    .nac-sidebar-btn-secondary:hover {
+      background: #eee;
+    }
+    
+    /* Dark mode support for immersive reader */
+    @media (prefers-color-scheme: dark) {
+      .nac-immersive-reader {
+        background: #1a1a1a;
+      }
+      .nac-reader-title {
+        color: #f5f5f5;
+      }
+      .nac-reader-meta {
+        color: #999;
+      }
+      .nac-reader-author {
+        color: #ccc;
+      }
+      .nac-reader-url {
+        color: #777;
+      }
+      .nac-reader-body {
+        color: #e0e0e0;
+      }
+      .nac-reader-body h1, .nac-reader-body h2, .nac-reader-body h3 {
+        color: #f5f5f5;
+      }
+      .nac-reader-body blockquote {
+        border-left-color: #444;
+        color: #aaa;
+      }
+      .nac-reader-body code {
+        background: #333;
+      }
+      .nac-reader-body pre {
+        background: #2a2a2a;
+      }
+      .nac-reader-close {
+        background: rgba(255,255,255,0.1);
+        color: #fff;
+      }
+      .nac-reader-close:hover {
+        background: rgba(255,255,255,0.2);
+      }
+      .nac-reader-reaction-bar {
+        background: #2a2a2a;
+      }
+      .nac-reaction-btn {
+        background: #333;
+      }
+      .nac-reaction-btn:hover {
+        background: #3d5a3d;
+      }
+      .nac-reader-sidebar {
+        background: #252525;
+      }
+      .nac-sidebar-header {
+        background: #2a2a2a;
+        border-bottom-color: #333;
+      }
+      .nac-sidebar-title {
+        color: #f5f5f5;
+      }
+      .nac-sidebar-close {
+        color: #999;
+      }
+      .nac-sidebar-close:hover {
+        background: #333;
+      }
+      .nac-sidebar-label {
+        color: #ccc;
+      }
+      .nac-sidebar-input,
+      .nac-sidebar-textarea,
+      .nac-sidebar-select {
+        background: #333;
+        border-color: #444;
+        color: #f5f5f5;
+      }
+      .nac-sidebar-btn-secondary {
+        background: #333;
+        color: #ccc;
+        border-color: #444;
+      }
+      .nac-reader-reactions,
+      .nac-reader-comments {
+        border-top-color: #333;
+      }
+      .nac-reactions-title,
+      .nac-comments-title {
+        color: #f5f5f5;
+      }
+      .nac-reaction-display {
+        background: #333;
+      }
+      .nac-reaction-count {
+        color: #aaa;
+      }
+      .nac-comment-item {
+        background: #2a2a2a;
+      }
+      .nac-comment-author {
+        color: #ccc;
+      }
+      .nac-comment-text {
+        color: #aaa;
+      }
+    }
   `;
 
   // ============================================
@@ -2971,7 +3879,11 @@
         organizations: []
       },
       editMode: false,
-      originalArticle: null
+      originalArticle: null,
+      originalPublishedAt: null,
+      // Immersive reader state
+      immersiveReaderOpen: false,
+      activeSidebarPanel: null
     },
     
     // SVG Icons
@@ -2988,6 +3900,48 @@
       article: '<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>',
       warning: '<svg viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>',
       check: '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>'
+    },
+    
+    // Get label for date source
+    getDateSourceLabel: (source) => {
+      const sourceLabels = {
+        'json-ld': '(from structured data)',
+        'meta-tag': '(from meta tag)',
+        'platform-selector': '(from page element)',
+        'text-content': '(from text)',
+        'manual': '(manually set)'
+      };
+      return sourceLabels[source] || '';
+    },
+    
+    // Format date for preview display
+    formatDatePreview: (timestamp) => {
+      if (!timestamp) {
+        return '<em>Date not detected</em>';
+      }
+      const date = new Date(timestamp * 1000);
+      return date.toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    },
+    
+    // Update date preview display
+    updateDatePreview: () => {
+      const datePreview = document.getElementById('nac-date-preview');
+      const dateSource = document.getElementById('nac-date-source');
+      
+      if (datePreview && UI.state.article) {
+        datePreview.innerHTML = UI.formatDatePreview(UI.state.article.publishedAt);
+      }
+      
+      if (dateSource && UI.state.article) {
+        dateSource.textContent = UI.getDateSourceLabel(UI.state.article.publishedAtSource);
+      }
     },
     
     // Initialize UI
@@ -3015,8 +3969,8 @@
       const fab = document.createElement('button');
       fab.className = 'nac-fab nac-reset';
       fab.innerHTML = UI.icons.book;
-      fab.title = 'NOSTR Article Capture';
-      fab.addEventListener('click', () => UI.toggle());
+      fab.title = 'NOSTR Article Capture - Click to open immersive reader';
+      fab.addEventListener('click', () => UI.openImmersiveReader());
       
       document.body.appendChild(fab);
       UI.elements.fab = fab;
@@ -3081,11 +4035,51 @@
         
         <!-- Publish Section -->
         <div class="nac-publish">
-          <div class="nac-publish-title">Publish to NOSTR</div>
+          <div class="nac-publish-title">Publish Article to NOSTR</div>
           
-          <!-- Publication Selector -->
+          <!-- User Identity Section -->
+          <div class="nac-user-identity-section" id="nac-user-identity-section">
+            <div class="nac-user-identity-header">
+              <div class="nac-user-identity-title">
+                👤 Your Identity
+                <span class="nac-user-identity-badge not-configured" id="nac-user-identity-badge">Not Set</span>
+              </div>
+            </div>
+            <div id="nac-user-identity-content">
+              <!-- Will be populated dynamically -->
+              <div class="nac-user-identity-empty">
+                <div class="nac-user-identity-empty-icon">🔑</div>
+                <div class="nac-user-identity-empty-text">Set up your identity to sign metadata (ratings, annotations, fact-checks)</div>
+                <div class="nac-user-identity-setup-options">
+                  <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
+                    <span class="nac-user-identity-setup-btn-icon">🔌</span>
+                    <div class="nac-user-identity-setup-btn-content">
+                      <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
+                      <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
+                    </div>
+                  </button>
+                  <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
+                    <span class="nac-user-identity-setup-btn-icon">✨</span>
+                    <div class="nac-user-identity-setup-btn-content">
+                      <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
+                      <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
+                    </div>
+                  </button>
+                  <button class="nac-user-identity-setup-btn" id="nac-identity-import">
+                    <span class="nac-user-identity-setup-btn-icon">📥</span>
+                    <div class="nac-user-identity-setup-btn-content">
+                      <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
+                      <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Publication Selector (for Article publishing) -->
           <div class="nac-form-group">
-            <label class="nac-form-label">Publication (signs the event)</label>
+            <label class="nac-form-label">📰 Publication (signs and publishes article)</label>
             <select class="nac-form-select" id="nac-publication">
               <option value="">Select or create a publication...</option>
               <option value="__new__">+ Create new publication</option>
@@ -3614,6 +4608,19 @@
               <textarea class="nac-field-edit" id="nac-excerpt-edit" rows="3" style="display: none;"></textarea>
             </div>
             
+            <!-- Published Date Section -->
+            <div class="nac-field-group">
+              <label class="nac-field-label">
+                📅 Published Date
+                <span class="nac-date-source" id="nac-date-source">${UI.getDateSourceLabel(article.publishedAtSource)}</span>
+              </label>
+              <div class="nac-field-preview" id="nac-date-preview">${UI.formatDatePreview(article.publishedAt)}</div>
+              <div class="nac-date-inputs nac-field-edit" style="display: none;">
+                <input type="date" class="nac-date-input" id="nac-date-edit">
+                <input type="time" class="nac-time-input" id="nac-time-edit">
+              </div>
+            </div>
+            
             <!-- Content Body Section -->
             <div class="nac-field-group">
               <label class="nac-field-label">
@@ -3687,6 +4694,7 @@
             excerpt: UI.state.article.excerpt || '',
             content: UI.state.markdown
           };
+          UI.state.originalPublishedAt = UI.state.article.publishedAt;
         }
         
         editBtn.textContent = '👁️ Preview';
@@ -3697,17 +4705,50 @@
         
         // Show edit fields, hide previews
         document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'none');
-        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'block');
+        document.querySelectorAll('.nac-field-edit').forEach(el => {
+          if (el.classList.contains('nac-date-inputs')) {
+            el.classList.add('nac-field-edit-visible');
+          } else {
+            el.style.display = 'block';
+          }
+        });
         
         // Populate edit fields
         document.getElementById('nac-title-edit').value = UI.state.article.title;
         document.getElementById('nac-excerpt-edit').value = UI.state.article.excerpt || '';
         document.getElementById('nac-content-edit').value = UI.state.markdown;
+        
+        // Populate date fields
+        const dateEdit = document.getElementById('nac-date-edit');
+        const timeEdit = document.getElementById('nac-time-edit');
+        if (dateEdit && timeEdit && UI.state.article.publishedAt) {
+          const date = new Date(UI.state.article.publishedAt * 1000);
+          dateEdit.value = date.toISOString().split('T')[0];
+          timeEdit.value = date.toTimeString().slice(0, 5);
+        } else if (dateEdit && timeEdit) {
+          dateEdit.value = '';
+          timeEdit.value = '';
+        }
       } else {
         // Exiting edit mode - update article from fields and show previews
         UI.state.article.title = document.getElementById('nac-title-edit').value;
         UI.state.article.excerpt = document.getElementById('nac-excerpt-edit').value;
         UI.state.markdown = document.getElementById('nac-content-edit').value;
+        
+        // Update date from fields
+        const dateInput = document.getElementById('nac-date-edit').value;
+        const timeInput = document.getElementById('nac-time-edit').value || '00:00';
+        if (dateInput) {
+          const newDate = new Date(`${dateInput}T${timeInput}`);
+          if (!isNaN(newDate.getTime())) {
+            UI.state.article.publishedAt = Math.floor(newDate.getTime() / 1000);
+            UI.state.article.publishedAtSource = 'manual';
+          }
+        } else {
+          // If date was cleared, set to null
+          UI.state.article.publishedAt = null;
+          UI.state.article.publishedAtSource = null;
+        }
         
         editBtn.textContent = '✏️ Edit';
         editBtn.classList.remove('nac-btn-primary');
@@ -3716,7 +4757,13 @@
         
         // Show previews, hide edit fields
         document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
-        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.nac-field-edit').forEach(el => {
+          if (el.classList.contains('nac-date-inputs')) {
+            el.classList.remove('nac-field-edit-visible');
+          } else {
+            el.style.display = 'none';
+          }
+        });
         
         // Update previews with new content
         UI.updatePreviews();
@@ -3745,6 +4792,9 @@
       if (charCount) {
         charCount.textContent = `(${UI.state.markdown.length} chars)`;
       }
+      
+      // Update date preview
+      UI.updateDatePreview();
     },
     
     // Revert changes to original
@@ -3753,6 +4803,13 @@
         UI.state.article.title = UI.state.originalArticle.title;
         UI.state.article.excerpt = UI.state.originalArticle.excerpt;
         UI.state.markdown = UI.state.originalArticle.content;
+        
+        // Revert published date
+        if (UI.state.originalPublishedAt !== undefined) {
+          UI.state.article.publishedAt = UI.state.originalPublishedAt;
+          UI.state.originalPublishedAt = null;
+        }
+        
         UI.state.originalArticle = null;
         UI.state.editMode = false;
         
@@ -3768,7 +4825,13 @@
         if (editTools) editTools.style.display = 'none';
         
         document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
-        document.querySelectorAll('.nac-field-edit').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.nac-field-edit').forEach(el => {
+          if (el.classList.contains('nac-date-inputs')) {
+            el.classList.remove('nac-field-edit-visible');
+          } else {
+            el.style.display = 'none';
+          }
+        });
         
         UI.updatePreviews();
         UI.showToast('Changes reverted', 'info');
@@ -4254,13 +5317,26 @@
             </div>
           </div>
           
-          <!-- Publication Selector (reusing existing) -->
-          <div class="nac-form-group">
-            <label class="nac-form-label">Sign As (Publication)</label>
-            <select class="nac-form-select" id="nac-metadata-publication">
-              <option value="">Select publication...</option>
+          <!-- Sign As Dropdown -->
+          <div class="nac-sign-as-section">
+            <label class="nac-sign-as-label">Sign As</label>
+            <select class="nac-sign-as-select" id="nac-metadata-signer">
+              <option value="">Select who signs this...</option>
+              <optgroup label="👤 Personal Identity" id="nac-signer-user-group">
+                <option value="user" id="nac-signer-user-option" disabled>Set up your identity first...</option>
+              </optgroup>
+              <optgroup label="📰 Publications" id="nac-signer-pub-group">
+                <!-- Publications will be loaded dynamically -->
+              </optgroup>
             </select>
+            <div class="nac-sign-as-info" id="nac-sign-as-info">
+              <strong>💡 Tip:</strong> URL metadata (ratings, annotations, fact-checks) are personal assertions.
+              Use your personal identity for these. Publications are for article publishing.
+            </div>
           </div>
+          
+          <!-- Hidden legacy field for backward compatibility -->
+          <input type="hidden" id="nac-metadata-publication" value="">
           
           <!-- Post Button -->
           <div class="nac-metadata-actions">
@@ -4580,24 +5656,66 @@
       list.appendChild(item);
     },
     
-    // Load publications into metadata selector
+    // Load signer options into metadata selector (user identity + publications)
     loadMetadataPublications: async () => {
-      const select = document.getElementById('nac-metadata-publication');
-      if (!select) return;
+      const signerSelect = document.getElementById('nac-metadata-signer');
+      const legacySelect = document.getElementById('nac-metadata-publication');
+      if (!signerSelect) return;
       
-      const publications = await Storage.publications.getAll();
-      
-      // Clear existing options except first
-      while (select.options.length > 1) {
-        select.remove(1);
+      // Update user identity option
+      const userIdentity = Storage.userIdentity.get();
+      const userOption = document.getElementById('nac-signer-user-option');
+      if (userOption) {
+        if (userIdentity && userIdentity.pubkey) {
+          userOption.value = 'user';
+          userOption.textContent = `👤 ${userIdentity.name || 'Your Identity'} (${userIdentity.npub?.substring(0, 12) || userIdentity.pubkey.substring(0, 8)}...)`;
+          userOption.disabled = false;
+          // Pre-select user identity as default for metadata
+          signerSelect.value = 'user';
+        } else {
+          userOption.value = '';
+          userOption.textContent = 'Set up your identity first...';
+          userOption.disabled = true;
+        }
       }
       
-      // Add publications
-      Object.entries(publications).forEach(([id, pub]) => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = pub.name;
-        select.add(option);
+      // Load publications into the publications optgroup
+      const publications = await Storage.publications.getAll();
+      const pubGroup = document.getElementById('nac-signer-pub-group');
+      
+      if (pubGroup) {
+        // Clear existing publication options
+        while (pubGroup.children.length > 0) {
+          pubGroup.removeChild(pubGroup.lastChild);
+        }
+        
+        // Add publications
+        Object.entries(publications).forEach(([id, pub]) => {
+          const option = document.createElement('option');
+          option.value = `pub:${id}`;
+          option.textContent = `📰 ${pub.name}`;
+          pubGroup.appendChild(option);
+        });
+        
+        // Add "no publications" message if empty
+        if (Object.keys(publications).length === 0) {
+          const emptyOption = document.createElement('option');
+          emptyOption.value = '';
+          emptyOption.textContent = 'No publications configured...';
+          emptyOption.disabled = true;
+          pubGroup.appendChild(emptyOption);
+        }
+      }
+      
+      // Update legacy hidden field based on selection
+      signerSelect.addEventListener('change', () => {
+        const value = signerSelect.value;
+        if (value.startsWith('pub:')) {
+          legacySelect.value = value.replace('pub:', '');
+        } else {
+          legacySelect.value = '';
+        }
+        UI.updateMetadataPostButton();
       });
       
       UI.updateMetadataPostButton();
@@ -4608,8 +5726,8 @@
       const btn = document.getElementById('nac-metadata-post');
       if (!btn) return;
       
-      const pubSelect = document.getElementById('nac-metadata-publication');
-      const hasPub = pubSelect && pubSelect.value;
+      const signerSelect = document.getElementById('nac-metadata-signer');
+      const hasSigner = signerSelect && signerSelect.value;
       
       // Check if NIP-07 is available
       const nip07Available = NIP07Client.checkAvailability();
@@ -4656,9 +5774,9 @@
       if (!hasSigningMethod) {
         btn.disabled = true;
         btn.innerHTML = `${UI.icons.send} Install Signer Extension`;
-      } else if (!hasPub) {
+      } else if (!hasSigner) {
         btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send} Select Publication`;
+        btn.innerHTML = `${UI.icons.send} Select Signer`;
       } else if (!isValid) {
         btn.disabled = true;
         btn.innerHTML = `${UI.icons.send} Complete Form`;
@@ -4844,6 +5962,49 @@
       }
     },
     
+    // Get signing configuration based on signer dropdown selection
+    getSigningConfig: async (signerValue) => {
+      if (!signerValue) {
+        throw new Error('No signer selected');
+      }
+      
+      // User identity selected
+      if (signerValue === 'user') {
+        const identity = Storage.userIdentity.get();
+        if (!identity || !identity.pubkey) {
+          throw new Error('User identity not configured');
+        }
+        
+        return {
+          type: 'user',
+          pubkey: identity.pubkey,
+          signerType: identity.signerType, // 'nip07', 'local', or 'nsecbunker'
+          identity: identity
+        };
+      }
+      
+      // Publication selected (format: pub:publicationId)
+      if (signerValue.startsWith('pub:')) {
+        const publicationId = signerValue.replace('pub:', '');
+        const publication = await Storage.publications.get(publicationId);
+        const keypair = await Storage.keypairs.get(publicationId);
+        
+        if (!publication || !keypair) {
+          throw new Error('Publication not found');
+        }
+        
+        return {
+          type: 'publication',
+          pubkey: keypair.pubkey,
+          publicationId: publicationId,
+          publication: publication,
+          keypair: keypair
+        };
+      }
+      
+      throw new Error('Invalid signer selection');
+    },
+    
     // Publish metadata event
     publishMetadata: async () => {
       const btn = document.getElementById('nac-metadata-post');
@@ -4857,30 +6018,18 @@
         
         const article = UI.state.article;
         const type = UI.state.metadataType || 'annotation';
-        const pubSelect = document.getElementById('nac-metadata-publication');
-        const publicationId = pubSelect?.value;
+        const signerSelect = document.getElementById('nac-metadata-signer');
+        const signerValue = signerSelect?.value;
         
-        if (!publicationId) {
-          throw new Error('Please select a publication');
+        if (!signerValue) {
+          throw new Error('Please select who will sign this');
         }
         
-        // Get signing method
-        const nip07Available = NIP07Client.checkAvailability();
-        let pubkey;
+        // Get signing configuration
+        btn.innerHTML = `<div class="nac-spinner"></div><span>Getting signer...</span>`;
+        const signingConfig = await UI.getSigningConfig(signerValue);
+        const pubkey = signingConfig.pubkey;
         let signedEvent;
-        
-        if (nip07Available) {
-          btn.innerHTML = `<div class="nac-spinner"></div><span>Getting key...</span>`;
-          pubkey = await NIP07Client.getPublicKey();
-        } else if (NSecBunkerClient.connected) {
-          const publication = await Storage.publications.get(publicationId);
-          pubkey = publication?.pubkey;
-          if (!pubkey) {
-            throw new Error('Publication key not found');
-          }
-        } else {
-          throw new Error('No signing method available');
-        }
         
         // Build event based on type
         btn.innerHTML = `<div class="nac-spinner"></div><span>Building event...</span>`;
@@ -4985,14 +6134,40 @@
           }, pubkey);
         }
         
-        // Sign event
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Sign in extension...</span>`;
+        // Sign event based on signer type
+        btn.innerHTML = `<div class="nac-spinner"></div><span>Signing...</span>`;
         
-        if (nip07Available) {
-          UI.showToast('Please approve signature in extension...', 'warning');
-          signedEvent = await NIP07Client.signEvent(event);
+        if (signingConfig.type === 'user') {
+          // User identity signing
+          if (signingConfig.signerType === 'nip07') {
+            UI.showToast('Please approve signature in extension...', 'warning');
+            signedEvent = await NIP07Client.signEvent(event);
+          } else if (signingConfig.signerType === 'local') {
+            // Local key signing
+            const identity = signingConfig.identity;
+            if (!identity.nsec) {
+              throw new Error('Local key not found - please reconfigure your identity');
+            }
+            signedEvent = await LocalKeyManager.signEvent(event, identity.nsec);
+          } else if (signingConfig.signerType === 'nsecbunker') {
+            signedEvent = await NSecBunkerClient.signEvent(event);
+          } else {
+            throw new Error('Unknown signer type');
+          }
+        } else if (signingConfig.type === 'publication') {
+          // Publication signing - use NSecBunker or local key
+          if (NSecBunkerClient.connected) {
+            signedEvent = await NSecBunkerClient.signEvent(event, signingConfig.publicationId);
+          } else if (signingConfig.keypair?.nsec) {
+            signedEvent = await LocalKeyManager.signEvent(event, signingConfig.keypair.nsec);
+          } else if (NIP07Client.checkAvailability()) {
+            UI.showToast('Please approve signature in extension...', 'warning');
+            signedEvent = await NIP07Client.signEvent(event);
+          } else {
+            throw new Error('No signing method available for publication');
+          }
         } else {
-          signedEvent = await NSecBunkerClient.signEvent(event, publicationId);
+          throw new Error('Invalid signer configuration');
         }
         
         // Validate signed event
@@ -5278,6 +6453,272 @@
         checkbox.checked = false;
         checkbox.disabled = true;
       }
+      
+      // Also update user identity UI
+      UI.updateUserIdentityUI();
+    },
+    
+    // User Identity Management Functions
+    setupUserIdentity: {
+      // Set up user identity from NIP-07 browser extension
+      fromNIP07: async () => {
+        if (!NIP07Client.checkAvailability()) {
+          UI.showToast('No NIP-07 extension detected (install nos2x, Alby, etc.)', 'error');
+          return false;
+        }
+        
+        try {
+          const pubkey = await window.nostr.getPublicKey();
+          const npub = NostrCrypto.hexToNpub(pubkey);
+          
+          // Try to get profile name
+          let name = npub.substring(0, 12) + '...';
+          
+          Storage.userIdentity.set({
+            pubkey,
+            npub,
+            name,
+            signerType: 'nip07'
+          });
+          
+          UI.updateUserIdentityUI();
+          UI.loadMetadataPublications();
+          UI.showToast('User identity set from NIP-07!', 'success');
+          return true;
+        } catch (error) {
+          Utils.error('Failed to get pubkey from NIP-07:', error);
+          UI.showToast('Failed to get pubkey from extension', 'error');
+          return false;
+        }
+      },
+      
+      // Generate new keypair for user identity
+      generate: async () => {
+        try {
+          const keypair = await LocalKeyManager.generateKeypair();
+          const npub = NostrCrypto.hexToNpub(keypair.pubkey);
+          
+          Storage.userIdentity.set({
+            pubkey: keypair.pubkey,
+            npub,
+            name: npub.substring(0, 12) + '...',
+            signerType: 'local',
+            nsec: keypair.nsec // Store for local signing
+          });
+          
+          UI.updateUserIdentityUI();
+          UI.loadMetadataPublications();
+          UI.showToast('New keypair generated! Make sure to backup your nsec.', 'success');
+          
+          // Show the nsec to user for backup
+          const confirmed = confirm(
+            `Your new identity has been created!\n\n` +
+            `Public key (npub): ${npub}\n\n` +
+            `IMPORTANT: Copy and securely backup your private key:\n${keypair.nsec}\n\n` +
+            `Click OK after you've saved your private key.`
+          );
+          
+          return true;
+        } catch (error) {
+          Utils.error('Failed to generate keypair:', error);
+          UI.showToast('Failed to generate keypair', 'error');
+          return false;
+        }
+      },
+      
+      // Import existing keypair
+      import: async () => {
+        const input = prompt(
+          'Enter your private key (nsec1... or hex format):\n\n' +
+          'WARNING: Only enter your private key on trusted devices.'
+        );
+        
+        if (!input || !input.trim()) return false;
+        
+        try {
+          let nsec, pubkey;
+          const trimmed = input.trim();
+          
+          if (trimmed.startsWith('nsec1')) {
+            nsec = trimmed;
+            // Convert nsec to pubkey
+            const decoded = NostrCrypto.nsecToHex(nsec);
+            pubkey = await LocalKeyManager.getPublicKeyFromPrivate(decoded);
+          } else if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+            // Hex private key
+            pubkey = await LocalKeyManager.getPublicKeyFromPrivate(trimmed);
+            nsec = NostrCrypto.hexToNsec(trimmed);
+          } else {
+            throw new Error('Invalid private key format');
+          }
+          
+          const npub = NostrCrypto.hexToNpub(pubkey);
+          
+          Storage.userIdentity.set({
+            pubkey,
+            npub,
+            name: npub.substring(0, 12) + '...',
+            signerType: 'local',
+            nsec
+          });
+          
+          UI.updateUserIdentityUI();
+          UI.loadMetadataPublications();
+          UI.showToast('Private key imported successfully!', 'success');
+          return true;
+        } catch (error) {
+          Utils.error('Failed to import private key:', error);
+          UI.showToast('Invalid private key format', 'error');
+          return false;
+        }
+      },
+      
+      // Clear user identity
+      clear: () => {
+        if (confirm('Are you sure you want to remove your user identity?\n\nIf you generated keys locally, make sure you have your nsec backed up!')) {
+          Storage.userIdentity.clear();
+          UI.updateUserIdentityUI();
+          UI.loadMetadataPublications();
+          UI.showToast('User identity removed', 'info');
+        }
+      }
+    },
+    
+    // Update user identity UI display
+    updateUserIdentityUI: () => {
+      const identity = Storage.userIdentity.get();
+      const contentEl = document.getElementById('nac-user-identity-content');
+      const badgeEl = document.getElementById('nac-user-identity-badge');
+      
+      if (!contentEl) return;
+      
+      if (identity && identity.pubkey) {
+        // User identity is configured - show info
+        const signerLabel = {
+          'nip07': '🔌 Browser Extension',
+          'local': '🔑 Local Keys',
+          'nsecbunker': '🔐 NSecBunker'
+        }[identity.signerType] || '❓ Unknown';
+        
+        contentEl.innerHTML = `
+          <div class="nac-user-identity-info">
+            <div class="nac-user-identity-avatar">👤</div>
+            <div class="nac-user-identity-details">
+              <div class="nac-user-identity-name">${Utils.escapeHtml(identity.name || 'Your Identity')}</div>
+              <div class="nac-user-identity-pubkey">${identity.npub?.substring(0, 20) || identity.pubkey.substring(0, 16)}...</div>
+              <div class="nac-user-identity-signer">${signerLabel}</div>
+            </div>
+          </div>
+          <div class="nac-user-identity-actions">
+            <button class="nac-btn nac-btn-small" id="nac-identity-change">Change</button>
+            <button class="nac-btn nac-btn-small nac-btn-danger" id="nac-identity-clear">Remove</button>
+          </div>
+        `;
+        
+        badgeEl.textContent = 'Configured';
+        badgeEl.className = 'nac-user-identity-badge';
+        
+        // Attach event listeners
+        document.getElementById('nac-identity-change')?.addEventListener('click', () => {
+          UI.showUserIdentitySetupOptions();
+        });
+        document.getElementById('nac-identity-clear')?.addEventListener('click', () => {
+          UI.setupUserIdentity.clear();
+        });
+      } else {
+        // Not configured - show setup options
+        contentEl.innerHTML = `
+          <div class="nac-user-identity-empty">
+            <div class="nac-user-identity-empty-icon">🔑</div>
+            <div class="nac-user-identity-empty-text">Set up your identity to sign metadata (ratings, annotations, fact-checks)</div>
+            <div class="nac-user-identity-setup-options">
+              <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
+                <span class="nac-user-identity-setup-btn-icon">🔌</span>
+                <div class="nac-user-identity-setup-btn-content">
+                  <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
+                  <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
+                </div>
+              </button>
+              <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
+                <span class="nac-user-identity-setup-btn-icon">✨</span>
+                <div class="nac-user-identity-setup-btn-content">
+                  <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
+                  <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
+                </div>
+              </button>
+              <button class="nac-user-identity-setup-btn" id="nac-identity-import">
+                <span class="nac-user-identity-setup-btn-icon">📥</span>
+                <div class="nac-user-identity-setup-btn-content">
+                  <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
+                  <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        `;
+        
+        badgeEl.textContent = 'Not Set';
+        badgeEl.className = 'nac-user-identity-badge not-configured';
+        
+        // Attach setup event listeners
+        UI.attachUserIdentitySetupListeners();
+      }
+    },
+    
+    // Show user identity setup options (for changing identity)
+    showUserIdentitySetupOptions: () => {
+      const contentEl = document.getElementById('nac-user-identity-content');
+      if (!contentEl) return;
+      
+      contentEl.innerHTML = `
+        <div class="nac-user-identity-empty">
+          <div class="nac-user-identity-empty-text">Choose a new identity method:</div>
+          <div class="nac-user-identity-setup-options">
+            <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
+              <span class="nac-user-identity-setup-btn-icon">🔌</span>
+              <div class="nac-user-identity-setup-btn-content">
+                <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
+                <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
+              </div>
+            </button>
+            <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
+              <span class="nac-user-identity-setup-btn-icon">✨</span>
+              <div class="nac-user-identity-setup-btn-content">
+                <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
+                <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
+              </div>
+            </button>
+            <button class="nac-user-identity-setup-btn" id="nac-identity-import">
+              <span class="nac-user-identity-setup-btn-icon">📥</span>
+              <div class="nac-user-identity-setup-btn-content">
+                <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
+                <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
+              </div>
+            </button>
+          </div>
+          <div class="nac-user-identity-actions" style="margin-top: 12px;">
+            <button class="nac-btn nac-btn-small nac-btn-secondary" id="nac-identity-cancel">Cancel</button>
+          </div>
+        </div>
+      `;
+      
+      UI.attachUserIdentitySetupListeners();
+      document.getElementById('nac-identity-cancel')?.addEventListener('click', () => {
+        UI.updateUserIdentityUI();
+      });
+    },
+    
+    // Attach event listeners for user identity setup buttons
+    attachUserIdentitySetupListeners: () => {
+      document.getElementById('nac-identity-nip07')?.addEventListener('click', () => {
+        UI.setupUserIdentity.fromNIP07();
+      });
+      document.getElementById('nac-identity-generate')?.addEventListener('click', () => {
+        UI.setupUserIdentity.generate();
+      });
+      document.getElementById('nac-identity-import')?.addEventListener('click', () => {
+        UI.setupUserIdentity.import();
+      });
     },
     
     // Update publication name display in Publishing Options
@@ -5907,6 +7348,727 @@
         Utils.error('Failed to view keypairs:', e);
         UI.showToast('Failed to view keypairs', 'error');
       }
+    },
+    
+    // ============================================
+    // IMMERSIVE READER FUNCTIONS
+    // ============================================
+    
+    // Create immersive reader container
+    createImmersiveReader: () => {
+      // Check if already exists
+      if (document.getElementById('nac-immersive-reader')) {
+        return;
+      }
+      
+      const reader = document.createElement('div');
+      reader.id = 'nac-immersive-reader';
+      reader.className = 'nac-immersive-reader';
+      
+      reader.innerHTML = `
+        <!-- Close Button -->
+        <button class="nac-reader-close" id="nac-reader-close" title="Close Reader (Esc)">
+          ${UI.icons.close}
+        </button>
+        
+        <!-- Main Reader Content -->
+        <div class="nac-reader-content" id="nac-reader-content">
+          <div class="nac-reader-header">
+            <h1 class="nac-reader-title" id="nac-reader-title">Loading...</h1>
+            <div class="nac-reader-meta" id="nac-reader-meta"></div>
+          </div>
+          <div class="nac-reader-body" id="nac-reader-body">
+            <div class="nac-reader-loading">
+              <div class="nac-spinner"></div>
+              <p>Extracting article content...</p>
+            </div>
+          </div>
+          
+          <!-- Existing Reactions & Comments Section -->
+          <div class="nac-reader-reactions" id="nac-reader-reactions" style="display: none;">
+            <h3 class="nac-reactions-title">Reactions</h3>
+            <div class="nac-reactions-list" id="nac-reactions-list"></div>
+          </div>
+          <div class="nac-reader-comments" id="nac-reader-comments" style="display: none;">
+            <h3 class="nac-comments-title">Comments</h3>
+            <div class="nac-comments-list" id="nac-comments-list"></div>
+          </div>
+        </div>
+        
+        <!-- Floating Action Button -->
+        <div class="nac-reader-fab" id="nac-reader-fab">
+          <button class="nac-fab-main" id="nac-fab-main" title="Actions">
+            <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          </button>
+          <div class="nac-fab-menu" id="nac-fab-menu">
+            <button class="nac-fab-item" data-action="edit" title="Edit Article">
+              <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+            </button>
+            <button class="nac-fab-item" data-action="metadata" title="View Metadata">
+              <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+            </button>
+            <button class="nac-fab-item" data-action="publish" title="Publish to NOSTR">
+              <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+            <button class="nac-fab-item" data-action="copy" title="Copy Markdown">
+              <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+            </button>
+            <button class="nac-fab-item" data-action="download" title="Download">
+              <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            </button>
+            <button class="nac-fab-item" data-action="settings" title="Settings">
+              <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            </button>
+          </div>
+        </div>
+        
+        <!-- Bottom Reaction Bar -->
+        <div class="nac-reader-reaction-bar" id="nac-reader-reaction-bar">
+          <button class="nac-reaction-btn" data-reaction="+" title="Like">👍</button>
+          <button class="nac-reaction-btn" data-reaction="❤️" title="Love">❤️</button>
+          <button class="nac-reaction-btn" data-reaction="🔥" title="Fire">🔥</button>
+          <button class="nac-reaction-btn" data-reaction="🤔" title="Thinking">🤔</button>
+          <button class="nac-reaction-btn" data-reaction="💯" title="100">💯</button>
+          <button class="nac-reaction-btn" data-reaction="-" title="Dislike">👎</button>
+        </div>
+        
+        <!-- Collapsible Sidebar -->
+        <div class="nac-reader-sidebar" id="nac-reader-sidebar">
+          <div class="nac-sidebar-header">
+            <span class="nac-sidebar-title" id="nac-sidebar-title">Edit</span>
+            <button class="nac-sidebar-close" id="nac-sidebar-close" title="Close Sidebar">
+              ${UI.icons.close}
+            </button>
+          </div>
+          <div class="nac-sidebar-content" id="nac-sidebar-content">
+            <!-- Dynamic content based on panel -->
+          </div>
+        </div>
+      `;
+      
+      document.body.appendChild(reader);
+      UI.elements.immersiveReader = reader;
+      
+      // Attach event listeners
+      UI.attachReaderListeners();
+    },
+    
+    // Attach event listeners for immersive reader
+    attachReaderListeners: () => {
+      // Close button
+      document.getElementById('nac-reader-close')?.addEventListener('click', () => UI.closeImmersiveReader());
+      
+      // Escape key to close
+      document.addEventListener('keydown', UI.handleReaderKeydown);
+      
+      // FAB main button toggle
+      document.getElementById('nac-fab-main')?.addEventListener('click', () => UI.toggleFabMenu());
+      
+      // FAB menu items
+      document.querySelectorAll('.nac-fab-item').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const action = e.currentTarget.dataset.action;
+          UI.handleFabAction(action);
+        });
+      });
+      
+      // Reaction buttons
+      document.querySelectorAll('.nac-reaction-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const reaction = e.currentTarget.dataset.reaction;
+          await UI.handleReaction(reaction);
+        });
+      });
+      
+      // Sidebar close
+      document.getElementById('nac-sidebar-close')?.addEventListener('click', () => UI.closeSidebar());
+      
+      // Click outside FAB menu to close it
+      document.getElementById('nac-immersive-reader')?.addEventListener('click', (e) => {
+        const fabMenu = document.getElementById('nac-fab-menu');
+        const fabMain = document.getElementById('nac-fab-main');
+        if (fabMenu?.classList.contains('open') &&
+            !fabMenu.contains(e.target) &&
+            !fabMain.contains(e.target)) {
+          UI.closeFabMenu();
+        }
+      });
+    },
+    
+    // Handle keyboard events in reader
+    handleReaderKeydown: (e) => {
+      if (!UI.state.immersiveReaderOpen) return;
+      
+      if (e.key === 'Escape') {
+        const sidebar = document.getElementById('nac-reader-sidebar');
+        const fabMenu = document.getElementById('nac-fab-menu');
+        
+        if (sidebar?.classList.contains('open')) {
+          UI.closeSidebar();
+        } else if (fabMenu?.classList.contains('open')) {
+          UI.closeFabMenu();
+        } else {
+          UI.closeImmersiveReader();
+        }
+      }
+    },
+    
+    // Open immersive reader
+    openImmersiveReader: async () => {
+      Utils.log('Opening immersive reader...');
+      
+      // Create if doesn't exist
+      UI.createImmersiveReader();
+      
+      const reader = document.getElementById('nac-immersive-reader');
+      if (!reader) return;
+      
+      // Show reader
+      reader.classList.add('open');
+      document.body.style.overflow = 'hidden';
+      UI.state.immersiveReaderOpen = true;
+      
+      // Hide the regular FAB
+      if (UI.elements.fab) {
+        UI.elements.fab.style.display = 'none';
+      }
+      
+      // Load article content
+      await UI.loadReaderArticle();
+    },
+    
+    // Close immersive reader
+    closeImmersiveReader: () => {
+      Utils.log('Closing immersive reader...');
+      
+      const reader = document.getElementById('nac-immersive-reader');
+      if (reader) {
+        reader.classList.remove('open');
+      }
+      
+      document.body.style.overflow = '';
+      UI.state.immersiveReaderOpen = false;
+      
+      // Show the regular FAB again
+      if (UI.elements.fab) {
+        UI.elements.fab.style.display = '';
+      }
+      
+      // Close sidebar and FAB menu
+      UI.closeSidebar();
+      UI.closeFabMenu();
+    },
+    
+    // Load article into reader
+    loadReaderArticle: async () => {
+      const titleEl = document.getElementById('nac-reader-title');
+      const metaEl = document.getElementById('nac-reader-meta');
+      const bodyEl = document.getElementById('nac-reader-body');
+      
+      if (!bodyEl) return;
+      
+      // Show loading
+      bodyEl.innerHTML = `
+        <div class="nac-reader-loading">
+          <div class="nac-spinner"></div>
+          <p>Extracting article content...</p>
+        </div>
+      `;
+      
+      // Extract article if not already done
+      if (!UI.state.article) {
+        const article = ContentProcessor.extractArticle();
+        
+        if (!article) {
+          bodyEl.innerHTML = `
+            <div class="nac-reader-loading">
+              ${UI.icons.warning}
+              <p>Could not extract article content from this page.</p>
+            </div>
+          `;
+          return;
+        }
+        
+        UI.state.article = article;
+        UI.state.markdown = ContentProcessor.htmlToMarkdown(article.content);
+        
+        // Extract entities
+        const entities = ContentProcessor.extractEntities(article.content, article.textContent);
+        UI.state.entities = entities;
+      }
+      
+      const article = UI.state.article;
+      
+      // Update title
+      if (titleEl) {
+        titleEl.textContent = article.title;
+      }
+      
+      // Update meta
+      if (metaEl) {
+        const metaParts = [];
+        if (article.byline) metaParts.push(article.byline);
+        if (article.siteName) metaParts.push(article.siteName);
+        if (article.publishedAt) {
+          metaParts.push(UI.formatDatePreview(article.publishedAt));
+        }
+        metaEl.textContent = metaParts.join(' • ');
+      }
+      
+      // Update body with article content
+      if (bodyEl) {
+        bodyEl.innerHTML = article.content;
+      }
+      
+      // Fetch existing reactions/comments for this URL
+      UI.loadReaderMetadata();
+    },
+    
+    // Load existing metadata for article URL
+    loadReaderMetadata: async () => {
+      if (!UI.state.article?.url) return;
+      
+      try {
+        const metadata = await URLMetadataService.fetchURLMetadata(UI.state.article.url);
+        
+        // Display reactions
+        if (metadata.reactions && metadata.reactions.length > 0) {
+          const reactionsEl = document.getElementById('nac-reader-reactions');
+          const listEl = document.getElementById('nac-reactions-list');
+          if (reactionsEl && listEl) {
+            reactionsEl.style.display = 'block';
+            listEl.innerHTML = UI.renderReactionsList(metadata.reactions);
+          }
+        }
+        
+        // Display comments
+        if (metadata.comments && metadata.comments.length > 0) {
+          const commentsEl = document.getElementById('nac-reader-comments');
+          const listEl = document.getElementById('nac-comments-list');
+          if (commentsEl && listEl) {
+            commentsEl.style.display = 'block';
+            listEl.innerHTML = UI.renderCommentsList(metadata.comments);
+          }
+        }
+      } catch (e) {
+        Utils.error('Failed to load reader metadata:', e);
+      }
+    },
+    
+    // Render reactions list
+    renderReactionsList: (reactions) => {
+      const counts = {};
+      reactions.forEach(r => {
+        const content = r.content || '+';
+        counts[content] = (counts[content] || 0) + 1;
+      });
+      
+      return Object.entries(counts)
+        .map(([emoji, count]) => `
+          <div class="nac-reaction-display">
+            <span class="nac-reaction-emoji">${emoji === '+' ? '👍' : emoji === '-' ? '👎' : emoji}</span>
+            <span class="nac-reaction-count">${count}</span>
+          </div>
+        `).join('');
+    },
+    
+    // Render comments list
+    renderCommentsList: (comments) => {
+      return comments.slice(0, 10).map(c => `
+        <div class="nac-comment-item">
+          <div class="nac-comment-author">${Utils.escapeHtml(c.pubkey?.substring(0, 8) || 'Anonymous')}...</div>
+          <div class="nac-comment-text">${Utils.escapeHtml(c.content?.substring(0, 200) || '')}</div>
+        </div>
+      `).join('');
+    },
+    
+    // Toggle FAB menu
+    toggleFabMenu: () => {
+      const menu = document.getElementById('nac-fab-menu');
+      const main = document.getElementById('nac-fab-main');
+      
+      if (menu?.classList.contains('open')) {
+        UI.closeFabMenu();
+      } else {
+        menu?.classList.add('open');
+        main?.classList.add('open');
+      }
+    },
+    
+    // Close FAB menu
+    closeFabMenu: () => {
+      const menu = document.getElementById('nac-fab-menu');
+      const main = document.getElementById('nac-fab-main');
+      menu?.classList.remove('open');
+      main?.classList.remove('open');
+    },
+    
+    // Handle FAB action
+    handleFabAction: (action) => {
+      UI.closeFabMenu();
+      
+      switch (action) {
+        case 'edit':
+          UI.openSidebar('edit');
+          break;
+        case 'metadata':
+          UI.openSidebar('metadata');
+          break;
+        case 'publish':
+          UI.openSidebar('publish');
+          break;
+        case 'copy':
+          UI.copyMarkdownFromReader();
+          break;
+        case 'download':
+          UI.downloadFromReader();
+          break;
+        case 'settings':
+          UI.openSidebar('settings');
+          break;
+      }
+    },
+    
+    // Handle reaction button click
+    handleReaction: async (reaction) => {
+      if (!UI.state.article?.url) {
+        UI.showToast('No article loaded', 'error');
+        return;
+      }
+      
+      try {
+        // Check if user identity is set
+        const userIdentity = Storage.userIdentity.get();
+        if (!userIdentity) {
+          UI.showToast('Set up your identity first', 'warning');
+          UI.openSidebar('settings');
+          return;
+        }
+        
+        // Build and sign reaction event
+        const event = await EventBuilder.buildReactionEvent(UI.state.article.url, {
+          reaction: reaction,
+          title: UI.state.article.title
+        });
+        
+        // Sign event
+        let signedEvent;
+        if (userIdentity.method === 'nip07') {
+          signedEvent = await NIP07Client.signEvent(event);
+        } else if (userIdentity.method === 'local') {
+          signedEvent = await LocalKeyManager.signEvent(event, userIdentity.pubkey);
+        }
+        
+        if (signedEvent) {
+          // Publish to relays
+          await NostrClient.publishEvent(signedEvent);
+          UI.showToast('Reaction published!', 'success');
+          
+          // Refresh metadata
+          UI.loadReaderMetadata();
+        }
+      } catch (e) {
+        Utils.error('Failed to publish reaction:', e);
+        UI.showToast('Failed to publish reaction', 'error');
+      }
+    },
+    
+    // Open sidebar panel
+    openSidebar: (panel) => {
+      const sidebar = document.getElementById('nac-reader-sidebar');
+      const titleEl = document.getElementById('nac-sidebar-title');
+      const contentEl = document.getElementById('nac-sidebar-content');
+      
+      if (!sidebar || !contentEl) return;
+      
+      // Set title
+      const titles = {
+        edit: 'Edit Article',
+        metadata: 'Article Metadata',
+        publish: 'Publish to NOSTR',
+        settings: 'Settings'
+      };
+      if (titleEl) titleEl.textContent = titles[panel] || 'Panel';
+      
+      // Generate content based on panel
+      switch (panel) {
+        case 'edit':
+          contentEl.innerHTML = UI.generateEditPanel();
+          UI.attachEditPanelListeners();
+          break;
+        case 'metadata':
+          contentEl.innerHTML = UI.generateMetadataPanel();
+          break;
+        case 'publish':
+          contentEl.innerHTML = UI.generatePublishPanel();
+          UI.attachPublishPanelListeners();
+          break;
+        case 'settings':
+          contentEl.innerHTML = UI.generateSettingsPanel();
+          UI.attachSettingsPanelListeners();
+          break;
+        default:
+          contentEl.innerHTML = '<p>Unknown panel</p>';
+      }
+      
+      // Show sidebar
+      sidebar.classList.add('open');
+      UI.state.activeSidebarPanel = panel;
+    },
+    
+    // Close sidebar
+    closeSidebar: () => {
+      const sidebar = document.getElementById('nac-reader-sidebar');
+      sidebar?.classList.remove('open');
+      UI.state.activeSidebarPanel = null;
+    },
+    
+    // Generate Edit panel content
+    generateEditPanel: () => {
+      const article = UI.state.article || {};
+      return `
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Title</label>
+          <input type="text" class="nac-sidebar-input" id="nac-reader-edit-title"
+            value="${Utils.escapeHtml(article.title || '')}">
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Excerpt</label>
+          <textarea class="nac-sidebar-textarea" id="nac-reader-edit-excerpt" rows="3"
+            placeholder="Brief summary...">${Utils.escapeHtml(article.excerpt || '')}</textarea>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Content (Markdown)</label>
+          <textarea class="nac-sidebar-textarea" id="nac-reader-edit-content" rows="15"
+            style="font-family: monospace;">${Utils.escapeHtml(UI.state.markdown || '')}</textarea>
+        </div>
+        <div class="nac-sidebar-section">
+          <button class="nac-sidebar-btn nac-sidebar-btn-primary" id="nac-reader-save-edit">
+            Save Changes
+          </button>
+          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-cancel-edit">
+            Cancel
+          </button>
+        </div>
+      `;
+    },
+    
+    // Attach edit panel listeners
+    attachEditPanelListeners: () => {
+      document.getElementById('nac-reader-save-edit')?.addEventListener('click', () => {
+        // Update article state
+        const title = document.getElementById('nac-reader-edit-title')?.value;
+        const excerpt = document.getElementById('nac-reader-edit-excerpt')?.value;
+        const content = document.getElementById('nac-reader-edit-content')?.value;
+        
+        if (title) UI.state.article.title = title;
+        if (excerpt !== undefined) UI.state.article.excerpt = excerpt;
+        if (content !== undefined) UI.state.markdown = content;
+        
+        // Update display
+        document.getElementById('nac-reader-title').textContent = UI.state.article.title;
+        
+        UI.closeSidebar();
+        UI.showToast('Changes saved', 'success');
+      });
+      
+      document.getElementById('nac-reader-cancel-edit')?.addEventListener('click', () => {
+        UI.closeSidebar();
+      });
+    },
+    
+    // Generate Metadata panel content
+    generateMetadataPanel: () => {
+      const article = UI.state.article || {};
+      return `
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">URL</label>
+          <div class="nac-sidebar-value">${Utils.escapeHtml(article.url || 'N/A')}</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Domain</label>
+          <div class="nac-sidebar-value">${Utils.escapeHtml(article.domain || 'N/A')}</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Author</label>
+          <div class="nac-sidebar-value">${Utils.escapeHtml(article.byline || 'Unknown')}</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Published</label>
+          <div class="nac-sidebar-value">${article.publishedAt ? UI.formatDatePreview(article.publishedAt) : 'Unknown'}</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Site Name</label>
+          <div class="nac-sidebar-value">${Utils.escapeHtml(article.siteName || 'Unknown')}</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Word Count</label>
+          <div class="nac-sidebar-value">${article.textContent?.split(/\s+/).length || 0} words</div>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Detected Entities</label>
+          <div class="nac-sidebar-value">
+            ${UI.state.entities?.people?.length || 0} people,
+            ${UI.state.entities?.organizations?.length || 0} organizations
+          </div>
+        </div>
+      `;
+    },
+    
+    // Generate Publish panel content
+    generatePublishPanel: () => {
+      return `
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Publication</label>
+          <select class="nac-sidebar-select" id="nac-reader-publication">
+            <option value="">Select publication...</option>
+            <option value="__new__">+ Create new</option>
+          </select>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Author</label>
+          <select class="nac-sidebar-select" id="nac-reader-author">
+            <option value="">Select author...</option>
+            <option value="__new__">+ Create new</option>
+          </select>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Tags</label>
+          <input type="text" class="nac-sidebar-input" id="nac-reader-tags"
+            placeholder="news, politics, tech...">
+        </div>
+        <div class="nac-sidebar-section">
+          <button class="nac-sidebar-btn nac-sidebar-btn-primary" id="nac-reader-publish-btn">
+            Publish Article
+          </button>
+        </div>
+        <div class="nac-sidebar-section">
+          <div class="nac-sidebar-hint">
+            Publishing creates a kind:30023 long-form article event on NOSTR.
+          </div>
+        </div>
+      `;
+    },
+    
+    // Attach publish panel listeners
+    attachPublishPanelListeners: () => {
+      // Populate publications dropdown
+      UI.populateSidebarDropdown('nac-reader-publication', 'publications');
+      UI.populateSidebarDropdown('nac-reader-author', 'people');
+      
+      document.getElementById('nac-reader-publish-btn')?.addEventListener('click', async () => {
+        // Use existing publish logic
+        UI.showToast('Opening full publish panel...', 'info');
+        UI.closeSidebar();
+        UI.closeImmersiveReader();
+        UI.open();
+      });
+    },
+    
+    // Populate sidebar dropdown with stored data
+    populateSidebarDropdown: async (selectId, storageKey) => {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      
+      try {
+        let items = [];
+        if (storageKey === 'publications') {
+          items = await Storage.publications.getAll();
+        } else if (storageKey === 'people') {
+          items = await Storage.people.getAll();
+        }
+        
+        items.forEach(([id, data]) => {
+          const option = document.createElement('option');
+          option.value = id;
+          option.textContent = data.name || id;
+          select.appendChild(option);
+        });
+      } catch (e) {
+        Utils.error('Failed to populate dropdown:', e);
+      }
+    },
+    
+    // Generate Settings panel content
+    generateSettingsPanel: () => {
+      const userIdentity = Storage.userIdentity.get();
+      const identityStatus = userIdentity ?
+        `Connected: ${userIdentity.pubkey?.substring(0, 12)}...` :
+        'Not configured';
+      
+      return `
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Your Identity</label>
+          <div class="nac-sidebar-value">${identityStatus}</div>
+          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-setup-identity"
+            style="margin-top: 8px;">
+            ${userIdentity ? 'Change Identity' : 'Setup Identity'}
+          </button>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Theme</label>
+          <select class="nac-sidebar-select" id="nac-reader-theme">
+            <option value="auto">Auto (System)</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div class="nac-sidebar-section">
+          <label class="nac-sidebar-label">Relays</label>
+          <div class="nac-sidebar-value">${CONFIG.relays.filter(r => r.enabled).length} active relays</div>
+          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-manage-relays"
+            style="margin-top: 8px;">
+            Manage Relays
+          </button>
+        </div>
+      `;
+    },
+    
+    // Attach settings panel listeners
+    attachSettingsPanelListeners: () => {
+      document.getElementById('nac-reader-setup-identity')?.addEventListener('click', () => {
+        UI.closeSidebar();
+        UI.closeImmersiveReader();
+        UI.open();
+        // Scroll to identity section
+        setTimeout(() => {
+          document.getElementById('nac-user-identity-section')?.scrollIntoView({ behavior: 'smooth' });
+        }, 300);
+      });
+      
+      document.getElementById('nac-reader-manage-relays')?.addEventListener('click', () => {
+        UI.showToast('Relay management coming soon', 'info');
+      });
+    },
+    
+    // Copy markdown from reader
+    copyMarkdownFromReader: () => {
+      if (!UI.state.markdown) {
+        UI.showToast('No content to copy', 'error');
+        return;
+      }
+      
+      navigator.clipboard.writeText(UI.state.markdown)
+        .then(() => UI.showToast('Markdown copied to clipboard', 'success'))
+        .catch(() => UI.showToast('Failed to copy', 'error'));
+    },
+    
+    // Download from reader
+    downloadFromReader: () => {
+      if (!UI.state.article || !UI.state.markdown) {
+        UI.showToast('No content to download', 'error');
+        return;
+      }
+      
+      const filename = Utils.slugify(UI.state.article.title || 'article') + '.md';
+      const blob = new Blob([UI.state.markdown], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      UI.showToast('Downloaded ' + filename, 'success');
     }
   };
 
@@ -5977,6 +8139,21 @@
         return npub.substring(5);
       }
       return npub;
+    },
+    
+    // Convert hex private key to bech32 nsec
+    hexToNsec: (hex) => {
+      // Simplified bech32 encoding - in production use bech32 library
+      return 'nsec1' + hex.substring(0, 59);
+    },
+    
+    // Convert bech32 nsec to hex
+    nsecToHex: (nsec) => {
+      // Simplified bech32 decoding - in production use bech32 library
+      if (nsec.startsWith('nsec1')) {
+        return nsec.substring(5);
+      }
+      return nsec;
     }
   };
 
@@ -6523,16 +8700,62 @@
       await Storage.set('local_keys', data);
     },
     
-    // Sign event (requires secp256k1 - placeholder)
-    signEvent: async (event, keyName) => {
-      const key = LocalKeyManager.getKey(keyName);
-      if (!key) {
-        throw new Error('Key not found: ' + keyName);
+    // Generate a new keypair with nsec
+    generateKeypair: async () => {
+      const privateKeyHex = NostrCrypto.generatePrivateKey();
+      const nsec = NostrCrypto.hexToNsec(privateKeyHex);
+      
+      // For pubkey derivation, we need secp256k1
+      // As a workaround, if NIP-07 is available, we can't derive pubkey locally
+      // So we generate a random pubkey placeholder and note this limitation
+      // In production, use nostr-tools library with proper secp256k1
+      
+      // Generate a deterministic but not cryptographically correct pubkey from private key
+      // This is ONLY for display purposes - real signing needs proper derivation
+      const pubkeyPlaceholder = await Utils.sha256(privateKeyHex);
+      
+      return {
+        privateKey: privateKeyHex,
+        nsec: nsec,
+        pubkey: pubkeyPlaceholder,
+        npub: NostrCrypto.hexToNpub(pubkeyPlaceholder)
+      };
+    },
+    
+    // Get public key from private key
+    // Note: This is a placeholder - proper implementation requires secp256k1
+    getPublicKeyFromPrivate: async (privateKeyHex) => {
+      // In a real implementation, this would use secp256k1 to derive the pubkey
+      // For now, we use a hash-based placeholder (NOT cryptographically correct)
+      Utils.log('Warning: Using placeholder pubkey derivation. For production, use nostr-tools.');
+      return await Utils.sha256(privateKeyHex);
+    },
+    
+    // Sign event with nsec or keyName
+    // Note: This is a placeholder - proper signing requires secp256k1
+    signEvent: async (event, nsecOrKeyName) => {
+      // Check if it's an nsec (starts with nsec1) or a key name
+      let privateKeyHex;
+      
+      if (nsecOrKeyName.startsWith('nsec1')) {
+        privateKeyHex = NostrCrypto.nsecToHex(nsecOrKeyName);
+      } else {
+        const key = LocalKeyManager.getKey(nsecOrKeyName);
+        if (!key) {
+          throw new Error('Key not found: ' + nsecOrKeyName);
+        }
+        privateKeyHex = key.privateKey;
       }
       
       // This is a placeholder - real signing requires secp256k1 library
-      Utils.error('Local signing not implemented - use NSecBunker');
-      throw new Error('Local signing requires secp256k1 library. Please use NSecBunker.');
+      // For now, we'll try to fall back to NIP-07 if available
+      if (NIP07Client.checkAvailability()) {
+        Utils.log('Falling back to NIP-07 for signing (local signing requires secp256k1)');
+        return await NIP07Client.signEvent(event);
+      }
+      
+      Utils.error('Local signing not implemented - NIP-07 extension required');
+      throw new Error('Local signing requires NIP-07 extension or secp256k1 library. Please install a browser extension like nos2x or Alby.');
     }
   };
 
@@ -6979,23 +9202,24 @@
     activeQueries: new Map(),
     
     // Event kinds for URL metadata
+    // Only kinds with full UI + event builder implementation are active
     EVENT_KINDS: {
-      ANNOTATION: 32123,
-      CONTENT_RATING: 32124,
-      ENTITY_REFERENCE: 32125,
-      RATING_AGGREGATE: 32126,
-      FACT_CHECK: 32127,
-      PROFILE_URL_MAPPING: 32128,
-      HEADLINE_CORRECTION: 32129,
-      DISPUTE_REBUTTAL: 32130,
-      RELATED_CONTENT: 32131,
-      URL_REACTION: 32132,
-      // Extended kinds
-      TRUST_ATTESTATION: 32140,
-      VERIFICATION_RESULT: 32141,
-      SOURCE_CITATION: 32142,
-      CONTENT_ARCHIVE: 32143,
-      METADATA_AGGREGATE: 32144
+      ANNOTATION: 32123,       // Fully implemented - has UI form + builder
+      CONTENT_RATING: 32124,   // Fully implemented - has UI form + builder
+      FACT_CHECK: 32127,       // Fully implemented - has UI form + builder
+      HEADLINE_CORRECTION: 32129, // Fully implemented - has UI form + builder
+      RELATED_CONTENT: 32131,  // Fully implemented - has UI form + builder
+      URL_REACTION: 32132      // Fully implemented - has UI form + builder
+      // The following kinds are defined but NOT YET IMPLEMENTED:
+      // ENTITY_REFERENCE: 32125,    // Not implemented - no UI or builder
+      // RATING_AGGREGATE: 32126,    // Not implemented - no UI or builder
+      // PROFILE_URL_MAPPING: 32128, // Not implemented - no UI or builder
+      // DISPUTE_REBUTTAL: 32130,    // Not implemented - no UI or builder
+      // TRUST_ATTESTATION: 32140,   // Not implemented - no UI or builder
+      // VERIFICATION_RESULT: 32141, // Not implemented - no UI or builder
+      // SOURCE_CITATION: 32142,     // Not implemented - no UI or builder
+      // CONTENT_ARCHIVE: 32143,     // Not implemented - no UI or builder
+      // METADATA_AGGREGATE: 32144   // Not implemented - no UI or builder
     },
     
     /**
@@ -7023,30 +9247,31 @@
      * @returns {Array} Array of filter objects for relay queries
      */
     buildQueryFilters: (normalizedUrl) => {
-      const coreKinds = [
+      // Only query for kinds that are fully implemented
+      const implementedKinds = [
         URLMetadataService.EVENT_KINDS.ANNOTATION,
         URLMetadataService.EVENT_KINDS.CONTENT_RATING,
-        URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE,
-        URLMetadataService.EVENT_KINDS.RATING_AGGREGATE,
         URLMetadataService.EVENT_KINDS.FACT_CHECK,
-        URLMetadataService.EVENT_KINDS.PROFILE_URL_MAPPING,
         URLMetadataService.EVENT_KINDS.HEADLINE_CORRECTION,
-        URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL,
         URLMetadataService.EVENT_KINDS.RELATED_CONTENT,
         URLMetadataService.EVENT_KINDS.URL_REACTION
       ];
       
-      const extendedKinds = [
-        URLMetadataService.EVENT_KINDS.TRUST_ATTESTATION,
-        URLMetadataService.EVENT_KINDS.VERIFICATION_RESULT,
-        URLMetadataService.EVENT_KINDS.SOURCE_CITATION,
-        URLMetadataService.EVENT_KINDS.CONTENT_ARCHIVE,
-        URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE
-      ];
+      // Extended kinds are not yet implemented - commented out for future use
+      // const extendedKinds = [
+      //   URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE,
+      //   URLMetadataService.EVENT_KINDS.RATING_AGGREGATE,
+      //   URLMetadataService.EVENT_KINDS.PROFILE_URL_MAPPING,
+      //   URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL,
+      //   URLMetadataService.EVENT_KINDS.TRUST_ATTESTATION,
+      //   URLMetadataService.EVENT_KINDS.VERIFICATION_RESULT,
+      //   URLMetadataService.EVENT_KINDS.SOURCE_CITATION,
+      //   URLMetadataService.EVENT_KINDS.CONTENT_ARCHIVE,
+      //   URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE
+      // ];
       
       return [
-        { kinds: coreKinds, "#r": [normalizedUrl] },
-        { kinds: extendedKinds, "#r": [normalizedUrl] }
+        { kinds: implementedKinds, "#r": [normalizedUrl] }
       ];
     },
     
@@ -7218,25 +9443,26 @@
             case URLMetadataService.EVENT_KINDS.HEADLINE_CORRECTION:
               metadata.headlineCorrections.push(parsed);
               break;
-            case URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL:
-              metadata.disputes.push(parsed);
-              break;
             case URLMetadataService.EVENT_KINDS.RELATED_CONTENT:
               metadata.relatedContent.push(parsed);
               break;
             case URLMetadataService.EVENT_KINDS.URL_REACTION:
               metadata.reactions.push(parsed);
               break;
-            case URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE:
-              metadata.entityReferences.push(parsed);
-              break;
-            case URLMetadataService.EVENT_KINDS.RATING_AGGREGATE:
-            case URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE:
-              // Merge aggregate data
-              if (parsed.trustScore !== undefined) {
-                metadata.aggregates.trustScore = parsed.trustScore;
-              }
-              break;
+            // The following cases are for unimplemented kinds - commented out for future use
+            // case URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL:
+            //   metadata.disputes.push(parsed);
+            //   break;
+            // case URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE:
+            //   metadata.entityReferences.push(parsed);
+            //   break;
+            // case URLMetadataService.EVENT_KINDS.RATING_AGGREGATE:
+            // case URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE:
+            //   // Merge aggregate data
+            //   if (parsed.trustScore !== undefined) {
+            //     metadata.aggregates.trustScore = parsed.trustScore;
+            //   }
+            //   break;
           }
         } catch (e) {
           Utils.log('Failed to parse event:', event.id, e);

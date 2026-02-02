@@ -1,12 +1,20 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-1.12.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.16.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
-A powerful Tampermonkey userscript that captures web articles, converts them to readable format or Markdown, and publishes them to the NOSTR network. Part of the **Decentralized News Verification Network** for building a knowledge graph of content, people, and organizations.
+A powerful Tampermonkey userscript that captures web articles and publishes them to the NOSTR network. Features an **immersive fullscreen reader** with inline reactions, comments, and distraction-free reading. Part of the **Decentralized News Verification Network**.
+
+---
 
 ## 📥 One-Click Install
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-1.16.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+  </a>
+</p>
 
 **[➡️ Install NOSTR Article Capture](https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js)**
 
@@ -14,117 +22,151 @@ A powerful Tampermonkey userscript that captures web articles, converts them to 
 
 ---
 
-## ✨ Features
+## 🆕 What's New in v1.16.0
 
-### Article Capture & Conversion
-- **Readability Mode** - Extract clean, distraction-free article content from any webpage
-- **Markdown Conversion** - Automatically convert articles to Markdown format
-- **Toggle View** - Switch between readable HTML and raw Markdown views
-- **Copy & Download** - Copy content to clipboard or download as .md file
-- **Image Embedding** - Embed images as base64 data URLs for self-contained articles
+### ✨ Fullscreen Immersive Reader Mode
 
-### Content Editing (v1.12.0) 🆕
-- **Edit Mode Toggle** - Enable editing of article content before publishing
-- **Editable Fields** - Modify title, excerpt, and body content
-- **Quick Clean Tools** - One-click cleanup buttons:
-  - Remove Ads
-  - Clean Whitespace
-  - Remove Related Articles
-  - Remove Social Prompts
-- **Revert Functionality** - Restore original content at any time
-- **Character Count** - Live character count display for content
+Experience articles the way they were meant to be read:
 
-### Enhanced URL Capture (v1.9.0)
-- **Canonical URL Detection** - Automatically detects true article URL via `<link rel="canonical">`, `og:url`, or `twitter:url`
-- **Tracking Parameter Removal** - Removes 17+ tracking parameters (UTM, fbclid, gclid, etc.)
-- **URL Source Indicator** - Shows both canonical and browser URLs when they differ
-
-### Multi-Pubkey Publishing (v1.10.0)
-- **Publication Pubkey (Signer)** - Always included as the event signer
-- **Author Pubkey** - Optional, added as p-tag with 'author' marker
-- **Capturer Pubkey** - Optional, retrieved from NIP-07 extension, added as p-tag with 'capturer' marker
-- **Collapsible Publishing Options** - Clean UI section for managing pubkey options
-
-### People & Organizations Extraction (v1.11.0)
-- **Automatic People Detection** - Extracts quoted people from article content
-- **Organization Extraction** - Identifies referenced organizations
-- **Entity Review UI** - Review, add, and remove extracted entities
-- **NOSTR Tags** - Entities added as `person` and `org` tags in published events
-
-### NOSTR Publishing
-- **Long-form Content** - Publish articles as NIP-23 long-form content
-- **Multi-Relay Support** - Publish to multiple NOSTR relays simultaneously
-- **Entity Management** - Track Publications, People, and Organizations with NOSTR keypairs
-- **Keypair Registry** - Persistent storage and export/backup of all created keypairs
-
-### URL Metadata & Annotations
-- **URL Metadata Posting** - Post annotations, fact-checks, and headline corrections to any URL
-- **URL Reactions** - Quick emoji reactions with aspect selector and reasoning
-- **Related Content Links** - Link related URLs with relationship types and relevance scores
-- **Metadata Display** - View existing URL metadata aggregated from NOSTR relays
-- **Content Ratings & Comments** - Rate content on multiple dimensions and participate in discussions
+- **🖥️ Fullscreen Mode** - Clean, distraction-free reading experience
+- **📖 Optimal Reading Width** - Content centered with comfortable line length
+- **😊 Quick Reaction Bar** - Express reactions with emoji (👍 👎 ❤️ 😂 😮 😢 😡)
+- **🔘 Floating Action Button** - Easy access to all tools without clutter
+- **💬 Inline Comments & Reactions** - View community engagement directly in the reader
+- **📂 Collapsible Sidebar Panels** - Editing, metadata, and publishing slide out when needed
 
 ---
 
-## 🆕 What's New in v1.12.0
+## 📋 Version History
 
-| Version | Feature | Description |
-|---------|---------|-------------|
-| **v1.12.0** | Content Editing | Edit mode toggle, quick clean tools, revert functionality |
-| **v1.11.0** | Entity Extraction | Automatic extraction of people and organizations from articles |
-| **v1.10.0** | Multi-Pubkey Publishing | Support for author and capturer pubkeys with p-tag markers |
-| **v1.9.0** | Enhanced URL Capture | Canonical URL detection, expanded tracking parameter removal |
+| Version | Changes |
+|---------|---------|
+| **v1.16.0** | Fullscreen immersive reader UI with inline reactions/comments |
+| **v1.15.0** | Redesigned keypair architecture (user identity vs publication signing) |
+| **v1.14.0** | Removed incomplete metadata features, cleaned up code |
+| **v1.13.0** | Enhanced date detection (JSON-LD, Substack support) + date editing |
+| **v1.12.0** | Initial features: URL capture, content editing, entity extraction |
 
 ---
 
-## 🔧 Installation
+## ✨ Features Overview
 
-### Prerequisites
+### 📖 Immersive Reader Mode
+- **Fullscreen experience** with minimal UI distractions
+- **Optimal reading width** for comfortable reading
+- **Quick reaction bar** for instant emoji reactions
+- **Floating action button** for tools access
+- **Inline comments and reactions** display from NOSTR network
 
-1. **Browser**: Microsoft Edge, Chrome, or Firefox
-2. **Tampermonkey** extension installed:
-   - [Tampermonkey for Edge](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd)
-   - [Tampermonkey for Chrome](https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
-   - [Tampermonkey for Firefox](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/)
-3. **NOSTR Signing Extension** (for publishing):
-   - [nos2x](https://github.com/fiatjaf/nos2x) - Simple and lightweight
-   - [Alby](https://getalby.com/) - Full-featured with Lightning wallet
-   - Or any other NIP-07 compatible extension
+### 📰 Article Capture
+- **Smart extraction** of title, author, date, and content
+- **Readability mode** - Clean article text from any webpage
+- **Markdown conversion** - Automatic HTML to Markdown
+- **Image embedding** - Base64 data URLs for self-contained articles
 
-### One-Click Install
+### 📅 Smart Date Detection
+- **JSON-LD structured data** parsing
+- **Meta tags** (article:published_time, datePublished)
+- **Platform-specific selectors** for Substack, Medium, WordPress
+- **Manual date editing** with calendar picker
 
-Click the link below to install the script directly:
+### ✏️ Content Editing
+- **Edit mode toggle** - Modify content before publishing
+- **Editable fields** - Title, date, excerpt, body
+- **Quick clean tools** - Remove ads, clean whitespace, remove related articles
+- **Revert functionality** - Restore original content anytime
 
-**[Install NOSTR Article Capture](https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js)**
+### 👤 User Identity (Personal NOSTR Keys)
+- Used for **URL metadata** - annotations, ratings, reactions
+- Your personal identity for engaging with content
+- Supports **NIP-07 extensions** (nos2x, Alby)
 
-### Manual Install
+### 📝 Publication Signing (Organization Keys)
+- Used for **publishing articles** to NOSTR
+- Represents publications/organizations
+- **Local keypair generation** and management
+- **Keypair registry** with export/backup
 
-1. Click on the Tampermonkey icon in your browser toolbar
-2. Select "Create a new script..."
-3. Delete any existing content
-4. Copy and paste the entire contents of [`nostr-article-capture.user.js`](nostr-article-capture.user.js)
-5. Press `Ctrl+S` (or `Cmd+S` on Mac) to save
-6. The script is now active on all web pages
+### 🏷️ URL Metadata
+- **Annotations & Comments** - Add context to any URL
+- **Content Ratings** - Multi-dimensional quality ratings
+- **Fact-Checks** - Verdicts with evidence
+- **Headline Corrections** - Fix misleading titles
+- **Quick Reactions** - Emoji reactions with reasoning
+- **Related Content** - Link related URLs
 
-### Install from File
+### 👥 People & Organizations
+- **Automatic detection** of quoted people
+- **Organization extraction** from article content
+- **Entity review UI** - Add, remove, verify entities
+- **NOSTR tags** - Entities as `person` and `org` tags
 
-1. Open Tampermonkey Dashboard (click icon → Dashboard)
-2. Go to the "Utilities" tab
-3. Under "Import from file", click "Choose file"
-4. Select the `nostr-article-capture.user.js` file
-5. Confirm the installation
+### 🔄 Auto-Updates
+- Automatic update checks from GitHub
+- Tampermonkey notification when updates available
+- One-click update installation
 
 ---
 
 ## 🚀 Quick Start
 
-1. **Navigate** to any webpage with article content
-2. **Click** the floating action button (📖) in the bottom-right corner
-3. **View** the extracted article in Readable or Markdown format
-4. **Edit** (optional) - Toggle edit mode to modify content or use quick clean tools
-5. **Configure** publishing options (author pubkey, capturer pubkey)
-6. **Review** extracted people and organizations
-7. **Publish** - Select/create a publication, optionally add tags, then click "Publish"
+1. **📥 Install** - Click the one-click install link above
+2. **🌐 Navigate** - Go to any article page
+3. **📰 Click** - Press the floating **📰** button (bottom-right)
+4. **📖 Read** - Enjoy the immersive fullscreen reader
+5. **😊 React** - Use the reaction bar for quick emoji reactions
+6. **🔧 Tools** - Click the floating action button for:
+   - ✏️ Edit article content
+   - 🏷️ Add URL metadata
+   - 📤 Publish to NOSTR
+
+---
+
+## 🔑 User Identity vs Publication
+
+### User Identity (Your Personal Keys)
+Used when posting **URL metadata**:
+- Annotations and comments
+- Content ratings
+- Fact-checks
+- Reactions
+
+**Setup:** Connect via NIP-07 extension (nos2x, Alby) or generate local keys.
+
+### Publication Identity (Organization Keys)
+Used when **publishing articles**:
+- Long-form content (kind 30023)
+- Articles are signed by the publication
+
+**Setup:** Create or import publication keypairs in the Publishing panel.
+
+---
+
+## 🌐 Supported Platforms
+
+Works on **any article page**. Special date detection for:
+
+| Platform | Detection Method |
+|----------|-----------------|
+| **Substack** | Custom selectors, JSON-LD |
+| **Medium** | JSON-LD, meta tags |
+| **WordPress** | Multiple meta formats |
+| **News Sites** | article:published_time, Schema.org |
+| **Generic** | Fallback meta detection |
+
+---
+
+## 📋 NOSTR Event Kinds
+
+| Kind | Name | Description |
+|------|------|-------------|
+| **30023** | Long-form Article | NIP-23 articles (Markdown) |
+| **32123** | Annotation/Comment | Context or corrections for URLs |
+| **32124** | Content Rating | Multi-dimensional quality ratings |
+| **32127** | Fact Check | Fact-check verdicts with evidence |
+| **32129** | Headline Correction | Corrections for misleading headlines |
+| **32131** | Related Content | Links to related URLs |
+| **32132** | Reaction | Emoji reactions with reasoning |
 
 ---
 
@@ -132,33 +174,9 @@ Click the link below to install the script directly:
 
 | Method | Description | Security |
 |--------|-------------|----------|
-| **NIP-07 Extension** | Works with nos2x, Alby, and other browser signing extensions | ⭐⭐⭐ Keys never leave the extension |
-| **NSecBunker** | Secure key management without exposing private keys | ⭐⭐⭐ Remote signing, enterprise-ready |
-| **Local Keys** | Generate and store keypairs locally in Tampermonkey | ⭐⭐ Convenient, less secure |
-
----
-
-## 📋 NOSTR Event Types
-
-| Kind | Name | Description |
-|------|------|-------------|
-| 30023 | Long-form Content | NIP-23 articles (Markdown) |
-| 32123 | URL Annotation | Context, corrections, or related info for URLs |
-| 32124 | Content Rating | Multi-dimensional content ratings |
-| 32127 | Fact-Check Claim | Fact-check verdicts with evidence |
-| 32129 | Headline Correction | Corrections for misleading headlines |
-| 32131 | Related Content | Links to related URLs with relationship types |
-| 32132 | URL Reaction | Quick emoji reactions with aspect and reasoning |
-
----
-
-## 🔄 Auto-Updates
-
-The script is configured to automatically check for updates from this repository. When a new version is available, Tampermonkey will notify you and offer to update.
-
-**Update URLs:**
-- **Update URL**: `https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js`
-- **Download URL**: `https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js`
+| **NIP-07 Extension** | nos2x, Alby, other browser extensions | ⭐⭐⭐ Keys never leave extension |
+| **NSecBunker** | Remote signing service | ⭐⭐⭐ Enterprise-ready |
+| **Local Keys** | Generated/stored in Tampermonkey | ⭐⭐ Convenient |
 
 ---
 
@@ -175,22 +193,19 @@ Pre-configured relays:
 
 ## 📚 Documentation
 
-Detailed documentation is available in the [`docs/`](docs/) folder:
+Detailed documentation in the [`docs/`](docs/) folder:
 
 | Document | Description |
 |----------|-------------|
-| [Project Summary](docs/project-summary.md) | Overview of the project goals and architecture |
-| [System Architecture](docs/system-architecture.md) | Technical architecture and design |
-| [Data Model](docs/data-model.md) | Entity relationships and data structures |
-| [API Specifications](docs/api-specifications.md) | API endpoints and interfaces |
-| [NOSTR Event Schemas](docs/nostr-event-schemas.md) | Event kind definitions and formats |
-| [NIP URL Metadata](docs/NIP-URL-METADATA.md) | URL metadata protocol specification |
-| [Development Roadmap](docs/development-roadmap.md) | Feature roadmap and milestones |
-| [UI Metadata Posting Design](docs/ui-metadata-posting-design.md) | UI/UX design for metadata features |
-| [Tampermonkey Plan](docs/tampermonkey-article-capture-plan.md) | Implementation plan for the userscript |
-| [Browser Extension Design](docs/browser-extension-design.md) | Design docs for browser extension |
+| [Project Summary](docs/project-summary.md) | Overview of project goals |
+| [System Architecture](docs/system-architecture.md) | Technical architecture |
+| [Data Model](docs/data-model.md) | Entity relationships |
+| [NOSTR Event Schemas](docs/nostr-event-schemas.md) | Event kind definitions |
+| [NIP URL Metadata](docs/NIP-URL-METADATA.md) | URL metadata protocol |
+| [UI Metadata Posting](docs/ui-metadata-posting-design.md) | UI/UX design docs |
+| [Development Roadmap](docs/development-roadmap.md) | Feature roadmap |
 
-Additional planning documents are in the [`plans/`](plans/) folder.
+Additional planning documents in [`plans/`](plans/).
 
 ---
 
