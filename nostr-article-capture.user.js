@@ -1292,14 +1292,22 @@
     article: null,
     entities: [],
     editMode: false,
+    _hiddenElements: [],
 
     // Create and show reader view
     show: async (article) => {
       ReaderView.article = article;
       ReaderView.entities = [];
       
-      // Hide original page content
-      document.body.style.display = 'none';
+      // Hide original page content by hiding each child element,
+      // rather than hiding the body itself (which would also hide our reader view)
+      ReaderView._hiddenElements = [];
+      Array.from(document.body.children).forEach(child => {
+        if (child.style.display !== 'none') {
+          ReaderView._hiddenElements.push({ el: child, prev: child.style.display });
+          child.style.display = 'none';
+        }
+      });
       
       // Create reader container
       ReaderView.container = document.createElement('div');
@@ -1380,7 +1388,11 @@
         ReaderView.container.remove();
         ReaderView.container = null;
       }
-      document.body.style.display = '';
+      // Restore previously hidden elements
+      ReaderView._hiddenElements.forEach(({ el, prev }) => {
+        el.style.display = prev;
+      });
+      ReaderView._hiddenElements = [];
       document.removeEventListener('keydown', ReaderView.handleKeyboard);
     },
 
