@@ -311,8 +311,8 @@
     signEvent: async (event, privkeyHex) => {
       try {
         // Try NIP-07 extension first
-        if (window.nostr && window.nostr.signEvent) {
-          const signed = await window.nostr.signEvent(event);
+        if (unsafeWindow.nostr && unsafeWindow.nostr.signEvent) {
+          const signed = await unsafeWindow.nostr.signEvent(event);
           return signed;
         }
 
@@ -1545,10 +1545,10 @@
         // Sign event
         let signedEvent;
         if (signingMethod === 'nip07') {
-          if (!window.nostr) {
+          if (!unsafeWindow.nostr) {
             throw new Error('NIP-07 extension not found');
           }
-          signedEvent = await window.nostr.signEvent(event);
+          signedEvent = await unsafeWindow.nostr.signEvent(event);
         } else {
           if (!identity.privkey) {
             throw new Error('No private key available');
@@ -1659,8 +1659,8 @@
         });
       } else {
         document.getElementById('nac-connect-nip07')?.addEventListener('click', async () => {
-          if (window.nostr) {
-            const pubkey = await window.nostr.getPublicKey();
+          if (unsafeWindow.nostr) {
+            const pubkey = await unsafeWindow.nostr.getPublicKey();
             await Storage.identity.set({
               pubkey,
               npub: Crypto.hexToNpub(pubkey),
