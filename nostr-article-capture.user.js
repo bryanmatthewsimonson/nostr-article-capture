@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.0.0
+// @version      2.0.1
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
 // @author       Decentralized News Network
 // @match        *://*/*
+// @require      https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/Readability.js
+// @require      https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js
+// @require      https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -785,17 +788,166 @@
         if (typeof TurndownService !== 'undefined') {
           const turndown = new TurndownService({
             headingStyle: 'atx',
-            codeBlockStyle: 'fenced'
+            hr: '---',
+            bulletListMarker: '-',
+            codeBlockStyle: 'fenced',
+            emDelimiter: '*'
           });
+
+          // Use GFM plugin for tables, strikethrough, task lists if available
+          if (typeof turndownPluginGfm !== 'undefined') {
+            turndown.use(turndownPluginGfm.gfm);
+          }
+
+          // Preserve images with alt text and src
+          turndown.addRule('images', {
+            filter: 'img',
+            replacement: (content, node) => {
+              const alt = node.getAttribute('alt') || '';
+              const src = node.getAttribute('src') || '';
+              const title = node.getAttribute('title');
+              if (!src) return '';
+              // Resolve relative URLs to absolute
+              let absoluteSrc = src;
+              try {
+                absoluteSrc = new URL(src, window.location.href).href;
+              } catch (e) { /* keep original */ }
+              if (title) {
+                return `![${alt}](${absoluteSrc} "${title}")`;
+              }
+              return `![${alt}](${absoluteSrc})`;
+            }
+          });
+
+          // Preserve figure/figcaption as image + italic caption
+          turndown.addRule('figure', {
+            filter: 'figure',
+            replacement: (content, node) => {
+              const img = node.querySelector('img');
+              const caption = node.querySelector('figcaption');
+              let result = '';
+              if (img) {
+                const alt = img.getAttribute('alt') || caption?.textContent?.trim() || '';
+                let src = img.getAttribute('src') || '';
+                try { src = new URL(src, window.location.href).href; } catch (e) { /* keep original */ }
+                result += `![${alt}](${src})`;
+              }
+              if (caption) {
+                result += '\n*' + caption.textContent.trim() + '*';
+              }
+              return '\n\n' + result + '\n\n';
+            }
+          });
+
+          // Preserve video/iframe embeds as links
+          turndown.addRule('iframeEmbed', {
+            filter: ['iframe', 'video'],
+            replacement: (content, node) => {
+              const src = node.getAttribute('src') || '';
+              if (!src) return '';
+              let absoluteSrc = src;
+              try { absoluteSrc = new URL(src, window.location.href).href; } catch (e) { /* keep original */ }
+              return `\n\n[Embedded media](${absoluteSrc})\n\n`;
+            }
+          });
+
+          // Keep line breaks within paragraphs
+          turndown.addRule('lineBreak', {
+            filter: 'br',
+            replacement: () => '  \n'
+          });
+
           return turndown.turndown(html);
         } else {
-          // Fallback: basic HTML cleanup
-          return html.replace(/<[^>]+>/g, '');
+          // Fallback: preserve structure without Turndown
+          return ContentExtractor._fallbackHtmlToMarkdown(html);
         }
       } catch (e) {
         console.error('[NAC] Markdown conversion failed:', e);
-        return html.replace(/<[^>]+>/g, '');
+        return ContentExtractor._fallbackHtmlToMarkdown(html);
       }
+    },
+
+    // Fallback HTML-to-Markdown when Turndown is not loaded
+    // Preserves headings, paragraphs, images, links, lists, blockquotes, emphasis
+    _fallbackHtmlToMarkdown: (html) => {
+      let md = html;
+
+      // Normalize line breaks
+      md = md.replace(/\r\n?/g, '\n');
+
+      // Headings
+      md = md.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n\n# $1\n\n');
+      md = md.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n\n## $1\n\n');
+      md = md.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n\n### $1\n\n');
+      md = md.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n\n#### $1\n\n');
+      md = md.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, '\n\n##### $1\n\n');
+      md = md.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, '\n\n###### $1\n\n');
+
+      // Images — extract alt and src, resolve to absolute URL
+      md = md.replace(/<img[^>]*\bsrc=["']([^"']+)["'][^>]*\balt=["']([^"']*)["'][^>]*\/?>/gi, (m, src, alt) => {
+        try { src = new URL(src, window.location.href).href; } catch (e) {}
+        return `\n\n![${alt}](${src})\n\n`;
+      });
+      md = md.replace(/<img[^>]*\balt=["']([^"']*)["'][^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi, (m, alt, src) => {
+        try { src = new URL(src, window.location.href).href; } catch (e) {}
+        return `\n\n![${alt}](${src})\n\n`;
+      });
+      // img with src only (no alt)
+      md = md.replace(/<img[^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi, (m, src) => {
+        try { src = new URL(src, window.location.href).href; } catch (e) {}
+        return `\n\n![](${src})\n\n`;
+      });
+
+      // Links
+      md = md.replace(/<a[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
+
+      // Bold / Strong
+      md = md.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
+
+      // Italic / Emphasis
+      md = md.replace(/<(em|i)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/gi, '*$2*');
+
+      // Blockquotes
+      md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (m, inner) => {
+        const lines = inner.replace(/<[^>]+>/g, '').trim().split('\n');
+        return '\n\n' + lines.map(l => '> ' + l.trim()).join('\n') + '\n\n';
+      });
+
+      // Unordered list items
+      md = md.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (m, inner) => {
+        return '- ' + inner.replace(/<[^>]+>/g, '').trim() + '\n';
+      });
+      md = md.replace(/<\/?[uo]l[^>]*>/gi, '\n');
+
+      // Horizontal rules
+      md = md.replace(/<hr[^>]*\/?>/gi, '\n\n---\n\n');
+
+      // Paragraphs and divs → double newline
+      md = md.replace(/<\/p>/gi, '\n\n');
+      md = md.replace(/<p[^>]*>/gi, '');
+      md = md.replace(/<br\s*\/?>/gi, '  \n');
+
+      // Code blocks
+      md = md.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '\n\n```\n$1\n```\n\n');
+      md = md.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
+
+      // Strip remaining tags
+      md = md.replace(/<[^>]+>/g, '');
+
+      // Decode HTML entities
+      md = md.replace(/&amp;/g, '&');
+      md = md.replace(/&lt;/g, '<');
+      md = md.replace(/&gt;/g, '>');
+      md = md.replace(/&quot;/g, '"');
+      md = md.replace(/&#039;/g, "'");
+      md = md.replace(/&nbsp;/g, ' ');
+
+      // Clean up excessive whitespace (but preserve double newlines for paragraphs)
+      md = md.replace(/\n{3,}/g, '\n\n');
+      md = md.trim();
+
+      return md;
     },
 
     // Convert image URL to base64
@@ -1203,10 +1355,20 @@
   const EventBuilder = {
     // Build NIP-23 article event (kind 30023)
     buildArticleEvent: async (article, entities, userPubkey) => {
-      // Convert content to markdown
+      // Convert content to markdown, preserving formatting and images
       let content = article.content;
-      if (content.includes('<')) {
+      if (content && content.includes('<')) {
         content = ContentExtractor.htmlToMarkdown(content);
+      }
+
+      // Embed images as base64 data URIs so they survive relay storage
+      // Falls back to original URLs if embedding fails
+      if (content) {
+        try {
+          content = await ContentExtractor.embedImagesInMarkdown(content);
+        } catch (e) {
+          console.warn('[NAC] Image embedding failed, using original URLs:', e);
+        }
       }
       
       // Build tags
