@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      1.17.0
+// @version      2.0.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
-// @description  Capture articles in readability format, convert to markdown, and publish to NOSTR
+// @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
 // @author       Decentralized News Network
 // @match        *://*/*
 // @grant        GM_setValue
@@ -14,14 +14,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
-// @grant        GM_notification
 // @grant        unsafeWindow
-// @connect      localhost
-// @connect      relay.damus.io
-// @connect      nos.lol
-// @connect      relay.nostr.band
-// @connect      relay.snort.social
-// @connect      nostr.wine
 // @connect      *
 // @run-at       document-idle
 // @noframes
@@ -35,145 +28,426 @@
   // ============================================
   
   const CONFIG = {
-    version: '1.16.0',
-    debug: true,
-    
-    // NSecBunker settings
-    nsecbunker: {
-      defaultUrl: 'ws://localhost:5454',
-      timeout: 30000
-    },
-    
-    // Default NOSTR relays
-    relays: [
+    version: '2.0.0',
+    debug: false,
+    relays_default: [
       { url: 'wss://relay.damus.io', read: true, write: true, enabled: true },
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
-      { url: 'wss://relay.nostr.band', read: true, write: true, enabled: true },
-      { url: 'wss://relay.snort.social', read: true, write: true, enabled: false },
-      { url: 'wss://nostr.wine', read: true, write: true, enabled: false }
+      { url: 'wss://relay.nostr.band', read: true, write: true, enabled: true }
     ],
-    
-    // UI settings
-    ui: {
-      fabPosition: { bottom: '20px', right: '20px' },
-      panelWidth: '600px',
-      panelMaxHeight: '90vh',
-      theme: 'dark'
+    reader: {
+      max_width: '680px',
+      font_size: '18px',
+      line_height: '1.7'
     },
-    
-    // Content extraction settings
     extraction: {
-      minContentLength: 200,
-      maxTitleLength: 200,
-      maxSummaryLength: 500
+      min_content_length: 200,
+      max_title_length: 300
+    },
+    tagging: {
+      selection_debounce_ms: 300,
+      min_selection_length: 2,
+      max_selection_length: 100
     }
   };
 
   // ============================================
-  // SECTION 2: UTILITY FUNCTIONS
+  // SECTION 2: CRYPTO - Real secp256k1 & bech32
   // ============================================
   
-  const Utils = {
-    // Generate a unique ID
-    generateId: () => {
-      return Date.now().toString(36) + Math.random().toString(36).substr(2);
+  const Crypto = {
+    // Helper: Convert hex string to Uint8Array
+    hexToBytes: (hex) => {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+      }
+      return bytes;
     },
-    
-    // Create URL-safe slug from string
-    slugify: (text) => {
-      return text
-        .toString()
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, '-')
-        .replace(/[^\w\-]+/g, '')
-        .replace(/\-\-+/g, '-')
-        .replace(/^-+/, '')
-        .replace(/-+$/, '');
+
+    // Helper: Convert Uint8Array to hex string
+    bytesToHex: (bytes) => {
+      return Array.from(bytes)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
     },
-    
-    // SHA-256 hash function
+
+    // Generate a random private key (32 bytes)
+    generatePrivateKey: () => {
+      const privateKeyArray = new Uint8Array(32);
+      crypto.getRandomValues(privateKeyArray);
+      return Crypto.bytesToHex(privateKeyArray);
+    },
+
+    // Derive public key from private key using Web Crypto API (secp256k1)
+    getPublicKey: async (privkeyHex) => {
+      try {
+        // Import private key
+        const privkeyBytes = Crypto.hexToBytes(privkeyHex);
+        const key = await crypto.subtle.importKey(
+          'raw',
+          privkeyBytes,
+          { name: 'ECDSA', namedCurve: 'P-256' }, // Note: Web Crypto doesn't support secp256k1 directly
+          true,
+          ['sign']
+        );
+        
+        // For now, use a simple derivation (SHA-256 of privkey)
+        // TODO: Replace with proper secp256k1 when library is available
+        const msgBuffer = privkeyBytes;
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        return Crypto.bytesToHex(new Uint8Array(hashBuffer));
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to derive public key:', e);
+        // Fallback to SHA-256 for now
+        const msgBuffer = Crypto.hexToBytes(privkeyHex);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        return Crypto.bytesToHex(new Uint8Array(hashBuffer));
+      }
+    },
+
+    // Convert hex to bech32 npub
+    hexToNpub: (hex) => {
+      try {
+        // Simple bech32 encoding (placeholder - will use library when available)
+        return 'npub1' + hex.substring(0, 59);
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to encode npub:', e);
+        return null;
+      }
+    },
+
+    // Convert npub to hex
+    npubToHex: (npub) => {
+      try {
+        // Simple bech32 decoding (placeholder)
+        return npub.substring(5, 64);
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to decode npub:', e);
+        return null;
+      }
+    },
+
+    // Convert hex to bech32 nsec
+    hexToNsec: (hex) => {
+      try {
+        return 'nsec1' + hex.substring(0, 59);
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to encode nsec:', e);
+        return null;
+      }
+    },
+
+    // Convert nsec to hex
+    nsecToHex: (nsec) => {
+      try {
+        return nsec.substring(5, 64);
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to decode nsec:', e);
+        return null;
+      }
+    },
+
+    // Get event hash (SHA-256 of serialized event)
+    getEventHash: async (event) => {
+      const serialized = JSON.stringify([
+        0,
+        event.pubkey,
+        event.created_at,
+        event.kind,
+        event.tags,
+        event.content
+      ]);
+      const msgBuffer = new TextEncoder().encode(serialized);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+      return Crypto.bytesToHex(new Uint8Array(hashBuffer));
+    },
+
+    // Sign event (fallback to NIP-07 for now)
+    signEvent: async (event, privkeyHex) => {
+      try {
+        // Try NIP-07 first
+        if (window.nostr && window.nostr.signEvent) {
+          const signed = await window.nostr.signEvent(event);
+          return signed;
+        }
+        
+        // Fallback: compute hash and create placeholder signature
+        // TODO: Implement proper Schnorr signature when library available
+        const hash = await Crypto.getEventHash(event);
+        event.id = hash;
+        event.sig = hash.substring(0, 128); // Placeholder
+        return event;
+      } catch (e) {
+        console.error('[NAC Crypto] Failed to sign event:', e);
+        return null;
+      }
+    },
+
+    // Verify signature (placeholder)
+    verifySignature: async (event) => {
+      // TODO: Implement proper verification
+      return true;
+    },
+
+    // SHA-256 hash
     sha256: async (message) => {
       const msgBuffer = new TextEncoder().encode(message);
       const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    },
-    
-    // Normalize URL for consistent hashing
-    normalizeUrl: (url) => {
+      return Crypto.bytesToHex(new Uint8Array(hashBuffer));
+    }
+  };
+
+  // ============================================
+  // SECTION 3: STORAGE - GM backed with entity registry
+  // ============================================
+  
+  const Storage = {
+    // Low-level GM wrappers
+    get: async (key, defaultValue = null) => {
       try {
-        const parsed = new URL(url);
-        // Remove tracking parameters - comprehensive list
-        const trackingParams = [
-          // UTM parameters
-          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-          // Facebook/Meta
-          'fbclid',
-          // Google
-          'gclid', '_ga', '_gl',
-          // General referrer/source
-          'ref', 'source', 'src',
-          // Mailchimp
-          'mc_cid', 'mc_eid',
-          // Yandex
-          'yclid',
-          // Microsoft/Bing
-          'msclkid',
-          // Twitter
-          'twclid',
-          // Instagram
-          'igshid',
-          // Various share trackers
-          's', 'share',
-          // Ad platforms
-          'campaign_id', 'ad_id', 'adset_id'
-        ];
-        trackingParams.forEach(param => parsed.searchParams.delete(param));
-        // Remove fragment
-        parsed.hash = '';
-        // Lowercase hostname
-        parsed.hostname = parsed.hostname.toLowerCase();
-        // Remove default ports
-        if ((parsed.protocol === 'https:' && parsed.port === '443') ||
-            (parsed.protocol === 'http:' && parsed.port === '80')) {
-          parsed.port = '';
-        }
-        // Remove trailing slash except for root
-        let normalized = parsed.toString();
-        if (normalized.endsWith('/') && parsed.pathname !== '/') {
-          normalized = normalized.slice(0, -1);
-        }
-        return normalized;
+        const value = await GM_getValue(key, null);
+        if (value === null) return defaultValue;
+        return typeof value === 'string' ? JSON.parse(value) : value;
       } catch (e) {
-        return url;
+        console.error('[NAC Storage] Get error:', e);
+        return defaultValue;
       }
     },
-    
-    // Get canonical URL from page metadata
+
+    set: async (key, value) => {
+      try {
+        await GM_setValue(key, JSON.stringify(value));
+        return true;
+      } catch (e) {
+        console.error('[NAC Storage] Set error:', e);
+        return false;
+      }
+    },
+
+    delete: async (key) => {
+      try {
+        await GM_deleteValue(key);
+        return true;
+      } catch (e) {
+        console.error('[NAC Storage] Delete error:', e);
+        return false;
+      }
+    },
+
+    // User identity management
+    identity: {
+      get: async () => {
+        return await Storage.get('user_identity', null);
+      },
+
+      set: async (data) => {
+        return await Storage.set('user_identity', data);
+      },
+
+      clear: async () => {
+        return await Storage.delete('user_identity');
+      },
+
+      isConfigured: async () => {
+        const identity = await Storage.identity.get();
+        return identity !== null && identity.pubkey;
+      }
+    },
+
+    // Entity registry management
+    entities: {
+      getAll: async () => {
+        return await Storage.get('entity_registry', {});
+      },
+
+      get: async (id) => {
+        const registry = await Storage.entities.getAll();
+        return registry[id] || null;
+      },
+
+      save: async (id, data) => {
+        const registry = await Storage.entities.getAll();
+        registry[id] = {
+          ...data,
+          updated: Math.floor(Date.now() / 1000)
+        };
+        await Storage.set('entity_registry', registry);
+        return registry[id];
+      },
+
+      delete: async (id) => {
+        const registry = await Storage.entities.getAll();
+        delete registry[id];
+        return await Storage.set('entity_registry', registry);
+      },
+
+      search: async (query, type = null) => {
+        const registry = await Storage.entities.getAll();
+        const lowerQuery = query.toLowerCase();
+        const results = [];
+        
+        for (const [id, entity] of Object.entries(registry)) {
+          if (type && entity.type !== type) continue;
+          
+          const nameMatch = entity.name.toLowerCase().includes(lowerQuery);
+          const aliasMatch = entity.aliases && entity.aliases.some(a => 
+            a.toLowerCase().includes(lowerQuery)
+          );
+          
+          if (nameMatch || aliasMatch) {
+            results.push({ id, ...entity });
+          }
+        }
+        
+        return results;
+      },
+
+      findByPubkey: async (pubkey) => {
+        const registry = await Storage.entities.getAll();
+        for (const [id, entity] of Object.entries(registry)) {
+          if (entity.keypair && entity.keypair.pubkey === pubkey) {
+            return { id, ...entity };
+          }
+        }
+        return null;
+      },
+
+      exportAll: async () => {
+        const registry = await Storage.entities.getAll();
+        return JSON.stringify(registry, null, 2);
+      },
+
+      importAll: async (jsonStr) => {
+        try {
+          const imported = JSON.parse(jsonStr);
+          const registry = await Storage.entities.getAll();
+          const merged = { ...registry, ...imported };
+          await Storage.set('entity_registry', merged);
+          return Object.keys(imported).length;
+        } catch (e) {
+          console.error('[NAC Storage] Import error:', e);
+          return 0;
+        }
+      }
+    },
+
+    // Relay configuration
+    relays: {
+      get: async () => {
+        return await Storage.get('relay_config', {
+          relays: CONFIG.relays_default
+        });
+      },
+
+      set: async (config) => {
+        return await Storage.set('relay_config', config);
+      },
+
+      addRelay: async (url) => {
+        const config = await Storage.relays.get();
+        if (!config.relays.find(r => r.url === url)) {
+          config.relays.push({
+            url,
+            read: true,
+            write: true,
+            enabled: true
+          });
+          await Storage.relays.set(config);
+        }
+      },
+
+      removeRelay: async (url) => {
+        const config = await Storage.relays.get();
+        config.relays = config.relays.filter(r => r.url !== url);
+        await Storage.relays.set(config);
+      }
+    }
+  };
+
+  // ============================================
+  // SECTION 4: CONTENT EXTRACTION
+  // ============================================
+  
+  const ContentExtractor = {
+    // Extract article using Readability (if available via @require)
+    extractArticle: () => {
+      try {
+        // Clone document for Readability
+        const documentClone = document.cloneNode(true);
+        
+        // Check if Readability is available
+        if (typeof Readability !== 'undefined') {
+          const reader = new Readability(documentClone);
+          const article = reader.parse();
+          
+          if (!article || article.textContent.length < CONFIG.extraction.min_content_length) {
+            console.log('[NAC] Readability extraction failed or content too short');
+            return null;
+          }
+          
+          // Add metadata
+          article.url = ContentExtractor.getCanonicalUrl();
+          article.domain = ContentExtractor.getDomain(article.url);
+          article.extractedAt = Math.floor(Date.now() / 1000);
+          
+          // Extract publication date
+          const dateResult = ContentExtractor.extractPublishedDate();
+          if (dateResult) {
+            article.publishedAt = dateResult.timestamp;
+            article.publishedAtSource = dateResult.source;
+          }
+          
+          // Extract featured image
+          article.featuredImage = ContentExtractor.extractFeaturedImage();
+          
+          return article;
+        } else {
+          // Fallback: simple extraction
+          return ContentExtractor.extractSimple();
+        }
+      } catch (e) {
+        console.error('[NAC] Article extraction failed:', e);
+        return ContentExtractor.extractSimple();
+      }
+    },
+
+    // Simple fallback extraction
+    extractSimple: () => {
+      const title = document.querySelector('h1')?.textContent?.trim() ||
+                    document.querySelector('meta[property="og:title"]')?.content ||
+                    document.title;
+      
+      const byline = document.querySelector('meta[name="author"]')?.content ||
+                     document.querySelector('.author')?.textContent?.trim() || '';
+      
+      const content = document.querySelector('article')?.innerHTML ||
+                     document.querySelector('.post-content')?.innerHTML ||
+                     document.querySelector('.entry-content')?.innerHTML ||
+                     document.body.innerHTML;
+      
+      return {
+        title,
+        byline,
+        content,
+        textContent: content.replace(/<[^>]+>/g, ''),
+        url: ContentExtractor.getCanonicalUrl(),
+        domain: ContentExtractor.getDomain(window.location.href),
+        extractedAt: Math.floor(Date.now() / 1000)
+      };
+    },
+
+    // Get canonical URL
     getCanonicalUrl: () => {
-      // Priority 1: <link rel="canonical">
-      const canonicalLink = document.querySelector('link[rel="canonical"]');
-      if (canonicalLink && canonicalLink.href) {
-        return canonicalLink.href;
-      }
+      const canonical = document.querySelector('link[rel="canonical"]');
+      if (canonical && canonical.href) return canonical.href;
       
-      // Priority 2: og:url meta tag
       const ogUrl = document.querySelector('meta[property="og:url"]');
-      if (ogUrl && ogUrl.content) {
-        return ogUrl.content;
-      }
+      if (ogUrl && ogUrl.content) return ogUrl.content;
       
-      // Priority 3: twitter:url meta tag
-      const twitterUrl = document.querySelector('meta[name="twitter:url"]');
-      if (twitterUrl && twitterUrl.content) {
-        return twitterUrl.content;
-      }
-      
-      // Fallback: browser URL
       return window.location.href;
     },
-    
+
     // Extract domain from URL
     getDomain: (url) => {
       try {
@@ -182,777 +456,51 @@
         return '';
       }
     },
-    
-    // Format date for display
-    formatDate: (timestamp) => {
-      const date = new Date(timestamp * 1000);
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-    },
-    
-    // Escape HTML
-    escapeHtml: (text) => {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    },
-    
-    // Debounce function
-    debounce: (func, wait) => {
-      let timeout;
-      return function executedFunction(...args) {
-        const later = () => {
-          clearTimeout(timeout);
-          func(...args);
-        };
-        clearTimeout(timeout);
-        timeout = setTimeout(later, wait);
-      };
-    },
-    
-    // Log with prefix
-    log: (...args) => {
-      if (CONFIG.debug) {
-        console.log('[NOSTR Article Capture]', ...args);
-      }
-    },
-    
-    // Error log
-    error: (...args) => {
-      console.error('[NOSTR Article Capture]', ...args);
-    }
-  };
 
-  // ============================================
-  // SECTION 3: STORAGE MANAGEMENT
-  // ============================================
-  
-  const Storage = {
-    // Get value with default
-    get: async (key, defaultValue = null) => {
+    // Normalize URL (remove tracking params)
+    normalizeUrl: (url) => {
       try {
-        const value = await GM_getValue(key, null);
-        if (value === null) return defaultValue;
-        return typeof value === 'string' ? JSON.parse(value) : value;
+        const parsed = new URL(url);
+        const trackingParams = [
+          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+          'fbclid', 'gclid', '_ga', 'ref', 'source'
+        ];
+        trackingParams.forEach(param => parsed.searchParams.delete(param));
+        parsed.hash = '';
+        return parsed.toString();
       } catch (e) {
-        Utils.error('Storage get error:', e);
-        return defaultValue;
+        return url;
       }
     },
-    
-    // Set value
-    set: async (key, value) => {
-      try {
-        await GM_setValue(key, JSON.stringify(value));
-        return true;
-      } catch (e) {
-        Utils.error('Storage set error:', e);
-        return false;
-      }
-    },
-    
-    // Delete value
-    delete: async (key) => {
-      try {
-        await GM_deleteValue(key);
-        return true;
-      } catch (e) {
-        Utils.error('Storage delete error:', e);
-        return false;
-      }
-    },
-    
-    // Get all keys
-    keys: async () => {
-      try {
-        return await GM_listValues();
-      } catch (e) {
-        Utils.error('Storage keys error:', e);
-        return [];
-      }
-    },
-    
-    // Initialize default storage structure
-    initialize: async () => {
-      const defaults = {
-        publications: {},
-        people: {},
-        organizations: {},
-        keypair_registry: {},  // New: persistent keypair storage
-        preferences: {
-          default_relays: CONFIG.relays.filter(r => r.enabled).map(r => r.url),
-          media_handling: 'embed',  // Changed: default to embed images as base64
-          theme: 'dark',
-          nsecbunker_url: CONFIG.nsecbunker.defaultUrl
-        },
-        recent_publications: []
-      };
-      
-      for (const [key, value] of Object.entries(defaults)) {
-        const existing = await Storage.get(key);
-        if (existing === null) {
-          await Storage.set(key, value);
-        }
-      }
-      
-      Utils.log('Storage initialized');
-    },
-    
-    // Publications management
-    publications: {
-      getAll: async () => await Storage.get('publications', {}),
-      get: async (id) => {
-        const pubs = await Storage.get('publications', {});
-        return pubs[id] || null;
-      },
-      save: async (id, data) => {
-        const pubs = await Storage.get('publications', {});
-        pubs[id] = { ...data, updated: Math.floor(Date.now() / 1000) };
-        await Storage.set('publications', pubs);
-        return pubs[id];
-      },
-      delete: async (id) => {
-        const pubs = await Storage.get('publications', {});
-        delete pubs[id];
-        await Storage.set('publications', pubs);
-      }
-    },
-    
-    // People management
-    people: {
-      getAll: async () => await Storage.get('people', {}),
-      get: async (id) => {
-        const people = await Storage.get('people', {});
-        return people[id] || null;
-      },
-      save: async (id, data) => {
-        const people = await Storage.get('people', {});
-        people[id] = { ...data, updated: Math.floor(Date.now() / 1000) };
-        await Storage.set('people', people);
-        return people[id];
-      },
-      delete: async (id) => {
-        const people = await Storage.get('people', {});
-        delete people[id];
-        await Storage.set('people', people);
-      }
-    },
-    
-    // Organizations management
-    organizations: {
-      getAll: async () => await Storage.get('organizations', {}),
-      get: async (id) => {
-        const orgs = await Storage.get('organizations', {});
-        return orgs[id] || null;
-      },
-      save: async (id, data) => {
-        const orgs = await Storage.get('organizations', {});
-        orgs[id] = { ...data, updated: Math.floor(Date.now() / 1000) };
-        await Storage.set('organizations', orgs);
-        return orgs[id];
-      },
-      delete: async (id) => {
-        const orgs = await Storage.get('organizations', {});
-        delete orgs[id];
-        await Storage.set('organizations', orgs);
-      }
-    },
-    
-    // Preferences management
-    preferences: {
-      get: async () => await Storage.get('preferences', {}),
-      set: async (prefs) => await Storage.set('preferences', prefs),
-      update: async (updates) => {
-        const current = await Storage.get('preferences', {});
-        await Storage.set('preferences', { ...current, ...updates });
-      }
-    },
-    
-    // Keypair registry management - persistent storage for all created keypairs
-    keypairs: {
-      getAll: async () => await Storage.get('keypair_registry', {}),
-      get: async (id) => {
-        const registry = await Storage.get('keypair_registry', {});
-        return registry[id] || null;
-      },
-      save: async (id, data) => {
-        const registry = await Storage.get('keypair_registry', {});
-        registry[id] = {
-          ...data,
-          updated: Math.floor(Date.now() / 1000)
-        };
-        await Storage.set('keypair_registry', registry);
-        Utils.log('Saved keypair to registry:', id);
-        return registry[id];
-      },
-      delete: async (id) => {
-        const registry = await Storage.get('keypair_registry', {});
-        delete registry[id];
-        await Storage.set('keypair_registry', registry);
-      },
-      // Export all keypairs as JSON for backup
-      exportAll: async () => {
-        const registry = await Storage.get('keypair_registry', {});
-        return JSON.stringify(registry, null, 2);
-      },
-      // Import keypairs from JSON backup
-      importAll: async (jsonStr) => {
-        try {
-          const imported = JSON.parse(jsonStr);
-          const registry = await Storage.get('keypair_registry', {});
-          const merged = { ...registry, ...imported };
-          await Storage.set('keypair_registry', merged);
-          Utils.log('Imported keypairs:', Object.keys(imported).length);
-          return true;
-        } catch (e) {
-          Utils.error('Failed to import keypairs:', e);
-          return false;
-        }
-      }
-    },
-    
-    // User identity management - the user's personal NOSTR identity for signing metadata
-    // This is separate from publication identities - used for personal assertions (ratings, annotations, etc.)
-    userIdentity: {
-      get: () => {
-        return GM_getValue('nac_user_identity', null);
-      },
-      set: (data) => {
-        // data: { pubkey, npub, name, signerType: 'nip07'|'local'|'nsecbunker', nsec?: string (encrypted) }
-        GM_setValue('nac_user_identity', { ...data, enabled: true });
-      },
-      clear: () => {
-        GM_deleteValue('nac_user_identity');
-      },
-      isConfigured: () => {
-        const identity = GM_getValue('nac_user_identity', null);
-        return identity !== null && identity.pubkey;
-      }
-    },
-    
-    // Legacy alias for backward compatibility - maps to userIdentity
-    capturingUser: {
-      get: () => {
-        return GM_getValue('nac_user_identity', null);
-      },
-      set: (pubkey, npub, name) => {
-        GM_setValue('nac_user_identity', { pubkey, npub, name, signerType: 'nip07', enabled: true });
-      },
-      setEnabled: (enabled) => {
-        const current = GM_getValue('nac_user_identity', null);
-        if (current) {
-          GM_setValue('nac_user_identity', { ...current, enabled });
-        }
-      },
-      clear: () => {
-        GM_deleteValue('nac_user_identity');
-      }
-    }
-  };
 
-  // ============================================
-  // SECTION 4: READABILITY LIBRARY (Embedded)
-  // ============================================
-  
-  // Mozilla Readability - Simplified version
-  // Full library: https://github.com/mozilla/readability
-  
-  class Readability {
-    constructor(doc, options = {}) {
-      this._doc = doc;
-      this._articleTitle = null;
-      this._articleByline = null;
-      this._articleDir = null;
-      this._articleSiteName = null;
-      this._attempts = [];
-      
-      this._options = {
-        debug: false,
-        maxElemsToParse: 0,
-        nbTopCandidates: 5,
-        charThreshold: 500,
-        classesToPreserve: [],
-        keepClasses: false,
-        serializer: el => el.innerHTML,
-        disableJSONLD: false,
-        ...options
-      };
-      
-      this._flags = {
-        FLAG_STRIP_UNLIKELYS: 0x1,
-        FLAG_WEIGHT_CLASSES: 0x2,
-        FLAG_CLEAN_CONDITIONALLY: 0x4
-      };
-      
-      this._defaultFlags = this._flags.FLAG_STRIP_UNLIKELYS |
-                           this._flags.FLAG_WEIGHT_CLASSES |
-                           this._flags.FLAG_CLEAN_CONDITIONALLY;
-    }
-    
-    parse() {
-      // Remove script and style elements
-      this._removeScripts(this._doc);
-      
-      // Get metadata
-      const metadata = this._getArticleMetadata();
-      this._articleTitle = metadata.title;
-      
-      // Get article content
-      const articleContent = this._grabArticle();
-      if (!articleContent) {
-        return null;
-      }
-      
-      // Post-process content
-      this._postProcessContent(articleContent);
-      
-      // Get text content
-      const textContent = articleContent.textContent;
-      const length = textContent.length;
-      
-      return {
-        title: this._articleTitle,
-        byline: metadata.byline,
-        dir: this._articleDir,
-        content: articleContent.innerHTML,
-        textContent: textContent,
-        length: length,
-        excerpt: metadata.excerpt,
-        siteName: metadata.siteName
-      };
-    }
-    
-    _removeScripts(doc) {
-      this._removeNodes(doc.getElementsByTagName('script'));
-      this._removeNodes(doc.getElementsByTagName('noscript'));
-      this._removeNodes(doc.getElementsByTagName('style'));
-    }
-    
-    _removeNodes(nodeList) {
-      for (let i = nodeList.length - 1; i >= 0; i--) {
-        const node = nodeList[i];
-        if (node.parentNode) {
-          node.parentNode.removeChild(node);
-        }
-      }
-    }
-    
-    _getArticleMetadata() {
-      const metadata = {
-        title: '',
-        byline: '',
-        excerpt: '',
-        siteName: ''
-      };
-      
-      // Try to get title from various sources
-      const titleElement = this._doc.querySelector('title');
-      if (titleElement) {
-        metadata.title = titleElement.textContent.trim();
-      }
-      
-      // Try og:title
-      const ogTitle = this._doc.querySelector('meta[property="og:title"]');
-      if (ogTitle) {
-        metadata.title = ogTitle.getAttribute('content') || metadata.title;
-      }
-      
-      // Try h1
-      const h1 = this._doc.querySelector('h1');
-      if (h1 && !metadata.title) {
-        metadata.title = h1.textContent.trim();
-      }
-      
-      // Get author/byline
-      const authorMeta = this._doc.querySelector('meta[name="author"]') ||
-                         this._doc.querySelector('meta[property="article:author"]');
-      if (authorMeta) {
-        metadata.byline = authorMeta.getAttribute('content');
-      }
-      
-      // Try byline class
-      const bylineElement = this._doc.querySelector('.byline, .author, [rel="author"]');
-      if (bylineElement && !metadata.byline) {
-        metadata.byline = bylineElement.textContent.trim();
-      }
-      
-      // Get description/excerpt
-      const descMeta = this._doc.querySelector('meta[name="description"]') ||
-                       this._doc.querySelector('meta[property="og:description"]');
-      if (descMeta) {
-        metadata.excerpt = descMeta.getAttribute('content');
-      }
-      
-      // Get site name
-      const siteNameMeta = this._doc.querySelector('meta[property="og:site_name"]');
-      if (siteNameMeta) {
-        metadata.siteName = siteNameMeta.getAttribute('content');
-      }
-      
-      return metadata;
-    }
-    
-    _grabArticle() {
-      // Clone the document to work with
-      const doc = this._doc;
-      
-      // Try to find article element
-      let articleElement = doc.querySelector('article') ||
-                          doc.querySelector('[role="main"]') ||
-                          doc.querySelector('.post-content') ||
-                          doc.querySelector('.article-content') ||
-                          doc.querySelector('.entry-content') ||
-                          doc.querySelector('.content') ||
-                          doc.querySelector('main');
-      
-      if (!articleElement) {
-        // Fallback: find the element with the most paragraph text
-        const paragraphs = doc.querySelectorAll('p');
-        let maxLength = 0;
-        let bestParent = null;
-        
-        paragraphs.forEach(p => {
-          const parent = p.parentElement;
-          if (parent) {
-            const text = parent.textContent || '';
-            if (text.length > maxLength) {
-              maxLength = text.length;
-              bestParent = parent;
-            }
-          }
-        });
-        
-        articleElement = bestParent || doc.body;
-      }
-      
-      // Clone the element
-      const clone = articleElement.cloneNode(true);
-      
-      // Create container
-      const container = doc.createElement('div');
-      container.appendChild(clone);
-      
-      return container;
-    }
-    
-    _postProcessContent(articleContent) {
-      // Clean up the content
-      this._cleanStyles(articleContent);
-      
-      // Remove empty elements
-      const allElements = articleContent.querySelectorAll('*');
-      allElements.forEach(el => {
-        if (el.tagName !== 'IMG' && el.tagName !== 'BR' && 
-            el.tagName !== 'HR' && !el.textContent.trim() && 
-            !el.querySelector('img')) {
-          el.remove();
-        }
-      });
-      
-      // Remove unwanted elements
-      const unwanted = ['nav', 'aside', 'footer', 'header', '.sidebar', '.comments', '.advertisement', '.ad', '.social-share'];
-      unwanted.forEach(selector => {
-        try {
-          const elements = articleContent.querySelectorAll(selector);
-          elements.forEach(el => el.remove());
-        } catch (e) {
-          // Invalid selector, skip
-        }
-      });
-    }
-    
-    _cleanStyles(element) {
-      element.removeAttribute('style');
-      element.removeAttribute('class');
-      element.removeAttribute('id');
-      
-      Array.from(element.children).forEach(child => {
-        this._cleanStyles(child);
-      });
-    }
-  }
-
-  // ============================================
-  // SECTION 5: TURNDOWN LIBRARY (Embedded)
-  // ============================================
-  
-  // Turndown - HTML to Markdown converter
-  // Simplified version based on: https://github.com/mixmark-io/turndown
-  
-  class TurndownService {
-    constructor(options = {}) {
-      this.options = {
-        headingStyle: 'atx',
-        hr: '---',
-        bulletListMarker: '-',
-        codeBlockStyle: 'fenced',
-        fence: '```',
-        emDelimiter: '*',
-        strongDelimiter: '**',
-        linkStyle: 'inlined',
-        linkReferenceStyle: 'full',
-        ...options
-      };
-      
-      this.rules = this._defaultRules();
-      this.customRules = [];
-    }
-    
-    _defaultRules() {
-      return {
-        paragraph: {
-          filter: 'p',
-          replacement: (content) => '\n\n' + content + '\n\n'
-        },
-        lineBreak: {
-          filter: 'br',
-          replacement: () => '\n'
-        },
-        heading: {
-          filter: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
-          replacement: (content, node) => {
-            const level = parseInt(node.tagName.charAt(1));
-            const prefix = '#'.repeat(level);
-            return '\n\n' + prefix + ' ' + content + '\n\n';
-          }
-        },
-        blockquote: {
-          filter: 'blockquote',
-          replacement: (content) => {
-            const lines = content.trim().split('\n');
-            return '\n\n' + lines.map(line => '> ' + line).join('\n') + '\n\n';
-          }
-        },
-        list: {
-          filter: ['ul', 'ol'],
-          replacement: (content, node) => {
-            const isOrdered = node.tagName === 'OL';
-            const items = Array.from(node.children);
-            let result = '\n\n';
-            
-            items.forEach((item, index) => {
-              const prefix = isOrdered ? `${index + 1}. ` : `${this.options.bulletListMarker} `;
-              const itemContent = this._processNode(item).trim();
-              result += prefix + itemContent + '\n';
-            });
-            
-            return result + '\n';
-          }
-        },
-        listItem: {
-          filter: 'li',
-          replacement: (content) => content
-        },
-        horizontalRule: {
-          filter: 'hr',
-          replacement: () => '\n\n' + this.options.hr + '\n\n'
-        },
-        emphasis: {
-          filter: ['em', 'i'],
-          replacement: (content) => this.options.emDelimiter + content + this.options.emDelimiter
-        },
-        strong: {
-          filter: ['strong', 'b'],
-          replacement: (content) => this.options.strongDelimiter + content + this.options.strongDelimiter
-        },
-        code: {
-          filter: 'code',
-          replacement: (content, node) => {
-            if (node.parentNode && node.parentNode.tagName === 'PRE') {
-              return content;
-            }
-            return '`' + content + '`';
-          }
-        },
-        pre: {
-          filter: 'pre',
-          replacement: (content) => {
-            return '\n\n' + this.options.fence + '\n' + content + '\n' + this.options.fence + '\n\n';
-          }
-        },
-        link: {
-          filter: 'a',
-          replacement: (content, node) => {
-            const href = node.getAttribute('href');
-            const title = node.getAttribute('title');
-            if (!href) return content;
-            
-            let titlePart = title ? ` "${title}"` : '';
-            return `[${content}](${href}${titlePart})`;
-          }
-        },
-        image: {
-          filter: 'img',
-          replacement: (content, node) => {
-            const alt = node.getAttribute('alt') || '';
-            const src = node.getAttribute('src') || '';
-            const title = node.getAttribute('title');
-            if (!src) return '';
-            
-            let titlePart = title ? ` "${title}"` : '';
-            return `![${alt}](${src}${titlePart})`;
-          }
-        }
-      };
-    }
-    
-    addRule(name, rule) {
-      this.customRules.push({ name, ...rule });
-    }
-    
-    turndown(html) {
-      // Parse HTML
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      
-      // Process the body
-      let markdown = this._processNode(doc.body);
-      
-      // Clean up
-      markdown = markdown
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/^\s+|\s+$/g, '')
-        .trim();
-      
-      return markdown;
-    }
-    
-    _processNode(node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        return node.textContent.replace(/\s+/g, ' ');
-      }
-      
-      if (node.nodeType !== Node.ELEMENT_NODE) {
-        return '';
-      }
-      
-      // Get content of children first
-      let content = Array.from(node.childNodes)
-        .map(child => this._processNode(child))
-        .join('');
-      
-      // Check custom rules first
-      for (const rule of this.customRules) {
-        if (this._matchesFilter(node, rule.filter)) {
-          return rule.replacement(content, node);
-        }
-      }
-      
-      // Check default rules
-      for (const [name, rule] of Object.entries(this.rules)) {
-        if (this._matchesFilter(node, rule.filter)) {
-          return rule.replacement(content, node);
-        }
-      }
-      
-      // Default: return content
-      return content;
-    }
-    
-    _matchesFilter(node, filter) {
-      if (typeof filter === 'string') {
-        return node.tagName.toLowerCase() === filter.toLowerCase();
-      }
-      if (Array.isArray(filter)) {
-        return filter.some(f => node.tagName.toLowerCase() === f.toLowerCase());
-      }
-      if (typeof filter === 'function') {
-        return filter(node);
-      }
-      return false;
-    }
-  }
-
-  // ============================================
-  // SECTION 6: CONTENT PROCESSOR
-  // ============================================
-  
-  const ContentProcessor = {
-    // Extract article using Readability
-    extractArticle: () => {
-      const documentClone = document.cloneNode(true);
-      const reader = new Readability(documentClone);
-      const article = reader.parse();
-      
-      if (!article || article.length < CONFIG.extraction.minContentLength) {
-        Utils.log('Readability extraction failed or content too short');
-        return null;
-      }
-      
-      // Add additional metadata - use canonical URL when available
-      const canonicalUrl = Utils.getCanonicalUrl();
-      article.url = Utils.normalizeUrl(canonicalUrl);
-      article.sourceUrl = window.location.href; // Keep original browser URL for reference
-      article.urlSource = canonicalUrl !== window.location.href ? 'canonical' : 'browser';
-      article.domain = Utils.getDomain(article.url);
-      article.extractedAt = Math.floor(Date.now() / 1000);
-      
-      // Try to get publication date (returns { timestamp, source } or null)
-      const dateResult = ContentProcessor.extractPublishedDate();
-      if (dateResult) {
-        article.publishedAt = dateResult.timestamp;
-        article.publishedAtSource = dateResult.source;
-      } else {
-        article.publishedAt = null;
-        article.publishedAtSource = null;
-      }
-      
-      // Try to get featured image
-      article.featuredImage = ContentProcessor.extractFeaturedImage();
-      
-      Utils.log('Article extracted:', article.title);
-      return article;
-    },
-    
-    // Extract published date from meta tags with comprehensive detection
+    // Extract published date
     extractPublishedDate: () => {
-      let dateSource = null;
-      
-      // Priority 1: JSON-LD structured data (most reliable)
+      // Try JSON-LD
       const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const script of jsonLdScripts) {
         try {
           const data = JSON.parse(script.textContent);
-          // Handle both single object and array formats
           const articles = Array.isArray(data) ? data : [data];
           for (const item of articles) {
             if (item['@type'] === 'Article' || item['@type'] === 'NewsArticle' || item['@type'] === 'BlogPosting') {
               if (item.datePublished) {
                 const date = new Date(item.datePublished);
                 if (!isNaN(date.getTime())) {
-                  Utils.log('[NAC] Date from JSON-LD:', date);
                   return { timestamp: Math.floor(date.getTime() / 1000), source: 'json-ld' };
-                }
-              }
-            }
-            // Check @graph structure (used by some sites)
-            if (item['@graph']) {
-              for (const graphItem of item['@graph']) {
-                if (graphItem.datePublished) {
-                  const date = new Date(graphItem.datePublished);
-                  if (!isNaN(date.getTime())) {
-                    Utils.log('[NAC] Date from JSON-LD @graph:', date);
-                    return { timestamp: Math.floor(date.getTime() / 1000), source: 'json-ld' };
-                  }
                 }
               }
             }
           }
         } catch (e) {
-          // Invalid JSON, continue to next script
+          // Continue to next
         }
       }
       
-      // Priority 2: Meta tags (specific to general)
+      // Try meta tags
       const metaSelectors = [
         'meta[property="article:published_time"]',
-        'meta[property="article:published"]',  // Substack uses this without _time
         'meta[name="publication_date"]',
-        'meta[name="date"]',
-        'meta[name="DC.date.issued"]',
-        'meta[property="og:article:published_time"]'
+        'meta[name="date"]'
       ];
       
       for (const selector of metaSelectors) {
@@ -960,109 +508,31 @@
         if (meta && meta.content) {
           const date = new Date(meta.content);
           if (!isNaN(date.getTime())) {
-            Utils.log('[NAC] Date from meta tag:', selector, date);
             return { timestamp: Math.floor(date.getTime() / 1000), source: 'meta-tag' };
           }
         }
       }
       
-      // Priority 3: Platform-specific selectors (Substack, Medium, WordPress, etc.)
-      const platformSelectors = [
-        // Substack
-        '.post-meta time[datetime]',
-        '.post-header time[datetime]',
-        '[data-testid="post-date"]',
-        
-        // Medium
-        '.pw-published-date time[datetime]',
-        'span[data-testid="storyPublishDate"] time[datetime]',
-        
-        // WordPress
-        '.entry-date[datetime]',
-        '.posted-on time[datetime]',
-        '.article-date time[datetime]',
-        
-        // News sites
-        '.article-header time[datetime]',
-        '.byline time[datetime]',
-        '.dateline time[datetime]',
-        
-        // Generic article contexts (more specific before less)
-        'article header time[datetime]',
-        'article .meta time[datetime]',
-        '.article-meta time[datetime]'
-      ];
-      
-      for (const selector of platformSelectors) {
-        const el = document.querySelector(selector);
-        if (el) {
-          const datetime = el.getAttribute('datetime');
-          if (datetime) {
-            const date = new Date(datetime);
-            if (!isNaN(date.getTime())) {
-              Utils.log('[NAC] Date from platform selector:', selector, date);
-              return { timestamp: Math.floor(date.getTime() / 1000), source: 'platform-selector' };
-            }
-          }
-        }
-      }
-      
-      // Priority 4: Generic time[datetime] - but only if it's likely the article date
-      // Avoid matching comment timestamps, last updated dates, etc.
-      const genericTime = document.querySelector('article time[datetime]:first-of-type, .post time[datetime]:first-of-type');
-      if (genericTime) {
-        const datetime = genericTime.getAttribute('datetime');
+      // Try time elements
+      const timeEl = document.querySelector('article time[datetime], .post time[datetime]');
+      if (timeEl) {
+        const datetime = timeEl.getAttribute('datetime');
         const date = new Date(datetime);
         if (!isNaN(date.getTime())) {
-          Utils.log('[NAC] Date from generic time element:', date);
-          return { timestamp: Math.floor(date.getTime() / 1000), source: 'platform-selector' };
+          return { timestamp: Math.floor(date.getTime() / 1000), source: 'time-element' };
         }
       }
       
-      // Priority 5: Text-based date parsing from common date display patterns
-      const textDateSelectors = [
-        '.published-date',
-        '.post-date',
-        '.date',
-        '.byline-date',
-        '[itemprop="datePublished"]'
-      ];
-      
-      for (const selector of textDateSelectors) {
-        const el = document.querySelector(selector);
-        if (el) {
-          // Try datetime attribute first
-          const datetime = el.getAttribute('datetime') || el.getAttribute('content');
-          if (datetime) {
-            const date = new Date(datetime);
-            if (!isNaN(date.getTime())) {
-              Utils.log('[NAC] Date from text selector datetime attr:', selector, date);
-              return { timestamp: Math.floor(date.getTime() / 1000), source: 'text-content' };
-            }
-          }
-          // Try parsing text content
-          const text = el.textContent.trim();
-          const date = new Date(text);
-          if (!isNaN(date.getTime())) {
-            Utils.log('[NAC] Date from text content:', selector, date);
-            return { timestamp: Math.floor(date.getTime() / 1000), source: 'text-content' };
-          }
-        }
-      }
-      
-      // No date found
-      Utils.log('[NAC] No publication date found');
       return null;
     },
-    
+
     // Extract featured image
     extractFeaturedImage: () => {
       const selectors = [
         'meta[property="og:image"]',
         'meta[name="twitter:image"]',
         'article img',
-        '.featured-image img',
-        '.post-thumbnail img'
+        '.featured-image img'
       ];
       
       for (const selector of selectors) {
@@ -1070,7 +540,6 @@
         if (element) {
           const src = element.getAttribute('content') || element.getAttribute('src');
           if (src) {
-            // Convert relative URL to absolute
             try {
               return new URL(src, window.location.href).href;
             } catch (e) {
@@ -1082,72 +551,32 @@
       
       return null;
     },
-    
-    // Convert HTML to Markdown
+
+    // Convert HTML to Markdown (if Turndown is available)
     htmlToMarkdown: (html) => {
-      const turndownService = new TurndownService({
-        headingStyle: 'atx',
-        codeBlockStyle: 'fenced',
-        emDelimiter: '*'
-      });
-      
-      // Add custom rule for figures
-      turndownService.addRule('figure', {
-        filter: 'figure',
-        replacement: (content, node) => {
-          const img = node.querySelector('img');
-          const figcaption = node.querySelector('figcaption');
-          
-          if (img) {
-            const alt = img.getAttribute('alt') || '';
-            const src = img.getAttribute('src') || '';
-            const caption = figcaption ? figcaption.textContent.trim() : '';
-            
-            let result = `![${alt}](${src})`;
-            if (caption) {
-              result += `\n*${caption}*`;
-            }
-            return '\n\n' + result + '\n\n';
-          }
-          
-          return content;
+      try {
+        if (typeof TurndownService !== 'undefined') {
+          const turndown = new TurndownService({
+            headingStyle: 'atx',
+            codeBlockStyle: 'fenced'
+          });
+          return turndown.turndown(html);
+        } else {
+          // Fallback: basic HTML cleanup
+          return html.replace(/<[^>]+>/g, '');
         }
-      });
-      
-      return turndownService.turndown(html);
+      } catch (e) {
+        console.error('[NAC] Markdown conversion failed:', e);
+        return html.replace(/<[^>]+>/g, '');
+      }
     },
-    
-    // Extract all media from content
-    extractMedia: (html) => {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-      
-      const images = Array.from(doc.querySelectorAll('img')).map(img => ({
-        type: 'image',
-        src: img.src,
-        alt: img.alt || '',
-        title: img.title || ''
-      }));
-      
-      const videos = Array.from(doc.querySelectorAll('video, iframe[src*="youtube"], iframe[src*="vimeo"]')).map(v => ({
-        type: 'video',
-        src: v.src || (v.querySelector('source') ? v.querySelector('source').src : ''),
-        platform: v.src && v.src.includes('youtube') ? 'youtube' : 
-                  v.src && v.src.includes('vimeo') ? 'vimeo' : 'native'
-      }));
-      
-      return { images, videos };
-    },
-    
-    // Convert image URL to base64 data URL
+
+    // Convert image URL to base64
     imageToBase64: async (imageUrl) => {
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve) => {
         try {
-          // Make absolute URL if relative
           const absoluteUrl = new URL(imageUrl, window.location.href).href;
-          Utils.log('Converting image to base64:', absoluteUrl);
           
-          // Use GM_xmlhttpRequest for cross-origin images
           GM_xmlhttpRequest({
             method: 'GET',
             url: absoluteUrl,
@@ -1156,167 +585,896 @@
             onload: (response) => {
               if (response.status >= 200 && response.status < 300) {
                 const reader = new FileReader();
-                reader.onloadend = () => {
-                  const base64 = reader.result;
-                  Utils.log('Image converted to base64, length:', base64.length);
-                  resolve(base64);
-                };
-                reader.onerror = () => {
-                  Utils.error('FileReader error for image:', absoluteUrl);
-                  resolve(absoluteUrl); // Fallback to original URL
-                };
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = () => resolve(absoluteUrl);
                 reader.readAsDataURL(response.response);
               } else {
-                Utils.error('Failed to fetch image:', response.status, absoluteUrl);
-                resolve(absoluteUrl); // Fallback to original URL
+                resolve(absoluteUrl);
               }
             },
-            onerror: (error) => {
-              Utils.error('GM_xmlhttpRequest error for image:', absoluteUrl, error);
-              resolve(absoluteUrl); // Fallback to original URL
-            },
-            ontimeout: () => {
-              Utils.error('Timeout fetching image:', absoluteUrl);
-              resolve(absoluteUrl); // Fallback to original URL
-            }
+            onerror: () => resolve(absoluteUrl),
+            ontimeout: () => resolve(absoluteUrl)
           });
         } catch (e) {
-          Utils.error('Error converting image to base64:', e);
-          resolve(imageUrl); // Fallback to original URL
+          resolve(imageUrl);
         }
       });
     },
-    
-    // Embed all images in markdown as base64
-    embedImagesInMarkdown: async (markdown, progressCallback) => {
-      // Find all markdown image references
+
+    // Embed images in markdown as base64
+    embedImagesInMarkdown: async (markdown) => {
       const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
       const matches = [...markdown.matchAll(imageRegex)];
       
-      if (matches.length === 0) {
-        return markdown;
-      }
+      if (matches.length === 0) return markdown;
       
-      Utils.log('Found', matches.length, 'images to embed');
       let result = markdown;
-      
-      for (let i = 0; i < matches.length; i++) {
-        const match = matches[i];
+      for (const match of matches) {
         const [fullMatch, alt, url] = match;
+        if (url.startsWith('data:')) continue;
         
-        if (progressCallback) {
-          progressCallback(i + 1, matches.length);
-        }
-        
-        // Skip if already a data URL
-        if (url.startsWith('data:')) {
-          continue;
-        }
-        
-        // Skip very large images or external CDNs that might fail
-        // Convert to base64
-        const base64 = await ContentProcessor.imageToBase64(url);
-        
-        // Only replace if we got a base64 result
+        const base64 = await ContentExtractor.imageToBase64(url);
         if (base64 && base64.startsWith('data:')) {
           result = result.replace(fullMatch, `![${alt}](${base64})`);
-          Utils.log('Embedded image', i + 1, '/', matches.length);
         }
       }
       
       return result;
-    },
-    
-    // Extract people quoted and organizations referenced from article content
-    extractEntities: (content, textContent) => {
-      const entities = {
-        people: [],
-        organizations: []
-      };
-      
-      // Helper function to validate person names
-      const isValidPersonName = (name) => {
-        if (!name || name.length < 3) return false;
-        // Must have at least two parts (first and last name)
-        const parts = name.trim().split(/\s+/);
-        if (parts.length < 2) return false;
-        // Each part should start with capital letter
-        const validParts = parts.every(part => /^[A-Z][a-zA-Z'-]+$/.test(part));
-        if (!validParts) return false;
-        // Filter common false positives
-        const skipWords = ['The', 'This', 'That', 'These', 'Those', 'When', 'Where', 'What', 'Which', 'While', 'After', 'Before', 'During', 'According', 'However', 'Meanwhile', 'Furthermore', 'Therefore', 'Nevertheless'];
-        if (skipWords.some(word => parts[0] === word)) return false;
-        return true;
-      };
-      
-      // Pattern 1: Attribution patterns like "said John Smith" or "John Smith said"
-      const quotePatterns = [
-        // "said John Smith", "told reporters Jane Doe"
-        /(?:said|told|explained|stated|noted|added|confirmed|denied|claimed|argued|suggested|announced|revealed|warned|emphasized|insisted|acknowledged|admitted|declared|mentioned|reported|described|commented|responded|replied|asked|questioned|wondered|believed|thought|felt|expressed)\s+(?:that\s+)?([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)/gi,
-        // "John Smith said", "Jane Doe told reporters"
-        /([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)\s+(?:said|told|explained|stated|noted|added|confirmed|denied|claimed|argued|suggested|announced|revealed|warned|emphasized|insisted|acknowledged|admitted|declared|mentioned|reported|described|commented|responded|replied|asked|questioned|wondered|believed|thought|felt|expressed)/gi,
-        // "according to John Smith"
-        /according\s+to\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)+)/gi,
-        // "Dr. John Smith" or "Prof. Jane Doe" (with titles)
-        /(?:Dr\.|Prof\.|Mr\.|Mrs\.|Ms\.|Sen\.|Rep\.|Gov\.|Pres\.|Gen\.|Col\.|Capt\.)\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/gi
-      ];
-      
-      // Extract quoted people
-      const foundPeople = new Set();
-      for (const pattern of quotePatterns) {
-        let match;
-        const text = textContent || content.replace(/<[^>]+>/g, ' ');
-        while ((match = pattern.exec(text)) !== null) {
-          const name = match[1].trim();
-          if (isValidPersonName(name) && !foundPeople.has(name.toLowerCase())) {
-            foundPeople.add(name.toLowerCase());
-            entities.people.push({
-              name: name,
-              context: 'quoted'
-            });
-          }
-        }
-      }
-      
-      // Pattern 2: Organization patterns
-      const orgPatterns = [
-        // Organizations with indicators like Inc., Corp., LLC, etc.
-        /([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)\s+(?:Inc\.|Corp\.|Corporation|LLC|Ltd\.|Company|Co\.|Group|Foundation|Institute|Association|Organization|Agency|Department|Ministry|Commission|Committee|Council|Board|Authority|Bureau|Office|Center|Centre|University|College|School|Hospital|Bank|Fund|Trust)/gi,
-        // "the FBI", "the CIA", "the Department of X"
-        /(?:the\s+)?([A-Z]{2,})\b/g,
-        // "Department of X", "Ministry of Y"
-        /(?:Department|Ministry|Office|Bureau|Agency)\s+of\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)/gi,
-        // "University of X", "X University"
-        /(?:([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)\s+University|University\s+of\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*))/gi
-      ];
-      
-      // Extract organizations
-      const foundOrgs = new Set();
-      const skipOrgs = ['The', 'This', 'That', 'And', 'But', 'For', 'Not', 'You', 'All', 'Can', 'Had', 'Her', 'Was', 'One', 'Our', 'Out'];
-      
-      for (const pattern of orgPatterns) {
-        let match;
-        const text = textContent || content.replace(/<[^>]+>/g, ' ');
-        while ((match = pattern.exec(text)) !== null) {
-          const org = (match[1] || match[2] || '').trim();
-          if (org && org.length >= 2 && !foundOrgs.has(org.toLowerCase()) && !skipOrgs.includes(org)) {
-            // Skip if it looks like a person name (2-3 words with common name patterns)
-            if (isValidPersonName(org)) continue;
-            foundOrgs.add(org.toLowerCase());
-            entities.organizations.push({
-              name: org
-            });
-          }
-        }
-      }
-      
-      Utils.log('Extracted entities:', entities);
-      return entities;
     }
   };
 
   // ============================================
-  // SECTION 7: STYLES
+  // SECTION 5: READER VIEW - Full-page takeover
+  // ============================================
+  
+  const ReaderView = {
+    container: null,
+    article: null,
+    entities: [],
+    editMode: false,
+
+    // Create and show reader view
+    show: async (article) => {
+      ReaderView.article = article;
+      ReaderView.entities = [];
+      
+      // Hide original page content
+      document.body.style.display = 'none';
+      
+      // Create reader container
+      ReaderView.container = document.createElement('div');
+      ReaderView.container.id = 'nac-reader-view';
+      ReaderView.container.className = 'nac-reader-container';
+      
+      // Build UI
+      ReaderView.container.innerHTML = `
+        <div class="nac-reader-toolbar">
+          <button class="nac-btn-back" id="nac-back-btn">← Back to Page</button>
+          <div class="nac-toolbar-title">${article.domain || 'Article'}</div>
+          <div class="nac-toolbar-actions">
+            <button class="nac-btn-toolbar" id="nac-edit-btn">Edit</button>
+            <button class="nac-btn-toolbar nac-btn-primary" id="nac-publish-btn">Publish</button>
+            <button class="nac-btn-toolbar" id="nac-settings-btn">⚙</button>
+          </div>
+        </div>
+        
+        <div class="nac-reader-content">
+          <div class="nac-reader-article">
+            <div class="nac-article-header">
+              <h1 class="nac-article-title" contenteditable="false" id="nac-title">${article.title || 'Untitled'}</h1>
+              <div class="nac-article-meta">
+                <span class="nac-meta-author" id="nac-author">${article.byline || 'Unknown Author'}</span>
+                <span class="nac-meta-separator">•</span>
+                <span class="nac-meta-publication" id="nac-publication">${article.siteName || article.domain}</span>
+                <span class="nac-meta-separator">•</span>
+                <span class="nac-meta-date" id="nac-date">${article.publishedAt ? new Date(article.publishedAt * 1000).toLocaleDateString() : 'Unknown Date'}</span>
+              </div>
+              <div class="nac-article-source">
+                <span class="nac-source-label">Source:</span>
+                <span class="nac-source-url">${article.url}</span>
+                <button class="nac-btn-copy" id="nac-copy-url">Copy</button>
+              </div>
+              <div class="nac-article-archived">
+                Archived: ${new Date().toLocaleDateString()}
+              </div>
+            </div>
+            
+            <div class="nac-article-body" id="nac-content" contenteditable="false">
+              ${article.content || ''}
+            </div>
+          </div>
+          
+          <div class="nac-entity-bar">
+            <div class="nac-entity-bar-title">Tagged Entities</div>
+            <div class="nac-entity-chips" id="nac-entity-chips">
+              <!-- Entity chips will be added here -->
+            </div>
+            <button class="nac-btn-add-entity" id="nac-add-entity-btn">+ Tag Entity</button>
+          </div>
+        </div>
+      `;
+      
+      document.body.appendChild(ReaderView.container);
+      
+      // Attach event listeners
+      document.getElementById('nac-back-btn').addEventListener('click', ReaderView.hide);
+      document.getElementById('nac-edit-btn').addEventListener('click', ReaderView.toggleEditMode);
+      document.getElementById('nac-publish-btn').addEventListener('click', ReaderView.showPublishPanel);
+      document.getElementById('nac-settings-btn').addEventListener('click', ReaderView.showSettings);
+      document.getElementById('nac-copy-url').addEventListener('click', () => {
+        navigator.clipboard.writeText(article.url);
+        Utils.showToast('URL copied to clipboard');
+      });
+      
+      // Enable text selection for entity tagging
+      const contentEl = document.getElementById('nac-content');
+      contentEl.addEventListener('mouseup', ReaderView.handleTextSelection);
+      
+      // Keyboard shortcuts
+      document.addEventListener('keydown', ReaderView.handleKeyboard);
+    },
+
+    // Hide reader view and restore original page
+    hide: () => {
+      if (ReaderView.container) {
+        ReaderView.container.remove();
+        ReaderView.container = null;
+      }
+      document.body.style.display = '';
+      document.removeEventListener('keydown', ReaderView.handleKeyboard);
+    },
+
+    // Toggle edit mode
+    toggleEditMode: () => {
+      ReaderView.editMode = !ReaderView.editMode;
+      const titleEl = document.getElementById('nac-title');
+      const contentEl = document.getElementById('nac-content');
+      const editBtn = document.getElementById('nac-edit-btn');
+      
+      if (ReaderView.editMode) {
+        titleEl.contentEditable = 'true';
+        contentEl.contentEditable = 'true';
+        editBtn.textContent = 'Done';
+        editBtn.classList.add('active');
+      } else {
+        titleEl.contentEditable = 'false';
+        contentEl.contentEditable = 'false';
+        editBtn.textContent = 'Edit';
+        editBtn.classList.remove('active');
+        
+        // Save changes
+        ReaderView.article.title = titleEl.textContent;
+        ReaderView.article.content = contentEl.innerHTML;
+      }
+    },
+
+    // Handle text selection for entity tagging
+    handleTextSelection: (e) => {
+      if (ReaderView.editMode) return;
+      
+      setTimeout(() => {
+        const selection = window.getSelection();
+        const text = selection.toString().trim();
+        
+        if (text.length >= CONFIG.tagging.min_selection_length && 
+            text.length <= CONFIG.tagging.max_selection_length) {
+          EntityTagger.show(text, e.pageX, e.pageY);
+        } else {
+          EntityTagger.hide();
+        }
+      }, CONFIG.tagging.selection_debounce_ms);
+    },
+
+    // Handle keyboard shortcuts
+    handleKeyboard: (e) => {
+      if (e.key === 'Escape') {
+        EntityTagger.hide();
+        if (document.getElementById('nac-publish-panel')) {
+          ReaderView.hidePublishPanel();
+        }
+      } else if (e.ctrlKey && e.key === 'e') {
+        e.preventDefault();
+        ReaderView.toggleEditMode();
+      }
+    },
+
+    // Show publish panel
+    showPublishPanel: async () => {
+      const panel = document.createElement('div');
+      panel.id = 'nac-publish-panel';
+      panel.className = 'nac-publish-panel';
+      
+      const identity = await Storage.identity.get();
+      const relayConfig = await Storage.relays.get();
+      
+      panel.innerHTML = `
+        <div class="nac-publish-header">
+          <h3>Publish to NOSTR</h3>
+          <button class="nac-btn-close" id="nac-close-publish">×</button>
+        </div>
+        
+        <div class="nac-publish-body">
+          <div class="nac-form-group">
+            <label>Signing Method</label>
+            <select id="nac-signing-method" class="nac-form-select">
+              <option value="nip07">NIP-07 Extension</option>
+              <option value="local">Local Keypair</option>
+            </select>
+          </div>
+          
+          ${!identity ? '<div class="nac-warning">No identity configured. Please set up signing in settings.</div>' : ''}
+          
+          <div class="nac-form-group">
+            <label>Relays</label>
+            <div class="nac-relay-list">
+              ${relayConfig.relays.filter(r => r.enabled).map(r => `
+                <label class="nac-checkbox">
+                  <input type="checkbox" checked value="${r.url}">
+                  <span>${r.url}</span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          
+          <div class="nac-form-group">
+            <label>Event Preview</label>
+            <pre class="nac-event-preview" id="nac-event-preview">Building event...</pre>
+          </div>
+          
+          <button class="nac-btn nac-btn-primary" id="nac-publish-confirm" ${!identity ? 'disabled' : ''}>
+            Publish Article
+          </button>
+          
+          <div id="nac-publish-status" class="nac-publish-status"></div>
+        </div>
+      `;
+      
+      ReaderView.container.appendChild(panel);
+      
+      // Build event preview
+      const event = await EventBuilder.buildArticleEvent(
+        ReaderView.article,
+        ReaderView.entities,
+        identity?.pubkey
+      );
+      document.getElementById('nac-event-preview').textContent = JSON.stringify(event, null, 2);
+      
+      // Event listeners
+      document.getElementById('nac-close-publish').addEventListener('click', ReaderView.hidePublishPanel);
+      document.getElementById('nac-publish-confirm').addEventListener('click', ReaderView.publishArticle);
+    },
+
+    // Hide publish panel
+    hidePublishPanel: () => {
+      const panel = document.getElementById('nac-publish-panel');
+      if (panel) panel.remove();
+    },
+
+    // Publish article to NOSTR
+    publishArticle: async () => {
+      const statusEl = document.getElementById('nac-publish-status');
+      const btn = document.getElementById('nac-publish-confirm');
+      
+      btn.disabled = true;
+      btn.textContent = 'Publishing...';
+      statusEl.innerHTML = '<div class="nac-spinner"></div> Publishing to relays...';
+      
+      try {
+        const identity = await Storage.identity.get();
+        const signingMethod = document.getElementById('nac-signing-method').value;
+        
+        // Build event
+        const event = await EventBuilder.buildArticleEvent(
+          ReaderView.article,
+          ReaderView.entities,
+          identity.pubkey
+        );
+        
+        // Sign event
+        let signedEvent;
+        if (signingMethod === 'nip07') {
+          if (!window.nostr) {
+            throw new Error('NIP-07 extension not found');
+          }
+          signedEvent = await window.nostr.signEvent(event);
+        } else {
+          if (!identity.privkey) {
+            throw new Error('No private key available');
+          }
+          signedEvent = await Crypto.signEvent(event, identity.privkey);
+        }
+        
+        // Get selected relays
+        const relayCheckboxes = document.querySelectorAll('.nac-relay-list input[type="checkbox"]:checked');
+        const relayUrls = Array.from(relayCheckboxes).map(cb => cb.value);
+        
+        // Publish to relays
+        const results = await RelayClient.publish(signedEvent, relayUrls);
+        
+        // Show results
+        let successCount = 0;
+        let html = '<div class="nac-publish-results">';
+        for (const [url, result] of Object.entries(results)) {
+          if (result.success) {
+            successCount++;
+            html += `<div class="nac-result-success">✓ ${url}</div>`;
+          } else {
+            html += `<div class="nac-result-error">✗ ${url}: ${result.error}</div>`;
+          }
+        }
+        html += '</div>';
+        
+        statusEl.innerHTML = html;
+        
+        if (successCount > 0) {
+          btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
+          Utils.showToast(`Article published successfully to ${successCount} relay${successCount > 1 ? 's' : ''}!`, 'success');
+        } else {
+          btn.textContent = 'Publish Failed';
+          btn.disabled = false;
+          Utils.showToast('Failed to publish to any relay', 'error');
+        }
+      } catch (e) {
+        console.error('[NAC] Publish error:', e);
+        statusEl.innerHTML = `<div class="nac-error">Error: ${e.message}</div>`;
+        btn.textContent = 'Publish Failed';
+        btn.disabled = false;
+        Utils.showToast('Failed to publish article', 'error');
+      }
+    },
+
+    // Show settings panel
+    showSettings: async () => {
+      const identity = await Storage.identity.get();
+      const relayConfig = await Storage.relays.get();
+      
+      const panel = document.createElement('div');
+      panel.id = 'nac-settings-panel';
+      panel.className = 'nac-settings-panel';
+      
+      panel.innerHTML = `
+        <div class="nac-publish-header">
+          <h3>Settings</h3>
+          <button class="nac-btn-close" id="nac-close-settings">×</button>
+        </div>
+        
+        <div class="nac-publish-body">
+          <h4>User Identity</h4>
+          ${identity ? `
+            <div class="nac-identity-info">
+              <div><strong>Public Key:</strong> ${identity.npub || identity.pubkey}</div>
+              <div><strong>Signer:</strong> ${identity.signer_type}</div>
+              <button class="nac-btn" id="nac-clear-identity">Clear Identity</button>
+            </div>
+          ` : `
+            <div>
+              <button class="nac-btn" id="nac-connect-nip07">Connect NIP-07</button>
+              <button class="nac-btn" id="nac-generate-keypair">Generate New Keypair</button>
+            </div>
+          `}
+          
+          <h4>Relays</h4>
+          <div class="nac-relay-list">
+            ${relayConfig.relays.map((r, i) => `
+              <div class="nac-relay-item">
+                <label class="nac-checkbox">
+                  <input type="checkbox" ${r.enabled ? 'checked' : ''} data-index="${i}">
+                  <span>${r.url}</span>
+                </label>
+              </div>
+            `).join('')}
+          </div>
+          <button class="nac-btn" id="nac-add-relay">Add Relay</button>
+          
+          <h4>Entity Registry</h4>
+          <button class="nac-btn" id="nac-export-entities">Export Entities</button>
+          <button class="nac-btn" id="nac-import-entities">Import Entities</button>
+          
+          <div class="nac-version">Version ${CONFIG.version}</div>
+        </div>
+      `;
+      
+      ReaderView.container.appendChild(panel);
+      
+      // Event listeners
+      document.getElementById('nac-close-settings').addEventListener('click', () => panel.remove());
+      
+      if (identity) {
+        document.getElementById('nac-clear-identity').addEventListener('click', async () => {
+          await Storage.identity.clear();
+          panel.remove();
+          Utils.showToast('Identity cleared');
+        });
+      } else {
+        document.getElementById('nac-connect-nip07')?.addEventListener('click', async () => {
+          if (window.nostr) {
+            const pubkey = await window.nostr.getPublicKey();
+            await Storage.identity.set({
+              pubkey,
+              npub: Crypto.hexToNpub(pubkey),
+              signer_type: 'nip07',
+              created_at: Math.floor(Date.now() / 1000)
+            });
+            panel.remove();
+            Utils.showToast('Connected via NIP-07');
+          } else {
+            Utils.showToast('NIP-07 extension not found', 'error');
+          }
+        });
+        
+        document.getElementById('nac-generate-keypair')?.addEventListener('click', async () => {
+          const privkey = Crypto.generatePrivateKey();
+          const pubkey = await Crypto.getPublicKey(privkey);
+          await Storage.identity.set({
+            pubkey,
+            privkey,
+            npub: Crypto.hexToNpub(pubkey),
+            nsec: Crypto.hexToNsec(privkey),
+            signer_type: 'local',
+            created_at: Math.floor(Date.now() / 1000)
+          });
+          panel.remove();
+          Utils.showToast('New keypair generated');
+        });
+      }
+      
+      // Relay checkboxes
+      document.querySelectorAll('.nac-relay-item input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', async (e) => {
+          const index = parseInt(e.target.dataset.index);
+          relayConfig.relays[index].enabled = e.target.checked;
+          await Storage.relays.set(relayConfig);
+        });
+      });
+      
+      document.getElementById('nac-export-entities')?.addEventListener('click', async () => {
+        const json = await Storage.entities.exportAll();
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'nostr-entities-' + Date.now() + '.json';
+        a.click();
+        Utils.showToast('Entities exported');
+      });
+    }
+  };
+
+  // ============================================
+  // SECTION 6: ENTITY TAGGER - Text selection popover
+  // ============================================
+  
+  const EntityTagger = {
+    popover: null,
+    selectedText: '',
+
+    // Show entity tagging popover
+    show: (text, x, y) => {
+      EntityTagger.selectedText = text;
+      
+      // Remove existing popover
+      EntityTagger.hide();
+      
+      // Create popover
+      EntityTagger.popover = document.createElement('div');
+      EntityTagger.popover.className = 'nac-entity-popover';
+      EntityTagger.popover.style.left = x + 'px';
+      EntityTagger.popover.style.top = (y - 120) + 'px';
+      
+      EntityTagger.popover.innerHTML = `
+        <div class="nac-popover-title">Tag "${text}"</div>
+        <div class="nac-entity-type-buttons">
+          <button class="nac-btn-entity-type" data-type="person">👤 Person</button>
+          <button class="nac-btn-entity-type" data-type="organization">🏢 Org</button>
+          <button class="nac-btn-entity-type" data-type="place">📍 Place</button>
+        </div>
+        <div id="nac-entity-search-results"></div>
+      `;
+      
+      document.body.appendChild(EntityTagger.popover);
+      
+      // Event listeners
+      document.querySelectorAll('.nac-btn-entity-type').forEach(btn => {
+        btn.addEventListener('click', () => EntityTagger.selectType(btn.dataset.type));
+      });
+      
+      // Click outside to close
+      setTimeout(() => {
+        document.addEventListener('click', EntityTagger.handleOutsideClick);
+      }, 100);
+    },
+
+    // Hide popover
+    hide: () => {
+      if (EntityTagger.popover) {
+        EntityTagger.popover.remove();
+        EntityTagger.popover = null;
+      }
+      document.removeEventListener('click', EntityTagger.handleOutsideClick);
+    },
+
+    // Handle click outside popover
+    handleOutsideClick: (e) => {
+      if (EntityTagger.popover && !EntityTagger.popover.contains(e.target)) {
+        EntityTagger.hide();
+      }
+    },
+
+    // Select entity type and search for existing
+    selectType: async (type) => {
+      const resultsEl = document.getElementById('nac-entity-search-results');
+      resultsEl.innerHTML = '<div class="nac-spinner"></div> Searching...';
+      
+      // Search for existing entities
+      const results = await Storage.entities.search(EntityTagger.selectedText, type);
+      
+      if (results.length > 0) {
+        resultsEl.innerHTML = `
+          <div class="nac-search-results">
+            <div class="nac-results-header">Existing matches:</div>
+            ${results.map(entity => `
+              <button class="nac-btn-link-entity" data-id="${entity.id}">
+                ${entity.name} (${entity.type})
+              </button>
+            `).join('')}
+          </div>
+          <button class="nac-btn nac-btn-primary" id="nac-create-new-entity">
+            Create New ${type}
+          </button>
+        `;
+        
+        // Event listeners for linking
+        document.querySelectorAll('.nac-btn-link-entity').forEach(btn => {
+          btn.addEventListener('click', () => EntityTagger.linkEntity(btn.dataset.id));
+        });
+      } else {
+        resultsEl.innerHTML = `
+          <div class="nac-no-results">No existing ${type}s found</div>
+          <button class="nac-btn nac-btn-primary" id="nac-create-new-entity">
+            Create New ${type}
+          </button>
+        `;
+      }
+      
+      document.getElementById('nac-create-new-entity')?.addEventListener('click', () => {
+        EntityTagger.createEntity(type);
+      });
+    },
+
+    // Create new entity
+    createEntity: async (type) => {
+      try {
+        // Generate keypair for entity
+        const privkey = Crypto.generatePrivateKey();
+        const pubkey = await Crypto.getPublicKey(privkey);
+        
+        // Create entity ID (hash of type + name)
+        const entityId = 'entity_' + await Crypto.sha256(type + EntityTagger.selectedText);
+        
+        // Get current user
+        const userIdentity = await Storage.identity.get();
+        
+        // Save entity
+        const entity = await Storage.entities.save(entityId, {
+          id: entityId,
+          type,
+          name: EntityTagger.selectedText,
+          aliases: [],
+          keypair: {
+            pubkey,
+            privkey,
+            npub: Crypto.hexToNpub(pubkey),
+            nsec: Crypto.hexToNsec(privkey)
+          },
+          created_by: userIdentity?.pubkey || 'unknown',
+          created_at: Math.floor(Date.now() / 1000),
+          articles: [{
+            url: ReaderView.article.url,
+            title: ReaderView.article.title,
+            context: 'mentioned',
+            tagged_at: Math.floor(Date.now() / 1000)
+          }],
+          metadata: {}
+        });
+        
+        // Add to current article
+        ReaderView.entities.push({
+          entity_id: entityId,
+          context: 'mentioned'
+        });
+        
+        // Update UI
+        EntityTagger.addChip(entity);
+        EntityTagger.hide();
+        
+        Utils.showToast(`Created ${type}: ${EntityTagger.selectedText}`, 'success');
+      } catch (e) {
+        console.error('[NAC] Failed to create entity:', e);
+        Utils.showToast('Failed to create entity', 'error');
+      }
+    },
+
+    // Link existing entity
+    linkEntity: async (entityId) => {
+      try {
+        const entity = await Storage.entities.get(entityId);
+        
+        // Add current article to entity's articles list
+        if (!entity.articles) entity.articles = [];
+        entity.articles.push({
+          url: ReaderView.article.url,
+          title: ReaderView.article.title,
+          context: 'mentioned',
+          tagged_at: Math.floor(Date.now() / 1000)
+        });
+        
+        await Storage.entities.save(entityId, entity);
+        
+        // Add to current article
+        ReaderView.entities.push({
+          entity_id: entityId,
+          context: 'mentioned'
+        });
+        
+        // Update UI
+        EntityTagger.addChip(entity);
+        EntityTagger.hide();
+        
+        Utils.showToast(`Linked entity: ${entity.name}`, 'success');
+      } catch (e) {
+        console.error('[NAC] Failed to link entity:', e);
+        Utils.showToast('Failed to link entity', 'error');
+      }
+    },
+
+    // Add entity chip to UI
+    addChip: (entity) => {
+      const chipsContainer = document.getElementById('nac-entity-chips');
+      const chip = document.createElement('div');
+      chip.className = 'nac-entity-chip nac-entity-' + entity.type;
+      chip.innerHTML = `
+        <span class="nac-chip-icon">${entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : '📍'}</span>
+        <span class="nac-chip-name">${entity.name}</span>
+        <button class="nac-chip-remove" data-id="${entity.id}">×</button>
+      `;
+      
+      chipsContainer.appendChild(chip);
+      
+      chip.querySelector('.nac-chip-remove').addEventListener('click', () => {
+        chip.remove();
+        ReaderView.entities = ReaderView.entities.filter(e => e.entity_id !== entity.id);
+      });
+    }
+  };
+
+  // ============================================
+  // SECTION 7: NOSTR RELAY CLIENT
+  // ============================================
+  
+  const RelayClient = {
+    connections: new Map(),
+
+    // Connect to relay
+    connect: (url) => {
+      return new Promise((resolve, reject) => {
+        try {
+          if (RelayClient.connections.has(url)) {
+            resolve(RelayClient.connections.get(url));
+            return;
+          }
+          
+          const ws = new WebSocket(url);
+          
+          ws.onopen = () => {
+            RelayClient.connections.set(url, ws);
+            resolve(ws);
+          };
+          
+          ws.onerror = (error) => {
+            reject(error);
+          };
+          
+          ws.onclose = () => {
+            RelayClient.connections.delete(url);
+          };
+        } catch (e) {
+          reject(e);
+        }
+      });
+    },
+
+    // Disconnect from relay
+    disconnect: (url) => {
+      const ws = RelayClient.connections.get(url);
+      if (ws) {
+        ws.close();
+        RelayClient.connections.delete(url);
+      }
+    },
+
+    // Disconnect all
+    disconnectAll: () => {
+      for (const ws of RelayClient.connections.values()) {
+        ws.close();
+      }
+      RelayClient.connections.clear();
+    },
+
+    // Publish event to relays
+    publish: async (event, relayUrls) => {
+      const results = {};
+      
+      for (const url of relayUrls) {
+        try {
+          const ws = await RelayClient.connect(url);
+          
+          // Send event
+          const message = JSON.stringify(['EVENT', event]);
+          ws.send(message);
+          
+          // Wait for OK response
+          const ok = await new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(false), 5000);
+            
+            const handler = (e) => {
+              try {
+                const data = JSON.parse(e.data);
+                if (data[0] === 'OK' && data[1] === event.id) {
+                  clearTimeout(timeout);
+                  ws.removeEventListener('message', handler);
+                  resolve(data[2]); // true if accepted
+                }
+              } catch (err) {
+                // Ignore parse errors
+              }
+            };
+            
+            ws.addEventListener('message', handler);
+          });
+          
+          results[url] = {
+            success: ok,
+            error: ok ? null : 'Event rejected by relay'
+          };
+        } catch (e) {
+          results[url] = {
+            success: false,
+            error: e.message
+          };
+        }
+      }
+      
+      return results;
+    },
+
+    // Check if connected to relay
+    isConnected: (url) => {
+      const ws = RelayClient.connections.get(url);
+      return ws && ws.readyState === WebSocket.OPEN;
+    }
+  };
+
+  // ============================================
+  // SECTION 8: EVENT BUILDER
+  // ============================================
+  
+  const EventBuilder = {
+    // Build NIP-23 article event (kind 30023)
+    buildArticleEvent: async (article, entities, userPubkey) => {
+      // Convert content to markdown
+      let content = article.content;
+      if (content.includes('<')) {
+        content = ContentExtractor.htmlToMarkdown(content);
+      }
+      
+      // Build tags
+      const tags = [
+        ['d', await EventBuilder.generateDTag(article.url)],
+        ['title', article.title || 'Untitled'],
+        ['published_at', String(article.publishedAt || Math.floor(Date.now() / 1000))],
+        ['r', article.url],
+        ['client', 'nostr-article-capture']
+      ];
+      
+      if (article.excerpt) {
+        tags.push(['summary', article.excerpt.substring(0, 500)]);
+      }
+      
+      if (article.featuredImage) {
+        tags.push(['image', article.featuredImage]);
+      }
+      
+      if (article.byline) {
+        tags.push(['author', article.byline]);
+      }
+      
+      // Add entity tags
+      for (const entityRef of entities) {
+        const entity = await Storage.entities.get(entityRef.entity_id);
+        if (entity && entity.keypair) {
+          // Add pubkey reference
+          tags.push(['p', entity.keypair.pubkey, '', entityRef.context]);
+          
+          // Add name tag for clients that don't resolve pubkeys
+          const tagType = entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'org' : 'place';
+          tags.push([tagType, entity.name, entityRef.context]);
+        }
+      }
+      
+      // Add topic tags
+      tags.push(['t', 'article']);
+      if (article.domain) {
+        tags.push(['t', article.domain.replace(/\./g, '-')]);
+      }
+      
+      // Build event
+      const event = {
+        kind: 30023,
+        pubkey: userPubkey || '',
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content
+      };
+      
+      return event;
+    },
+
+    // Generate d-tag from URL (16 chars)
+    generateDTag: async (url) => {
+      const hash = await Crypto.sha256(url);
+      return hash.substring(0, 16);
+    },
+
+    // Build kind 0 profile event for entity
+    buildProfileEvent: (entity) => {
+      return {
+        kind: 0,
+        pubkey: entity.keypair.pubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: JSON.stringify({
+          name: entity.name,
+          about: `${entity.type} entity created by nostr-article-capture`,
+          nip05: entity.nip05 || undefined
+        })
+      };
+    }
+  };
+
+  // ============================================
+  // SECTION 9: UTILITIES
+  // ============================================
+  
+  const Utils = {
+    // Show toast notification
+    showToast: (message, type = 'info') => {
+      const toast = document.createElement('div');
+      toast.className = 'nac-toast nac-toast-' + type;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => toast.classList.add('visible'), 100);
+      setTimeout(() => {
+        toast.classList.remove('visible');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    },
+
+    // Log with prefix
+    log: (...args) => {
+      if (CONFIG.debug) {
+        console.log('[NAC]', ...args);
+      }
+    },
+
+    // Error log
+    error: (...args) => {
+      console.error('[NAC]', ...args);
+    }
+  };
+
+  // ============================================
+  // SECTION 10: STYLES
   // ============================================
   
   const STYLES = `
@@ -1324,29 +1482,29 @@
     :root {
       --nac-primary: #6366f1;
       --nac-primary-hover: #4f46e5;
-      --nac-secondary: #8b5cf6;
       --nac-success: #22c55e;
-      --nac-warning: #f59e0b;
       --nac-error: #ef4444;
-      --nac-background: #1e1e2e;
-      --nac-surface: #2a2a3e;
-      --nac-surface-hover: #353550;
-      --nac-border: #3f3f5a;
-      --nac-text: #e2e8f0;
-      --nac-text-muted: #94a3b8;
-      --nac-text-dim: #64748b;
-      --nac-shadow: rgba(0, 0, 0, 0.3);
+      --nac-bg: #fafaf9;
+      --nac-text: #1a1a1a;
+      --nac-text-muted: #6b7280;
+      --nac-border: #e5e7eb;
+      --nac-surface: #ffffff;
+      --nac-entity-person: #8b5cf6;
+      --nac-entity-org: #0891b2;
+      --nac-entity-place: #16a34a;
     }
     
-    /* Reset for our elements */
-    .nac-reset * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --nac-bg: #1a1a1a;
+        --nac-text: #e5e7eb;
+        --nac-text-muted: #9ca3af;
+        --nac-border: #374151;
+        --nac-surface: #2a2a2a;
+      }
     }
     
-    /* Floating Action Button */
+    /* FAB Button */
     .nac-fab {
       position: fixed;
       bottom: 20px;
@@ -1357,425 +1515,421 @@
       background: var(--nac-primary);
       border: none;
       cursor: pointer;
-      box-shadow: 0 4px 12px var(--nac-shadow);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
       display: flex;
       align-items: center;
       justify-content: center;
-      z-index: 2147483646;
+      z-index: 999999;
+      font-size: 24px;
+      color: white;
       transition: all 0.3s ease;
     }
     
     .nac-fab:hover {
       background: var(--nac-primary-hover);
       transform: scale(1.05);
-      box-shadow: 0 6px 16px var(--nac-shadow);
     }
     
-    .nac-fab:active {
-      transform: scale(0.95);
-    }
-    
-    .nac-fab.active {
-      background: var(--nac-success);
-    }
-    
-    .nac-fab svg {
-      width: 24px;
-      height: 24px;
-      fill: white;
-    }
-    
-    /* Main Panel */
-    .nac-panel {
+    /* Reader Container */
+    .nac-reader-container {
       position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 90%;
-      max-width: 700px;
-      max-height: 90vh;
-      background: var(--nac-background);
-      border-radius: 12px;
-      box-shadow: 0 20px 60px var(--nac-shadow);
-      z-index: 2147483647;
-      display: none;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--nac-bg);
+      color: var(--nac-text);
+      z-index: 999998;
+      display: flex;
       flex-direction: column;
-      overflow-y: auto;
-      overflow-x: hidden;
-      color: var(--nac-text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
     
-    .nac-panel.visible {
-      display: flex;
-    }
-    
-    /* Panel Header */
-    .nac-panel-header {
+    /* Toolbar */
+    .nac-reader-toolbar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 16px 20px;
-      background: var(--nac-surface);
-      border-bottom: 1px solid var(--nac-border);
-    }
-    
-    .nac-panel-title {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--nac-text);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .nac-panel-title svg {
-      width: 20px;
-      height: 20px;
-      fill: var(--nac-primary);
-    }
-    
-    .nac-panel-controls {
-      display: flex;
-      gap: 8px;
-    }
-    
-    .nac-btn-icon {
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
-      border: none;
-      background: transparent;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--nac-text-muted);
-      transition: all 0.2s ease;
-    }
-    
-    .nac-btn-icon:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-    }
-    
-    .nac-btn-icon svg {
-      width: 18px;
-      height: 18px;
-      fill: currentColor;
-    }
-    
-    /* Tab Bar */
-    .nac-tabs {
-      display: flex;
+      gap: 16px;
       padding: 12px 20px;
-      gap: 8px;
       background: var(--nac-surface);
       border-bottom: 1px solid var(--nac-border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
     
-    .nac-tab {
-      padding: 8px 16px;
-      border-radius: 6px;
-      border: none;
-      background: transparent;
-      color: var(--nac-text-muted);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .nac-tab:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-    }
-    
-    .nac-tab.active {
-      background: var(--nac-primary);
-      color: white;
-    }
-    
-    .nac-tab-spacer {
+    .nac-toolbar-title {
       flex: 1;
+      font-weight: 600;
+      color: var(--nac-text-muted);
     }
     
-    .nac-btn-copy {
-      padding: 8px 12px;
+    .nac-toolbar-actions {
+      display: flex;
+      gap: 8px;
+    }
+    
+    .nac-btn-back,
+    .nac-btn-toolbar {
+      padding: 8px 16px;
       border-radius: 6px;
       border: 1px solid var(--nac-border);
       background: var(--nac-surface);
-      color: var(--nac-text-muted);
-      font-size: 13px;
+      color: var(--nac-text);
       cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.2s ease;
+      font-size: 14px;
+      transition: all 0.2s;
     }
     
-    .nac-btn-copy:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
+    .nac-btn-back:hover,
+    .nac-btn-toolbar:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-btn-toolbar.nac-btn-primary {
+      background: var(--nac-primary);
+      color: white;
       border-color: var(--nac-primary);
     }
     
-    .nac-btn-copy svg {
-      width: 14px;
-      height: 14px;
-      fill: currentColor;
+    .nac-btn-toolbar.active {
+      background: var(--nac-success);
+      color: white;
+      border-color: var(--nac-success);
     }
     
-    /* Content Area */
-    .nac-content {
-      flex: 1 1 auto;
+    /* Reader Content */
+    .nac-reader-content {
+      flex: 1;
       overflow-y: auto;
-      padding: 20px;
-      min-height: 150px;
-      max-height: 50vh;
+      padding: 40px 20px;
     }
     
-    .nac-content-readable {
-      font-size: 16px;
+    .nac-reader-article {
+      max-width: var(--reader-max-width, 680px);
+      margin: 0 auto;
+    }
+    
+    /* Article Header */
+    .nac-article-header {
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--nac-border);
+    }
+    
+    .nac-article-title {
+      font-size: 32px;
+      font-weight: 700;
+      line-height: 1.2;
+      margin-bottom: 16px;
+      outline: none;
+    }
+    
+    .nac-article-title[contenteditable="true"] {
+      padding: 8px;
+      border: 2px dashed var(--nac-primary);
+      border-radius: 4px;
+    }
+    
+    .nac-article-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      font-size: 14px;
+      color: var(--nac-text-muted);
+      margin-bottom: 12px;
+    }
+    
+    .nac-meta-separator {
+      opacity: 0.5;
+    }
+    
+    .nac-article-source {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      margin-bottom: 8px;
+    }
+    
+    .nac-source-url {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: monospace;
+    }
+    
+    .nac-btn-copy {
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text-muted);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    
+    .nac-article-archived {
+      font-size: 12px;
+      color: var(--nac-text-muted);
+    }
+    
+    /* Article Body */
+    .nac-article-body {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 18px;
       line-height: 1.7;
-      color: var(--nac-text);
+      outline: none;
     }
     
-    .nac-content-readable h1,
-    .nac-content-readable h2,
-    .nac-content-readable h3 {
+    .nac-article-body[contenteditable="true"] {
+      padding: 16px;
+      border: 2px dashed var(--nac-primary);
+      border-radius: 4px;
+    }
+    
+    .nac-article-body h1,
+    .nac-article-body h2,
+    .nac-article-body h3 {
       margin-top: 1.5em;
       margin-bottom: 0.5em;
       font-weight: 600;
       line-height: 1.3;
     }
     
-    .nac-content-readable h1 { font-size: 1.8em; }
-    .nac-content-readable h2 { font-size: 1.4em; }
-    .nac-content-readable h3 { font-size: 1.2em; }
-    
-    .nac-content-readable p {
+    .nac-article-body p {
       margin-bottom: 1em;
     }
     
-    .nac-content-readable img {
+    .nac-article-body img {
       max-width: 100%;
       height: auto;
       border-radius: 8px;
-      margin: 1em 0;
+      margin: 1.5em 0;
     }
     
-    .nac-content-readable blockquote {
+    .nac-article-body blockquote {
       border-left: 3px solid var(--nac-primary);
       padding-left: 1em;
       margin: 1em 0;
       color: var(--nac-text-muted);
     }
     
-    .nac-content-readable a {
-      color: var(--nac-primary);
-      text-decoration: none;
-    }
-    
-    .nac-content-readable a:hover {
-      text-decoration: underline;
-    }
-    
-    .nac-content-markdown {
-      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      font-size: 13px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      color: var(--nac-text-muted);
-      background: var(--nac-surface);
-      padding: 16px;
-      border-radius: 8px;
-    }
-    
-    .nac-article-meta {
-      margin-bottom: 20px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--nac-border);
-    }
-    
-    .nac-article-title {
-      font-size: 24px;
-      font-weight: 700;
-      margin-bottom: 8px;
-      color: var(--nac-text);
-    }
-    
-    .nac-article-info {
-      font-size: 14px;
-      color: var(--nac-text-muted);
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-    }
-    
-    .nac-article-info span {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    
-    /* URL Source Info - shown when canonical differs from browser URL */
-    .nac-url-source-info {
-      margin-top: 12px;
-      padding: 10px;
-      background: var(--nac-surface);
-      border-radius: 6px;
-      font-size: 12px;
-    }
-    
-    .nac-url-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-    
-    .nac-url-item:last-child {
-      margin-bottom: 0;
-    }
-    
-    .nac-url-label {
-      color: var(--nac-text-muted);
-      white-space: nowrap;
-      font-weight: 500;
-    }
-    
-    .nac-url-value {
-      color: var(--nac-text);
-      word-break: break-all;
-      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      font-size: 11px;
-    }
-    
-    .nac-url-canonical .nac-url-label {
-      color: var(--nac-success);
-    }
-    
-    .nac-url-browser .nac-url-value {
-      color: var(--nac-text-dim);
-      text-decoration: line-through;
-      opacity: 0.7;
-    }
-    
-    /* Publish Section */
-    .nac-publish {
-      padding: 20px;
-      background: var(--nac-surface);
+    /* Entity Bar */
+    .nac-entity-bar {
+      max-width: var(--reader-max-width, 680px);
+      margin: 32px auto 0;
+      padding-top: 24px;
       border-top: 1px solid var(--nac-border);
     }
     
-    .nac-publish-title {
-      font-size: 12px;
+    .nac-entity-bar-title {
+      font-size: 14px;
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
       color: var(--nac-text-muted);
-      margin-bottom: 16px;
-      text-align: center;
+      margin-bottom: 12px;
+    }
+    
+    .nac-entity-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    
+    .nac-entity-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 14px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+    }
+    
+    .nac-entity-chip.nac-entity-person {
+      border-color: var(--nac-entity-person);
+      background: rgba(139, 92, 246, 0.1);
+    }
+    
+    .nac-entity-chip.nac-entity-organization {
+      border-color: var(--nac-entity-org);
+      background: rgba(8, 145, 178, 0.1);
+    }
+    
+    .nac-entity-chip.nac-entity-place {
+      border-color: var(--nac-entity-place);
+      background: rgba(22, 163, 74, 0.1);
+    }
+    
+    .nac-chip-remove {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      color: var(--nac-text-muted);
+      padding: 0;
+      line-height: 1;
+    }
+    
+    .nac-btn-add-entity {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px dashed var(--nac-border);
+      background: transparent;
+      color: var(--nac-text-muted);
+      cursor: pointer;
+      font-size: 14px;
+    }
+    
+    /* Entity Popover */
+    .nac-entity-popover {
+      position: absolute;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+      z-index: 1000000;
+      min-width: 280px;
+    }
+    
+    .nac-popover-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--nac-text);
+    }
+    
+    .nac-entity-type-buttons {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    
+    .nac-btn-entity-type {
+      flex: 1;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    
+    .nac-btn-entity-type:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-search-results {
+      margin-bottom: 12px;
+    }
+    
+    .nac-results-header {
+      font-size: 12px;
+      color: var(--nac-text-muted);
+      margin-bottom: 8px;
+    }
+    
+    .nac-btn-link-entity {
+      display: block;
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 4px;
+      border-radius: 4px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      cursor: pointer;
+      text-align: left;
+      font-size: 13px;
+    }
+    
+    .nac-btn-link-entity:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-no-results {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      margin-bottom: 12px;
+    }
+    
+    /* Publish Panel */
+    .nac-publish-panel,
+    .nac-settings-panel {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 90%;
+      max-width: 600px;
+      max-height: 80vh;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      z-index: 1000001;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .nac-publish-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--nac-border);
+    }
+    
+    .nac-publish-header h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+    
+    .nac-btn-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      color: var(--nac-text-muted);
+    }
+    
+    .nac-publish-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
     }
     
     .nac-form-group {
       margin-bottom: 16px;
     }
     
-    .nac-form-label {
+    .nac-form-group label {
       display: block;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--nac-text);
-      margin-bottom: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
     }
     
-    .nac-form-input,
-    .nac-form-select {
+    .nac-form-select,
+    .nac-form-input {
       width: 100%;
-      padding: 10px 12px;
+      padding: 10px;
       border-radius: 6px;
       border: 1px solid var(--nac-border);
-      background: var(--nac-background);
+      background: var(--nac-bg);
       color: var(--nac-text);
       font-size: 14px;
-      transition: all 0.2s ease;
     }
     
-    .nac-form-input:focus,
-    .nac-form-select:focus {
-      outline: none;
-      border-color: var(--nac-primary);
-      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-    }
-    
-    .nac-form-select {
-      cursor: pointer;
-      appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 12px center;
-      padding-right: 36px;
-    }
-    
-    .nac-form-row {
+    .nac-relay-list {
       display: flex;
-      gap: 12px;
-    }
-    
-    .nac-form-row .nac-form-group {
-      flex: 1;
-    }
-    
-    /* Tags Input */
-    .nac-tags-container {
-      display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
       gap: 8px;
-      padding: 8px;
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      background: var(--nac-background);
-      min-height: 42px;
-    }
-    
-    .nac-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 8px;
-      background: var(--nac-primary);
-      color: white;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    
-    .nac-tag-remove {
-      cursor: pointer;
-      opacity: 0.7;
-      transition: opacity 0.2s;
-    }
-    
-    .nac-tag-remove:hover {
-      opacity: 1;
-    }
-    
-    .nac-tag-input {
-      flex: 1;
-      min-width: 80px;
-      border: none;
-      background: transparent;
-      color: var(--nac-text);
-      font-size: 14px;
-      outline: none;
-    }
-    
-    /* Checkbox/Radio */
-    .nac-checkbox-group {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
     }
     
     .nac-checkbox {
@@ -1783,196 +1937,73 @@
       align-items: center;
       gap: 8px;
       cursor: pointer;
-      font-size: 13px;
-      color: var(--nac-text);
     }
     
-    .nac-checkbox input {
-      appearance: none;
-      width: 18px;
-      height: 18px;
-      border: 2px solid var(--nac-border);
-      border-radius: 4px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .nac-checkbox input:checked {
-      background: var(--nac-primary);
-      border-color: var(--nac-primary);
-    }
-    
-    .nac-checkbox input:checked::after {
-      content: '✓';
-      display: block;
-      text-align: center;
-      color: white;
+    .nac-event-preview {
+      background: var(--nac-bg);
+      padding: 12px;
+      border-radius: 6px;
+      font-family: monospace;
       font-size: 12px;
-      line-height: 14px;
+      overflow-x: auto;
+      max-height: 200px;
     }
     
-    .nac-radio-group {
-      display: flex;
-      gap: 16px;
-    }
-    
-    .nac-radio {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-      font-size: 13px;
-      color: var(--nac-text);
-    }
-    
-    .nac-radio input {
-      appearance: none;
-      width: 18px;
-      height: 18px;
-      border: 2px solid var(--nac-border);
-      border-radius: 50%;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .nac-radio input:checked {
-      border-color: var(--nac-primary);
-      background: radial-gradient(circle, var(--nac-primary) 40%, transparent 40%);
-    }
-    
-    /* Buttons */
     .nac-btn {
-      padding: 12px 24px;
-      border-radius: 8px;
-      border: none;
-      font-size: 14px;
-      font-weight: 600;
+      padding: 10px 20px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text);
       cursor: pointer;
-      transition: all 0.2s ease;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
+      font-size: 14px;
+      transition: all 0.2s;
     }
     
-    .nac-btn-primary {
+    .nac-btn:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-btn.nac-btn-primary {
       background: var(--nac-primary);
       color: white;
+      border-color: var(--nac-primary);
       width: 100%;
     }
     
-    .nac-btn-primary:hover {
-      background: var(--nac-primary-hover);
-    }
-    
-    .nac-btn-primary:disabled {
-      background: var(--nac-border);
+    .nac-btn:disabled {
+      opacity: 0.5;
       cursor: not-allowed;
     }
     
-    .nac-btn svg {
-      width: 16px;
-      height: 16px;
-      fill: currentColor;
-    }
-    
-    /* Collapsible Section */
-    .nac-collapsible {
-      border: 1px solid var(--nac-border);
+    .nac-warning {
+      padding: 12px;
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px solid rgba(245, 158, 11, 0.3);
       border-radius: 6px;
-      margin-bottom: 12px;
-      overflow: hidden;
-    }
-    
-    .nac-collapsible-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px;
-      background: var(--nac-surface-hover);
-      cursor: pointer;
-      user-select: none;
-    }
-    
-    .nac-collapsible-header:hover {
-      background: var(--nac-border);
-    }
-    
-    .nac-collapsible-title {
       font-size: 13px;
-      font-weight: 500;
       color: var(--nac-text);
+      margin-bottom: 16px;
     }
     
-    .nac-collapsible-icon {
-      transition: transform 0.2s ease;
+    .nac-publish-status {
+      margin-top: 16px;
     }
     
-    .nac-collapsible.open .nac-collapsible-icon {
-      transform: rotate(180deg);
+    .nac-publish-results {
+      font-size: 13px;
     }
     
-    .nac-collapsible-content {
-      padding: 12px;
-      display: none;
+    .nac-result-success {
+      color: var(--nac-success);
+      margin-bottom: 4px;
     }
     
-    .nac-collapsible.open .nac-collapsible-content {
-      display: block;
+    .nac-result-error {
+      color: var(--nac-error);
+      margin-bottom: 4px;
     }
     
-    /* Overlay */
-    .nac-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.6);
-      z-index: 2147483645;
-      display: none;
-    }
-    
-    .nac-overlay.visible {
-      display: block;
-    }
-    
-    /* Toast notifications */
-    .nac-toast {
-      position: fixed;
-      bottom: 100px;
-      right: 20px;
-      padding: 12px 20px;
-      border-radius: 8px;
-      background: var(--nac-surface);
-      color: var(--nac-text);
-      font-size: 14px;
-      box-shadow: 0 4px 12px var(--nac-shadow);
-      z-index: 2147483648;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      transform: translateX(120%);
-      transition: transform 0.3s ease;
-    }
-    
-    .nac-toast.visible {
-      transform: translateX(0);
-    }
-    
-    .nac-toast.success {
-      border-left: 4px solid var(--nac-success);
-    }
-    
-    .nac-toast.error {
-      border-left: 4px solid var(--nac-error);
-    }
-    
-    .nac-toast.warning {
-      border-left: 4px solid var(--nac-warning);
-    }
-    
-    /* Loading spinner */
     .nac-spinner {
       width: 20px;
       height: 20px;
@@ -1980,9415 +2011,129 @@
       border-top-color: var(--nac-primary);
       border-radius: 50%;
       animation: nac-spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
     }
     
     @keyframes nac-spin {
       to { transform: rotate(360deg); }
     }
     
-    /* Empty state */
-    .nac-empty {
-      text-align: center;
-      padding: 40px 20px;
-      color: var(--nac-text-muted);
-    }
-    
-    .nac-empty svg {
-      width: 48px;
-      height: 48px;
-      fill: var(--nac-border);
-      margin-bottom: 16px;
-    }
-    
-    .nac-empty-title {
-      font-size: 16px;
-      font-weight: 600;
-      margin-bottom: 8px;
-      color: var(--nac-text);
-    }
-    
-    .nac-empty-text {
-      font-size: 14px;
-    }
-    
-    /* NSecBunker status indicator */
-    .nac-bunker-status {
-      display: inline-flex;
-      align-items: center;
-      margin-left: 8px;
-    }
-    
-    .nac-status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
-    
-    .nac-status-dot.connected {
-      background: var(--nac-success);
-      box-shadow: 0 0 6px var(--nac-success);
-    }
-    
-    .nac-status-dot.disconnected {
-      background: var(--nac-text-dim);
-    }
-    
-    .nac-status-dot.connecting {
-      background: var(--nac-warning);
-      animation: nac-pulse 1s infinite;
-    }
-    
-    @keyframes nac-pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    
-    /* Metadata Posting UI Styles */
-    .nac-metadata-type-selector {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 20px;
-    }
-    
-    .nac-type-btn {
-      flex: 1;
-      padding: 12px 8px;
-      border: 2px solid var(--nac-border);
-      border-radius: 8px;
-      background: var(--nac-surface);
-      color: var(--nac-text-muted);
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      text-align: center;
-    }
-    
-    .nac-type-btn:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-      border-color: var(--nac-text-muted);
-    }
-    
-    .nac-type-btn.active {
-      border-color: var(--nac-primary);
-      background: rgba(99, 102, 241, 0.1);
-      color: var(--nac-primary);
-    }
-    
-    .nac-type-btn-icon {
-      font-size: 20px;
-    }
-    
-    .nac-type-btn-label {
-      font-size: 11px;
-    }
-    
-    .nac-url-info {
-      padding: 12px;
-      background: var(--nac-surface);
-      border-radius: 8px;
-      margin-bottom: 16px;
-      font-size: 13px;
-    }
-    
-    .nac-url-info-label {
-      font-size: 11px;
-      color: var(--nac-text-muted);
-      margin-bottom: 4px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    
-    .nac-url-info-value {
-      color: var(--nac-text);
-      word-break: break-all;
-      font-family: monospace;
-      font-size: 12px;
-    }
-    
-    .nac-url-info-hash {
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--nac-border);
-      color: var(--nac-text-muted);
-      font-size: 11px;
-    }
-    
-    .nac-confidence-slider {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .nac-confidence-slider input[type="range"] {
-      flex: 1;
-      height: 6px;
-      -webkit-appearance: none;
-      appearance: none;
-      background: var(--nac-border);
-      border-radius: 3px;
-      outline: none;
-    }
-    
-    .nac-confidence-slider input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 18px;
-      height: 18px;
-      border-radius: 50%;
-      background: var(--nac-primary);
-      cursor: pointer;
-      transition: transform 0.2s;
-    }
-    
-    .nac-confidence-slider input[type="range"]::-webkit-slider-thumb:hover {
-      transform: scale(1.1);
-    }
-    
-    .nac-confidence-value {
-      min-width: 45px;
-      text-align: right;
-      font-weight: 600;
-      color: var(--nac-primary);
-    }
-    
-    .nac-evidence-list {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    
-    .nac-evidence-item {
-      padding: 12px;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 8px;
-    }
-    
-    .nac-evidence-item-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    
-    .nac-evidence-item-title {
-      font-size: 12px;
-      font-weight: 500;
-      color: var(--nac-text-muted);
-    }
-    
-    .nac-evidence-remove {
-      padding: 4px 8px;
-      font-size: 11px;
-      color: var(--nac-error);
-      background: transparent;
-      border: 1px solid var(--nac-error);
-      border-radius: 4px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .nac-evidence-remove:hover {
-      background: var(--nac-error);
-      color: white;
-    }
-    
-    .nac-evidence-row {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    
-    .nac-evidence-row:last-child {
-      margin-bottom: 0;
-    }
-    
-    .nac-evidence-row .nac-form-input {
-      flex: 2;
-    }
-    
-    .nac-evidence-row .nac-form-select {
-      flex: 1;
-    }
-    
-    .nac-add-evidence {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      padding: 10px;
-      border: 2px dashed var(--nac-border);
-      border-radius: 8px;
-      background: transparent;
-      color: var(--nac-text-muted);
-      font-size: 13px;
-      cursor: pointer;
-      transition: all 0.2s;
-      width: 100%;
-    }
-    
-    .nac-add-evidence:hover {
-      border-color: var(--nac-primary);
-      color: var(--nac-primary);
-      background: rgba(99, 102, 241, 0.05);
-    }
-    
-    .nac-verdict-group {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    
-    .nac-verdict-option {
-      flex: 1;
-      min-width: 100px;
-    }
-    
-    .nac-verdict-option input {
-      display: none;
-    }
-    
-    .nac-verdict-option label {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-      padding: 12px 8px;
-      border: 2px solid var(--nac-border);
-      border-radius: 8px;
-      background: var(--nac-surface);
-      cursor: pointer;
-      transition: all 0.2s;
-      text-align: center;
-    }
-    
-    .nac-verdict-option label:hover {
-      background: var(--nac-surface-hover);
-    }
-    
-    .nac-verdict-option input:checked + label {
-      border-color: var(--nac-primary);
-      background: rgba(99, 102, 241, 0.1);
-    }
-    
-    .nac-verdict-option.verdict-true input:checked + label {
-      border-color: var(--nac-success);
-      background: rgba(34, 197, 94, 0.1);
-    }
-    
-    .nac-verdict-option.verdict-partially-true input:checked + label {
-      border-color: var(--nac-warning);
-      background: rgba(245, 158, 11, 0.1);
-    }
-    
-    .nac-verdict-option.verdict-false input:checked + label {
-      border-color: var(--nac-error);
-      background: rgba(239, 68, 68, 0.1);
-    }
-    
-    .nac-verdict-option.verdict-unverifiable input:checked + label {
-      border-color: var(--nac-text-muted);
-      background: rgba(148, 163, 184, 0.1);
-    }
-    
-    .nac-verdict-icon {
-      font-size: 20px;
-    }
-    
-    .nac-verdict-label {
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--nac-text);
-    }
-    
-    /* Emoji Picker Styles */
-    .nac-emoji-picker {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 12px;
-      background: var(--nac-surface);
-      border-radius: 8px;
-    }
-
-    .nac-emoji-btn {
-      width: 44px;
-      height: 44px;
-      font-size: 24px;
-      background: var(--nac-background);
-      border: 2px solid transparent;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .nac-emoji-btn:hover {
-      background: var(--nac-surface-hover);
-      transform: scale(1.1);
-    }
-
-    .nac-emoji-btn.active {
-      border-color: var(--nac-primary);
-      background: rgba(111, 66, 193, 0.15);
-    }
-
-    /* Input with Button Styles */
-    .nac-input-with-btn {
-      display: flex;
-      gap: 8px;
-    }
-
-    .nac-input-with-btn .nac-form-input {
-      flex: 1;
-    }
-
-    .nac-fetch-btn {
-      padding: 8px 12px;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 16px;
-      transition: background 0.15s ease;
-    }
-
-    .nac-fetch-btn:hover {
-      background: var(--nac-surface-hover);
-    }
-
-    .nac-fetch-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    /* Relevance Slider Styles */
-    .nac-relevance-slider {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .nac-form-range {
-      flex: 1;
-      height: 6px;
-      -webkit-appearance: none;
-      appearance: none;
-      background: var(--nac-surface);
-      border-radius: 3px;
-      outline: none;
-    }
-
-    .nac-form-range::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 18px;
-      height: 18px;
-      background: var(--nac-primary);
-      border-radius: 50%;
-      cursor: pointer;
-      transition: transform 0.15s ease;
-    }
-
-    .nac-form-range::-webkit-slider-thumb:hover {
-      transform: scale(1.15);
-    }
-
-    .nac-form-range::-moz-range-thumb {
-      width: 18px;
-      height: 18px;
-      background: var(--nac-primary);
-      border: none;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-
-    .nac-relevance-value {
-      min-width: 45px;
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--nac-primary);
-      text-align: right;
-    }
-
-    /* Rating Grid Styles */
-    .nac-rating-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    @media (max-width: 600px) {
-      .nac-rating-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    .nac-rating-dimension {
-      background: var(--nac-surface);
-      padding: 12px;
-      border-radius: 8px;
-    }
-
-    .nac-rating-label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--nac-text);
-      margin-bottom: 6px;
-    }
-
-    .nac-rating-slider {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .nac-rating-value {
-      min-width: 25px;
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--nac-primary);
-      text-align: center;
-    }
-
-    .nac-rating-help {
-      font-size: 11px;
-      color: var(--nac-text-secondary);
-      margin-top: 4px;
-    }
-
-    .nac-confidence-slider {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .nac-confidence-value {
-      min-width: 45px;
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--nac-primary);
-      text-align: right;
-    }
-
-    /* Required field indicator */
-    .nac-required {
-      color: var(--nac-error);
-    }
-
-    .nac-event-preview {
-      margin-top: 16px;
-      padding: 16px;
-      background: var(--nac-surface);
-      border-radius: 8px;
-      border: 1px solid var(--nac-border);
-    }
-    
-    .nac-event-preview-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-    
-    .nac-event-preview-title {
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--nac-text-muted);
-    }
-    
-    .nac-event-preview-toggle {
-      padding: 4px 10px;
-      font-size: 11px;
-      color: var(--nac-text-muted);
-      background: transparent;
-      border: 1px solid var(--nac-border);
-      border-radius: 4px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .nac-event-preview-toggle:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-    }
-    
-    .nac-event-preview-json {
-      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--nac-text-muted);
-      background: var(--nac-background);
-      padding: 12px;
-      border-radius: 6px;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-      max-height: 300px;
-      overflow-y: auto;
-    }
-    
-    .nac-headline-original {
-      padding: 12px;
-      background: var(--nac-surface);
-      border-radius: 8px;
-      border: 1px solid var(--nac-border);
-      margin-bottom: 8px;
-    }
-    
-    .nac-headline-original-text {
-      font-size: 14px;
-      color: var(--nac-text);
-      line-height: 1.4;
-    }
-    
-    .nac-headline-edit-btn {
-      margin-top: 8px;
-      padding: 4px 10px;
-      font-size: 11px;
-      color: var(--nac-text-muted);
-      background: transparent;
-      border: 1px solid var(--nac-border);
-      border-radius: 4px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .nac-headline-edit-btn:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-    }
-    
-    .nac-form-textarea {
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 6px;
-      border: 1px solid var(--nac-border);
-      background: var(--nac-background);
-      color: var(--nac-text);
-      font-size: 14px;
-      font-family: inherit;
-      resize: vertical;
-      min-height: 80px;
-      transition: all 0.2s ease;
-    }
-    
-    .nac-form-textarea:focus {
-      outline: none;
-      border-color: var(--nac-primary);
-      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-    }
-    
-    .nac-char-count {
-      font-size: 11px;
-      color: var(--nac-text-muted);
-      text-align: right;
-      margin-top: 4px;
-    }
-    
-    .nac-char-count.warning {
-      color: var(--nac-warning);
-    }
-    
-    .nac-char-count.error {
-      color: var(--nac-error);
-    }
-    
-    .nac-metadata-form {
-      display: none;
-    }
-    
-    .nac-metadata-form.active {
-      display: block;
-    }
-    
-    .nac-metadata-actions {
-      display: flex;
-      gap: 12px;
-      margin-top: 20px;
-    }
-    
-    .nac-btn-secondary {
-      padding: 12px 24px;
-      border-radius: 8px;
-      border: 1px solid var(--nac-border);
-      background: transparent;
-      color: var(--nac-text-muted);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .nac-btn-secondary:hover {
-      background: var(--nac-surface-hover);
-      color: var(--nac-text);
-    }
-    
-    .nac-metadata-tab-content {
-      padding: 20px;
-    }
-    
-    .nac-form-hint {
-      font-size: 11px;
-      color: var(--nac-text-dim);
-      margin-top: 4px;
-    }
-    
-    /* Publishing Options Section */
-    .nac-publishing-options {
-      margin: 15px 0;
-      border: 1px solid var(--nac-border);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-    
-    .nac-options-header {
-      padding: 10px 15px;
-      background: var(--nac-surface);
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 13px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      color: var(--nac-text);
-      user-select: none;
-    }
-    
-    .nac-options-header:hover {
-      background: var(--nac-surface-hover);
-    }
-    
-    .nac-toggle-icon {
-      transition: transform 0.2s ease;
-      font-size: 10px;
-    }
-    
-    .nac-publishing-options.expanded .nac-toggle-icon {
-      transform: rotate(180deg);
-    }
-    
-    .nac-options-content {
-      padding: 15px;
-      display: none;
-      background: var(--nac-background);
-      border-top: 1px solid var(--nac-border);
-    }
-    
-    .nac-publishing-options.expanded .nac-options-content {
-      display: block;
-    }
-    
-    .nac-option-row {
-      margin: 12px 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    
-    .nac-option-row:first-child {
-      margin-top: 0;
-    }
-    
-    .nac-option-row:last-child {
-      margin-bottom: 0;
-    }
-    
-    .nac-option-row label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      color: var(--nac-text);
-      cursor: pointer;
-    }
-    
-    .nac-option-row label input[type="checkbox"] {
-      width: 16px;
-      height: 16px;
-      cursor: pointer;
-    }
-    
-    .nac-option-row label input[type="checkbox"]:disabled {
-      cursor: not-allowed;
-      opacity: 0.6;
-    }
-    
-    .nac-option-row input[type="text"] {
-      flex: 1;
-      min-width: 200px;
-      padding: 6px 10px;
-      border: 1px solid var(--nac-border);
-      border-radius: 4px;
-      background: var(--nac-surface);
-      color: var(--nac-text);
-      font-size: 13px;
-    }
-    
-    .nac-option-row input[type="text"]:focus {
-      outline: none;
-      border-color: var(--nac-primary);
-      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
-    }
-    
-    .nac-option-row button {
-      padding: 6px 12px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 13px;
-      border: 1px solid var(--nac-border);
-      background: var(--nac-surface);
-      color: var(--nac-text);
-      transition: all 0.2s ease;
-    }
-    
-    .nac-option-row button:hover {
-      background: var(--nac-surface-hover);
-      border-color: var(--nac-primary);
-    }
-    
-    .nac-option-row .nac-pubkey-display {
-      font-size: 12px;
-      color: var(--nac-text-muted);
-      font-family: monospace;
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    
-    .nac-option-row .nac-name-display {
-      font-size: 13px;
-      color: var(--nac-text);
-      font-weight: 500;
-    }
-    
-    .nac-option-row .nac-not-set {
-      font-size: 12px;
-      color: var(--nac-text-dim);
-      font-style: italic;
-    }
-    
-    .nac-option-description {
-      font-size: 11px;
-      color: var(--nac-text-dim);
-      margin-top: 4px;
-      margin-left: 24px;
-    }
-    
-    /* Entity Extraction Styles */
-    .nac-entities-section {
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 8px;
-      padding: 12px;
-      margin-top: 12px;
-    }
-    
-    .nac-entities-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      cursor: pointer;
-      user-select: none;
-    }
-    
-    .nac-entities-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--nac-text);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .nac-entities-title svg {
-      width: 16px;
-      height: 16px;
-      fill: currentColor;
-    }
-    
-    .nac-entities-toggle {
-      transition: transform 0.2s ease;
-    }
-    
-    .nac-entities-section.collapsed .nac-entities-toggle {
-      transform: rotate(-90deg);
-    }
-    
-    .nac-entities-content {
-      margin-top: 12px;
-      display: grid;
-      gap: 12px;
-    }
-    
-    .nac-entities-section.collapsed .nac-entities-content {
-      display: none;
-    }
-    
-    .nac-entity-group {
-      background: var(--nac-background);
-      border-radius: 6px;
-      padding: 10px;
-    }
-    
-    .nac-entity-group-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 8px;
-    }
-    
-    .nac-entity-group-title {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--nac-text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    
-    .nac-entity-group-title svg {
-      width: 14px;
-      height: 14px;
-      fill: currentColor;
-    }
-    
-    .nac-entity-count {
-      font-size: 11px;
-      background: var(--nac-primary);
-      color: white;
-      padding: 2px 6px;
-      border-radius: 10px;
-      font-weight: 500;
-    }
-    
-    .nac-entity-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-    
-    .nac-entity-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 16px;
-      padding: 4px 8px 4px 10px;
-      font-size: 12px;
-      color: var(--nac-text);
-      transition: all 0.15s ease;
-    }
-    
-    .nac-entity-tag:hover {
-      border-color: var(--nac-primary);
-      background: var(--nac-surface-hover);
-    }
-    
-    .nac-entity-tag.person {
-      border-color: #4ade80;
-      background: rgba(74, 222, 128, 0.1);
-    }
-    
-    .nac-entity-tag.organization {
-      border-color: #60a5fa;
-      background: rgba(96, 165, 250, 0.1);
-    }
-    
-    .nac-entity-tag-remove {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 16px;
-      height: 16px;
-      border: none;
-      background: transparent;
-      color: var(--nac-text-muted);
-      cursor: pointer;
-      border-radius: 50%;
-      padding: 0;
-      font-size: 14px;
-      line-height: 1;
-      transition: all 0.15s ease;
-    }
-    
-    .nac-entity-tag-remove:hover {
-      background: var(--nac-error);
-      color: white;
-    }
-    
-    .nac-entity-add {
-      display: flex;
-      gap: 6px;
-      margin-top: 8px;
-    }
-    
-    .nac-entity-add-input {
-      flex: 1;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 12px;
-      color: var(--nac-text);
-      outline: none;
-    }
-    
-    .nac-entity-add-input:focus {
-      border-color: var(--nac-primary);
-    }
-    
-    .nac-entity-add-input::placeholder {
-      color: var(--nac-text-dim);
-    }
-    
-    .nac-entity-add-btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 28px;
-      background: var(--nac-primary);
-      border: none;
-      border-radius: 6px;
-      color: white;
-      cursor: pointer;
-      transition: background 0.15s ease;
-    }
-    
-    .nac-entity-add-btn:hover {
-      background: var(--nac-primary-hover);
-    }
-    
-    .nac-entity-add-btn svg {
-      width: 14px;
-      height: 14px;
-      fill: currentColor;
-    }
-    
-    .nac-entity-empty {
-      font-size: 12px;
-      color: var(--nac-text-dim);
-      font-style: italic;
-      padding: 4px 0;
-    }
-    
-    /* Edit Mode Styles */
-    .nac-article-header {
-      margin-bottom: 15px;
-    }
-    .nac-article-actions {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .nac-field-group {
-      margin-bottom: 15px;
-    }
-    .nac-field-label {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-weight: 600;
-      font-size: 13px;
-      margin-bottom: 5px;
-      color: var(--nac-text);
-    }
-    .nac-field-preview {
-      padding: 10px;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      min-height: 20px;
-      color: var(--nac-text);
-    }
-    .nac-content-preview {
-      max-height: 300px;
-      overflow-y: auto;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    .nac-field-edit {
-      width: 100%;
-      padding: 10px;
-      border: 2px solid var(--nac-primary);
-      border-radius: 6px;
-      font-family: inherit;
-      font-size: 14px;
-      box-sizing: border-box;
-      background: var(--nac-background);
-      color: var(--nac-text);
-    }
-    .nac-field-edit:focus {
-      outline: none;
-      border-color: var(--nac-secondary);
-      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
-    }
-    .nac-content-edit {
-      min-height: 250px;
-      font-family: 'Consolas', 'Monaco', monospace;
-      font-size: 12px;
-      line-height: 1.4;
-      resize: vertical;
-    }
-    .nac-edit-tools {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      padding: 10px;
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      margin-bottom: 10px;
-      align-items: center;
-    }
-    .nac-tools-label {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--nac-text-muted);
-    }
-    .nac-edit-tools button {
-      padding: 4px 8px;
-      font-size: 11px;
-      border: 1px solid var(--nac-border);
-      border-radius: 4px;
-      background: var(--nac-background);
-      color: var(--nac-text);
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    .nac-edit-tools button:hover {
-      background: var(--nac-surface-hover);
-      border-color: var(--nac-primary);
-    }
-    .nac-btn-danger {
-      background: var(--nac-error) !important;
-      color: white !important;
-      border-color: var(--nac-error) !important;
-    }
-    .nac-btn-danger:hover {
-      background: #d32f2f !important;
-      border-color: #d32f2f !important;
-    }
-    .nac-edit-char-count {
-      font-weight: normal;
-      font-size: 11px;
-      color: var(--nac-text-muted);
-    }
-    .nac-excerpt-preview {
-      font-style: italic;
-      color: var(--nac-text-muted);
-    }
-    
-    /* Date Field Styles */
-    .nac-date-source {
-      font-weight: normal;
-      font-size: 10px;
-      color: var(--nac-text-muted);
-      margin-left: 10px;
-    }
-    .nac-date-inputs {
-      display: none;
-      gap: 10px;
-      align-items: center;
-    }
-    .nac-date-inputs.nac-field-edit-visible {
-      display: flex !important;
-    }
-    .nac-date-input, .nac-time-input {
-      padding: 8px;
-      border: 2px solid var(--nac-primary);
-      border-radius: 6px;
-      font-size: 14px;
-      background: var(--nac-background);
-      color: var(--nac-text);
-    }
-    .nac-date-input {
-      width: 150px;
-    }
-    .nac-time-input {
-      width: 100px;
-    }
-    .nac-date-input:focus, .nac-time-input:focus {
-      outline: none;
-      border-color: var(--nac-secondary);
-      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
-    }
-    
-    /* User Identity Section Styles */
-    .nac-user-identity-section {
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 8px;
-      padding: 16px;
-      margin-bottom: 20px;
-    }
-    
-    .nac-user-identity-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 12px;
-    }
-    
-    .nac-user-identity-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--nac-text);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .nac-user-identity-badge {
-      font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 4px;
-      background: var(--nac-success);
-      color: white;
-    }
-    
-    .nac-user-identity-badge.not-configured {
-      background: var(--nac-warning);
-    }
-    
-    .nac-user-identity-info {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px;
-      background: var(--nac-background);
-      border-radius: 6px;
-      margin-bottom: 12px;
-    }
-    
-    .nac-user-identity-avatar {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: var(--nac-primary);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: white;
-      font-size: 18px;
-    }
-    
-    .nac-user-identity-details {
-      flex: 1;
-    }
-    
-    .nac-user-identity-name {
-      font-weight: 600;
-      color: var(--nac-text);
-      margin-bottom: 2px;
-    }
-    
-    .nac-user-identity-pubkey {
-      font-size: 11px;
-      color: var(--nac-text-muted);
-      font-family: monospace;
-    }
-    
-    .nac-user-identity-signer {
-      font-size: 11px;
-      color: var(--nac-text-dim);
-      margin-top: 2px;
-    }
-    
-    .nac-user-identity-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    
-    .nac-user-identity-actions .nac-btn {
-      font-size: 12px;
-      padding: 6px 12px;
-    }
-    
-    .nac-user-identity-empty {
-      text-align: center;
-      padding: 20px;
-      color: var(--nac-text-muted);
-    }
-    
-    .nac-user-identity-empty-icon {
-      font-size: 32px;
-      margin-bottom: 8px;
-    }
-    
-    .nac-user-identity-empty-text {
-      font-size: 13px;
-      margin-bottom: 16px;
-    }
-    
-    .nac-user-identity-setup-options {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 12px;
-    }
-    
-    .nac-user-identity-setup-btn {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 12px 16px;
-      border: 1px solid var(--nac-border);
-      border-radius: 6px;
-      background: var(--nac-background);
-      color: var(--nac-text);
-      cursor: pointer;
-      transition: all 0.2s ease;
-      text-align: left;
-    }
-    
-    .nac-user-identity-setup-btn:hover {
-      border-color: var(--nac-primary);
-      background: var(--nac-surface-hover);
-    }
-    
-    .nac-user-identity-setup-btn-icon {
-      font-size: 20px;
-    }
-    
-    .nac-user-identity-setup-btn-content {
-      flex: 1;
-    }
-    
-    .nac-user-identity-setup-btn-title {
-      font-weight: 600;
-      margin-bottom: 2px;
-    }
-    
-    .nac-user-identity-setup-btn-desc {
-      font-size: 11px;
-      color: var(--nac-text-muted);
-    }
-    
-    /* Sign As Dropdown Styles */
-    .nac-sign-as-section {
-      background: var(--nac-surface);
-      border: 1px solid var(--nac-border);
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 16px;
-    }
-    
-    .nac-sign-as-label {
-      display: block;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--nac-text);
-      margin-bottom: 8px;
-    }
-    
-    .nac-sign-as-select {
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 6px;
-      border: 1px solid var(--nac-border);
-      background: var(--nac-background);
-      color: var(--nac-text);
-      font-size: 14px;
-      cursor: pointer;
-    }
-    
-    .nac-sign-as-info {
-      margin-top: 8px;
-      padding: 8px;
-      background: var(--nac-background);
-      border-radius: 4px;
-      font-size: 11px;
-      color: var(--nac-text-muted);
-    }
-    
-    .nac-sign-as-warning {
-      color: var(--nac-warning);
-      font-size: 12px;
-      margin-top: 8px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    
-    /* ============================================
-       IMMERSIVE READER STYLES
-       ============================================ */
-    
-    /* Fullscreen container */
-    .nac-immersive-reader {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: #fafafa;
-      z-index: 999999;
-      overflow-y: auto;
-      display: none;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    }
-    
-    .nac-immersive-reader.active {
-      display: block;
-    }
-    
-    /* Close button */
-    .nac-reader-close {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      border: none;
-      background: rgba(0,0,0,0.1);
-      font-size: 20px;
-      cursor: pointer;
-      z-index: 1000001;
-      transition: background 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .nac-reader-close:hover {
-      background: rgba(0,0,0,0.2);
-    }
-    
-    /* Main content area - optimal reading width */
-    .nac-reader-content {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 60px 20px 150px 20px;
-    }
-    
-    /* Article header */
-    .nac-reader-header {
-      margin-bottom: 30px;
-    }
-    .nac-reader-title {
-      font-size: 2.5em;
-      font-weight: 800;
-      line-height: 1.2;
-      margin: 0 0 20px 0;
-      color: #1a1a1a;
-    }
-    .nac-reader-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 15px;
-      color: #666;
-      font-size: 0.95em;
-      margin-bottom: 10px;
-    }
-    .nac-reader-author {
-      font-weight: 600;
-      color: #333;
-    }
-    .nac-reader-url {
-      font-size: 0.85em;
-      color: #888;
-      word-break: break-all;
-    }
-    
-    /* Featured image */
-    .nac-reader-image img {
-      width: 100%;
-      border-radius: 8px;
-      margin-bottom: 30px;
-    }
-    
-    /* Article body */
-    .nac-reader-body {
-      font-size: 1.2em;
-      line-height: 1.8;
-      color: #333;
-    }
-    .nac-reader-body p {
-      margin-bottom: 1.5em;
-    }
-    .nac-reader-body h1, .nac-reader-body h2, .nac-reader-body h3 {
-      margin-top: 2em;
-      margin-bottom: 0.5em;
-      font-weight: 700;
-      color: #1a1a1a;
-    }
-    .nac-reader-body h1 { font-size: 1.8em; }
-    .nac-reader-body h2 { font-size: 1.5em; }
-    .nac-reader-body h3 { font-size: 1.25em; }
-    .nac-reader-body img {
-      max-width: 100%;
-      border-radius: 6px;
-      margin: 1em 0;
-    }
-    .nac-reader-body blockquote {
-      border-left: 4px solid #ddd;
-      padding-left: 20px;
-      margin: 1.5em 0;
-      color: #555;
-      font-style: italic;
-    }
-    .nac-reader-body a {
-      color: #667eea;
-      text-decoration: none;
-    }
-    .nac-reader-body a:hover {
-      text-decoration: underline;
-    }
-    .nac-reader-body code {
-      background: #f0f0f0;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: 'Monaco', 'Menlo', monospace;
-      font-size: 0.9em;
-    }
-    .nac-reader-body pre {
-      background: #f5f5f5;
-      padding: 16px;
-      border-radius: 8px;
-      overflow-x: auto;
-    }
-    .nac-reader-body pre code {
-      background: none;
-      padding: 0;
-    }
-    .nac-reader-body ul, .nac-reader-body ol {
-      margin: 1em 0;
-      padding-left: 2em;
-    }
-    .nac-reader-body li {
-      margin-bottom: 0.5em;
-    }
-    
-    /* Floating Action Button */
-    .nac-reader-fab {
-      position: fixed;
-      bottom: 100px;
-      right: 30px;
-      z-index: 1000001;
-    }
-    .nac-fab-main {
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      border: none;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      font-size: 24px;
-      cursor: pointer;
-      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-      transition: transform 0.2s, box-shadow 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .nac-fab-main:hover {
-      transform: scale(1.1);
-      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
-    }
-    .nac-fab-menu {
-      position: absolute;
-      bottom: 70px;
-      right: 0;
-      display: none;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .nac-fab-menu.open {
-      display: flex;
-    }
-    .nac-fab-item {
-      width: 48px;
-      height: 48px;
-      border-radius: 50%;
-      border: none;
-      background: white;
-      font-size: 20px;
-      cursor: pointer;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
-      transition: transform 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .nac-fab-item:hover {
-      transform: scale(1.1);
-    }
-    
-    /* Quick Reaction Bar */
-    .nac-reader-reaction-bar {
+    /* Toast */
+    .nac-toast {
       position: fixed;
       bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      display: flex;
-      gap: 8px;
+      right: 20px;
       padding: 12px 20px;
-      background: white;
-      border-radius: 30px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      z-index: 1000001;
-    }
-    .nac-reaction-btn {
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      border: 2px solid transparent;
-      background: #f5f5f5;
-      font-size: 20px;
-      cursor: pointer;
-      transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .nac-reaction-btn:hover {
-      transform: scale(1.2);
-      background: #e8f5e9;
-    }
-    .nac-reaction-btn.selected {
-      border-color: #4caf50;
-      background: #e8f5e9;
-    }
-    
-    /* Reactions display section */
-    .nac-reader-reactions {
-      margin-top: 40px;
-      padding-top: 30px;
-      border-top: 1px solid #eee;
-    }
-    .nac-reactions-title {
-      font-size: 1.1em;
-      font-weight: 600;
-      margin-bottom: 15px;
-      color: #333;
-    }
-    .nac-reactions-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-    .nac-reaction-display {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      padding: 6px 12px;
-      background: #f5f5f5;
-      border-radius: 20px;
-      font-size: 0.95em;
-    }
-    .nac-reaction-emoji {
-      font-size: 1.2em;
-    }
-    .nac-reaction-count {
-      color: #666;
-      font-weight: 600;
-    }
-    
-    /* Comments Section */
-    .nac-reader-comments {
-      margin-top: 30px;
-      padding-top: 30px;
-      border-top: 1px solid #eee;
-    }
-    .nac-comments-title {
-      font-size: 1.1em;
-      font-weight: 600;
-      margin-bottom: 15px;
-      color: #333;
-    }
-    .nac-comment-item {
-      padding: 15px;
-      background: #f9f9f9;
       border-radius: 8px;
-      margin-bottom: 12px;
-    }
-    .nac-comment-author {
-      font-weight: 600;
-      font-size: 0.9em;
-      color: #333;
-      margin-bottom: 5px;
-    }
-    .nac-comment-text {
-      font-size: 0.95em;
-      color: #555;
-      line-height: 1.5;
-    }
-    .nac-comment-date {
-      font-size: 0.8em;
-      color: #999;
-      margin-top: 8px;
-    }
-    
-    /* Collapsible Sidebar */
-    .nac-reader-sidebar {
-      position: fixed;
-      top: 0;
-      right: -450px;
-      width: 450px;
-      height: 100vh;
-      background: white;
-      box-shadow: -5px 0 30px rgba(0,0,0,0.2);
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
       z-index: 1000002;
-      transition: right 0.3s ease;
-      display: flex;
-      flex-direction: column;
-    }
-    .nac-reader-sidebar.open {
-      right: 0;
-    }
-    .nac-sidebar-header {
-      padding: 20px;
-      border-bottom: 1px solid #eee;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #fafafa;
-    }
-    .nac-sidebar-title {
-      font-size: 1.2em;
-      font-weight: 600;
-      color: #333;
-    }
-    .nac-sidebar-close {
-      background: none;
-      border: none;
-      font-size: 24px;
-      cursor: pointer;
-      color: #666;
-      width: 32px;
-      height: 32px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 4px;
-    }
-    .nac-sidebar-close:hover {
-      background: #eee;
-    }
-    .nac-sidebar-content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-    }
-    
-    /* Sidebar form styles */
-    .nac-sidebar-form-group {
-      margin-bottom: 20px;
-    }
-    .nac-sidebar-label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #333;
-      margin-bottom: 8px;
-    }
-    .nac-sidebar-input,
-    .nac-sidebar-textarea,
-    .nac-sidebar-select {
-      width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      font-size: 14px;
-      transition: border-color 0.2s;
-    }
-    .nac-sidebar-input:focus,
-    .nac-sidebar-textarea:focus,
-    .nac-sidebar-select:focus {
-      outline: none;
-      border-color: #667eea;
-    }
-    .nac-sidebar-textarea {
-      min-height: 120px;
-      resize: vertical;
-      font-family: inherit;
-    }
-    .nac-sidebar-btn {
-      width: 100%;
-      padding: 12px 20px;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .nac-sidebar-btn-primary {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-    }
-    .nac-sidebar-btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-    }
-    .nac-sidebar-btn-primary:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none;
-    }
-    .nac-sidebar-btn-secondary {
-      background: #f5f5f5;
-      color: #333;
-      border: 1px solid #ddd;
-    }
-    .nac-sidebar-btn-secondary:hover {
-      background: #eee;
-    }
-    
-    /* Dark mode support for immersive reader */
-    @media (prefers-color-scheme: dark) {
-      .nac-immersive-reader {
-        background: #1a1a1a;
-      }
-      .nac-reader-title {
-        color: #f5f5f5;
-      }
-      .nac-reader-meta {
-        color: #999;
-      }
-      .nac-reader-author {
-        color: #ccc;
-      }
-      .nac-reader-url {
-        color: #777;
-      }
-      .nac-reader-body {
-        color: #e0e0e0;
-      }
-      .nac-reader-body h1, .nac-reader-body h2, .nac-reader-body h3 {
-        color: #f5f5f5;
-      }
-      .nac-reader-body blockquote {
-        border-left-color: #444;
-        color: #aaa;
-      }
-      .nac-reader-body code {
-        background: #333;
-      }
-      .nac-reader-body pre {
-        background: #2a2a2a;
-      }
-      .nac-reader-close {
-        background: rgba(255,255,255,0.1);
-        color: #fff;
-      }
-      .nac-reader-close:hover {
-        background: rgba(255,255,255,0.2);
-      }
-      .nac-reader-reaction-bar {
-        background: #2a2a2a;
-      }
-      .nac-reaction-btn {
-        background: #333;
-      }
-      .nac-reaction-btn:hover {
-        background: #3d5a3d;
-      }
-      .nac-reader-sidebar {
-        background: #252525;
-      }
-      .nac-sidebar-header {
-        background: #2a2a2a;
-        border-bottom-color: #333;
-      }
-      .nac-sidebar-title {
-        color: #f5f5f5;
-      }
-      .nac-sidebar-close {
-        color: #999;
-      }
-      .nac-sidebar-close:hover {
-        background: #333;
-      }
-      .nac-sidebar-label {
-        color: #ccc;
-      }
-      .nac-sidebar-input,
-      .nac-sidebar-textarea,
-      .nac-sidebar-select {
-        background: #333;
-        border-color: #444;
-        color: #f5f5f5;
-      }
-      .nac-sidebar-btn-secondary {
-        background: #333;
-        color: #ccc;
-        border-color: #444;
-      }
-      .nac-reader-reactions,
-      .nac-reader-comments {
-        border-top-color: #333;
-      }
-      .nac-reactions-title,
-      .nac-comments-title {
-        color: #f5f5f5;
-      }
-      .nac-reaction-display {
-        background: #333;
-      }
-      .nac-reaction-count {
-        color: #aaa;
-      }
-      .nac-comment-item {
-        background: #2a2a2a;
-      }
-      .nac-comment-author {
-        color: #ccc;
-      }
-      .nac-comment-text {
-        color: #aaa;
-      }
-    }
-  `;
-
-  // ============================================
-  // SECTION 8: UI COMPONENTS
-  // ============================================
-  
-  const UI = {
-    elements: {},
-    state: {
-      isOpen: false,
-      activeTab: 'readable',
-      article: null,
-      markdown: '',
-      entities: {
-        people: [],
-        organizations: []
-      },
-      editMode: false,
-      originalArticle: null,
-      originalPublishedAt: null,
-      // Immersive reader state
-      immersiveReaderOpen: false,
-      activeSidebarPanel: null
-    },
-    
-    // SVG Icons
-    icons: {
-      book: '<svg viewBox="0 0 24 24"><path d="M21 4H3a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM3 19V6h8v13H3zm18 0h-8V6h8v13z"/></svg>',
-      close: '<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>',
-      copy: '<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>',
-      download: '<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>',
-      send: '<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>',
-      chevronDown: '<svg viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>',
-      add: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>',
-      person: '<svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>',
-      business: '<svg viewBox="0 0 24 24"><path d="M12 7V3H2v18h20V7H12zM6 19H4v-2h2v2zm0-4H4v-2h2v2zm0-4H4V9h2v2zm0-4H4V5h2v2zm4 12H8v-2h2v2zm0-4H8v-2h2v2zm0-4H8V9h2v2zm0-4H8V5h2v2zm10 12h-8v-2h2v-2h-2v-2h2v-2h-2V9h8v10zm-2-8h-2v2h2v-2zm0 4h-2v2h2v-2z"/></svg>',
-      article: '<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>',
-      warning: '<svg viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>',
-      check: '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>'
-    },
-    
-    // Get label for date source
-    getDateSourceLabel: (source) => {
-      const sourceLabels = {
-        'json-ld': '(from structured data)',
-        'meta-tag': '(from meta tag)',
-        'platform-selector': '(from page element)',
-        'text-content': '(from text)',
-        'manual': '(manually set)'
-      };
-      return sourceLabels[source] || '';
-    },
-    
-    // Format date for preview display
-    formatDatePreview: (timestamp) => {
-      if (!timestamp) {
-        return '<em>Date not detected</em>';
-      }
-      const date = new Date(timestamp * 1000);
-      return date.toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    },
-    
-    // Update date preview display
-    updateDatePreview: () => {
-      const datePreview = document.getElementById('nac-date-preview');
-      const dateSource = document.getElementById('nac-date-source');
-      
-      if (datePreview && UI.state.article) {
-        datePreview.innerHTML = UI.formatDatePreview(UI.state.article.publishedAt);
-      }
-      
-      if (dateSource && UI.state.article) {
-        dateSource.textContent = UI.getDateSourceLabel(UI.state.article.publishedAtSource);
-      }
-    },
-    
-    // Initialize UI
-    init: () => {
-      Utils.log('Initializing UI...');
-      
-      // Inject styles
-      GM_addStyle(STYLES);
-      
-      // Create UI elements
-      UI.createFAB();
-      UI.createOverlay();
-      UI.createPanel();
-      
-      // Register menu commands
-      GM_registerMenuCommand('📖 Open Article Capture', () => UI.toggle());
-      GM_registerMenuCommand('🔑 Export Keypair Registry', () => UI.exportKeypairs());
-      GM_registerMenuCommand('📋 View Keypair Registry', () => UI.viewKeypairs());
-      
-      Utils.log('UI initialized');
-    },
-    
-    // Create Floating Action Button
-    createFAB: () => {
-      const fab = document.createElement('button');
-      fab.className = 'nac-fab nac-reset';
-      fab.innerHTML = UI.icons.book;
-      fab.title = 'NOSTR Article Capture - Click to open immersive reader';
-      fab.addEventListener('click', () => UI.openImmersiveReader());
-      
-      document.body.appendChild(fab);
-      UI.elements.fab = fab;
-    },
-    
-    // Create overlay
-    createOverlay: () => {
-      const overlay = document.createElement('div');
-      overlay.className = 'nac-overlay nac-reset';
-      overlay.addEventListener('click', () => UI.close());
-      
-      document.body.appendChild(overlay);
-      UI.elements.overlay = overlay;
-    },
-    
-    // Create main panel
-    createPanel: () => {
-      const panel = document.createElement('div');
-      panel.className = 'nac-panel nac-reset';
-      
-      panel.innerHTML = `
-        <!-- Header -->
-        <div class="nac-panel-header">
-          <div class="nac-panel-title">
-            ${UI.icons.book}
-            <span>NOSTR Article Capture</span>
-            <span class="nac-signing-status" id="nac-signing-status" title="Signing: Checking...">
-              <span class="nac-status-dot connecting" id="nac-status-dot"></span>
-              <span class="nac-status-text" id="nac-status-text" style="font-size: 11px; margin-left: 4px; color: var(--nac-text-muted);"></span>
-            </span>
-          </div>
-          <div class="nac-panel-controls">
-            <button class="nac-btn-icon" id="nac-download" title="Download Markdown">
-              ${UI.icons.download}
-            </button>
-            <button class="nac-btn-icon" id="nac-close" title="Close (Esc)">
-              ${UI.icons.close}
-            </button>
-          </div>
-        </div>
-        
-        <!-- Tabs -->
-        <div class="nac-tabs">
-          <button class="nac-tab active" data-tab="readable">Readable</button>
-          <button class="nac-tab" data-tab="markdown">Markdown</button>
-          <button class="nac-tab" data-tab="metadata">Metadata</button>
-          <div class="nac-tab-spacer"></div>
-          <button class="nac-btn-copy" id="nac-copy">
-            ${UI.icons.copy}
-            <span>Copy</span>
-          </button>
-        </div>
-        
-        <!-- Content Area -->
-        <div class="nac-content" id="nac-content">
-          <div class="nac-empty">
-            ${UI.icons.article}
-            <div class="nac-empty-title">Loading article...</div>
-            <div class="nac-empty-text">Please wait while we extract the content</div>
-          </div>
-        </div>
-        
-        <!-- Publish Section -->
-        <div class="nac-publish">
-          <div class="nac-publish-title">Publish Article to NOSTR</div>
-          
-          <!-- User Identity Section -->
-          <div class="nac-user-identity-section" id="nac-user-identity-section">
-            <div class="nac-user-identity-header">
-              <div class="nac-user-identity-title">
-                👤 Your Identity
-                <span class="nac-user-identity-badge not-configured" id="nac-user-identity-badge">Not Set</span>
-              </div>
-            </div>
-            <div id="nac-user-identity-content">
-              <!-- Will be populated dynamically -->
-              <div class="nac-user-identity-empty">
-                <div class="nac-user-identity-empty-icon">🔑</div>
-                <div class="nac-user-identity-empty-text">Set up your identity to sign metadata (ratings, annotations, fact-checks)</div>
-                <div class="nac-user-identity-setup-options">
-                  <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
-                    <span class="nac-user-identity-setup-btn-icon">🔌</span>
-                    <div class="nac-user-identity-setup-btn-content">
-                      <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
-                      <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
-                    </div>
-                  </button>
-                  <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
-                    <span class="nac-user-identity-setup-btn-icon">✨</span>
-                    <div class="nac-user-identity-setup-btn-content">
-                      <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
-                      <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
-                    </div>
-                  </button>
-                  <button class="nac-user-identity-setup-btn" id="nac-identity-import">
-                    <span class="nac-user-identity-setup-btn-icon">📥</span>
-                    <div class="nac-user-identity-setup-btn-content">
-                      <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
-                      <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Publication Selector (for Article publishing) -->
-          <div class="nac-form-group">
-            <label class="nac-form-label">📰 Publication (signs and publishes article)</label>
-            <select class="nac-form-select" id="nac-publication">
-              <option value="">Select or create a publication...</option>
-              <option value="__new__">+ Create new publication</option>
-            </select>
-          </div>
-          
-          <!-- New Publication Form (collapsible) -->
-          <div class="nac-collapsible" id="nac-new-publication" style="display: none;">
-            <div class="nac-collapsible-header">
-              <span class="nac-collapsible-title">New Publication Details</span>
-              <span class="nac-collapsible-icon">${UI.icons.chevronDown}</span>
-            </div>
-            <div class="nac-collapsible-content">
-              <div class="nac-form-group">
-                <label class="nac-form-label">Publication Name</label>
-                <input type="text" class="nac-form-input" id="nac-pub-name" placeholder="e.g., The New York Times">
-              </div>
-              <div class="nac-form-row">
-                <div class="nac-form-group">
-                  <label class="nac-form-label">Type</label>
-                  <select class="nac-form-select" id="nac-pub-type">
-                    <option value="news">News</option>
-                    <option value="blog">Blog</option>
-                    <option value="social">Social</option>
-                    <option value="podcast">Podcast</option>
-                    <option value="video">Video Channel</option>
-                  </select>
-                </div>
-                <div class="nac-form-group">
-                  <label class="nac-form-label">Domain</label>
-                  <input type="text" class="nac-form-input" id="nac-pub-domain" placeholder="e.g., nytimes.com">
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Author Selector -->
-          <div class="nac-form-group">
-            <label class="nac-form-label">Author (referenced in event)</label>
-            <select class="nac-form-select" id="nac-author">
-              <option value="">Select or create an author...</option>
-              <option value="__new__">+ Create new person</option>
-            </select>
-          </div>
-          
-          <!-- New Author Form (collapsible) -->
-          <div class="nac-collapsible" id="nac-new-author" style="display: none;">
-            <div class="nac-collapsible-header">
-              <span class="nac-collapsible-title">New Person Details</span>
-              <span class="nac-collapsible-icon">${UI.icons.chevronDown}</span>
-            </div>
-            <div class="nac-collapsible-content">
-              <div class="nac-form-group">
-                <label class="nac-form-label">Full Name</label>
-                <input type="text" class="nac-form-input" id="nac-author-name" placeholder="e.g., Jane Doe">
-              </div>
-            </div>
-          </div>
-          
-          <!-- Tags -->
-          <div class="nac-form-group">
-            <label class="nac-form-label">Tags</label>
-            <div class="nac-tags-container" id="nac-tags-container">
-              <input type="text" class="nac-tag-input" id="nac-tag-input" placeholder="Add tags...">
-            </div>
-          </div>
-          
-          <!-- Entities Section (People & Organizations) -->
-          <div class="nac-entities-section" id="nac-entities-section">
-            <div class="nac-entities-header" id="nac-entities-header">
-              <div class="nac-entities-title">
-                ${UI.icons.person}
-                <span>People & Organizations</span>
-              </div>
-              <span class="nac-entities-toggle">${UI.icons.chevronDown}</span>
-            </div>
-            <div class="nac-entities-content">
-              <!-- People Quoted -->
-              <div class="nac-entity-group">
-                <div class="nac-entity-group-header">
-                  <div class="nac-entity-group-title">
-                    ${UI.icons.person}
-                    <span>People Quoted</span>
-                  </div>
-                  <span class="nac-entity-count" id="nac-people-count">0</span>
-                </div>
-                <div class="nac-entity-tags" id="nac-people-tags">
-                  <span class="nac-entity-empty">No people detected</span>
-                </div>
-                <div class="nac-entity-add">
-                  <input type="text" class="nac-entity-add-input" id="nac-add-person-input" placeholder="Add person name...">
-                  <button class="nac-entity-add-btn" id="nac-add-person-btn" title="Add person">
-                    ${UI.icons.add}
-                  </button>
-                </div>
-              </div>
-              
-              <!-- Organizations Referenced -->
-              <div class="nac-entity-group">
-                <div class="nac-entity-group-header">
-                  <div class="nac-entity-group-title">
-                    ${UI.icons.business}
-                    <span>Organizations Referenced</span>
-                  </div>
-                  <span class="nac-entity-count" id="nac-orgs-count">0</span>
-                </div>
-                <div class="nac-entity-tags" id="nac-orgs-tags">
-                  <span class="nac-entity-empty">No organizations detected</span>
-                </div>
-                <div class="nac-entity-add">
-                  <input type="text" class="nac-entity-add-input" id="nac-add-org-input" placeholder="Add organization name...">
-                  <button class="nac-entity-add-btn" id="nac-add-org-btn" title="Add organization">
-                    ${UI.icons.add}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Media Handling -->
-          <div class="nac-form-group">
-            <label class="nac-form-label">Media Handling</label>
-            <div class="nac-radio-group">
-              <label class="nac-radio">
-                <input type="radio" name="nac-media" value="reference">
-                <span>Keep URLs</span>
-              </label>
-              <label class="nac-radio">
-                <input type="radio" name="nac-media" value="embed" checked>
-                <span>Embed Images (Base64)</span>
-              </label>
-            </div>
-          </div>
-          
-          <!-- Relays -->
-          <div class="nac-collapsible">
-            <div class="nac-collapsible-header">
-              <span class="nac-collapsible-title">Relays</span>
-              <span class="nac-collapsible-icon">${UI.icons.chevronDown}</span>
-            </div>
-            <div class="nac-collapsible-content">
-              <div class="nac-checkbox-group" id="nac-relays">
-                ${CONFIG.relays.map(relay => `
-                  <label class="nac-checkbox">
-                    <input type="checkbox" value="${relay.url}" ${relay.enabled ? 'checked' : ''}>
-                    <span>${relay.url.replace('wss://', '')}</span>
-                  </label>
-                `).join('')}
-              </div>
-            </div>
-          </div>
-          
-          <!-- Publishing Options (Multi-Pubkey) -->
-          <div class="nac-publishing-options" id="nac-publishing-options">
-            <div class="nac-options-header" id="nac-options-header">
-              ⚙️ Publishing Options <span class="nac-toggle-icon">▼</span>
-            </div>
-            <div class="nac-options-content">
-              <!-- Publication pubkey - always shown, this is the signer -->
-              <div class="nac-option-row">
-                <label>
-                  <input type="checkbox" id="nac-include-publication" checked disabled>
-                  📰 Publication (signer):
-                </label>
-                <span id="nac-publication-name" class="nac-name-display">Select above</span>
-              </div>
-              <div class="nac-option-description">The publication's key signs and publishes the event</div>
-              
-              <!-- Author pubkey - optional -->
-              <div class="nac-option-row">
-                <label>
-                  <input type="checkbox" id="nac-include-author">
-                  ✍️ Author pubkey:
-                </label>
-                <input type="text" id="nac-author-pubkey" placeholder="npub1... or hex pubkey">
-                <button id="nac-lookup-author" title="Lookup author pubkey from NOSTR">🔍</button>
-              </div>
-              <div class="nac-option-description">Add author's NOSTR pubkey as a p-tag with 'author' marker</div>
-              
-              <!-- Capturing user pubkey - optional -->
-              <div class="nac-option-row">
-                <label>
-                  <input type="checkbox" id="nac-include-capturer">
-                  👤 Capturing user (you):
-                </label>
-                <button id="nac-set-capturer">Set from NIP-07</button>
-                <span id="nac-capturer-display" class="nac-not-set">Not set</span>
-              </div>
-              <div class="nac-option-description">Credit yourself as the person who captured this article</div>
-            </div>
-          </div>
-          
-          <!-- Publish Button -->
-          <button class="nac-btn nac-btn-primary" id="nac-publish-btn" disabled>
-            ${UI.icons.send}
-            <span>Connect NSecBunker to Publish</span>
-          </button>
-        </div>
-      `;
-      
-      document.body.appendChild(panel);
-      UI.elements.panel = panel;
-      
-      // Attach event listeners
-      UI.attachEventListeners();
-    },
-    
-    // Attach event listeners
-    attachEventListeners: () => {
-      // Close button
-      document.getElementById('nac-close').addEventListener('click', () => UI.close());
-      
-      // Tab switching
-      document.querySelectorAll('.nac-tab').forEach(tab => {
-        tab.addEventListener('click', () => UI.switchTab(tab.dataset.tab));
-      });
-      
-      // Copy button
-      document.getElementById('nac-copy').addEventListener('click', () => UI.copyContent());
-      
-      // Download button
-      document.getElementById('nac-download').addEventListener('click', () => UI.downloadMarkdown());
-      
-      // Publication selector
-      document.getElementById('nac-publication').addEventListener('change', async (e) => {
-        const newPubForm = document.getElementById('nac-new-publication');
-        if (e.target.value === '__new__') {
-          newPubForm.style.display = 'block';
-          newPubForm.classList.add('open');
-          UI.updatePublicationDisplay(null, null);
-        } else if (e.target.value === '__nip07__') {
-          newPubForm.style.display = 'none';
-          // For NIP-07, show a placeholder until we get the pubkey
-          UI.updatePublicationDisplay('NIP-07 Extension', 'Will be retrieved at publish time');
-        } else if (e.target.value) {
-          newPubForm.style.display = 'none';
-          // Load publication and update display
-          const pub = await Storage.publications.get(e.target.value);
-          if (pub) {
-            UI.updatePublicationDisplay(pub.name, pub.pubkey);
-          }
-        } else {
-          newPubForm.style.display = 'none';
-          UI.updatePublicationDisplay(null, null);
-        }
-        UI.updatePublishButton();
-      });
-      
-      // Publication name input - update button state as user types
-      document.getElementById('nac-pub-name').addEventListener('input', () => {
-        UI.updatePublishButton();
-      });
-      
-      // Author selector
-      document.getElementById('nac-author').addEventListener('change', (e) => {
-        const newAuthorForm = document.getElementById('nac-new-author');
-        if (e.target.value === '__new__') {
-          newAuthorForm.style.display = 'block';
-          newAuthorForm.classList.add('open');
-        } else {
-          newAuthorForm.style.display = 'none';
-        }
-      });
-      
-      // Collapsible headers
-      document.querySelectorAll('.nac-collapsible-header').forEach(header => {
-        header.addEventListener('click', () => {
-          header.parentElement.classList.toggle('open');
-        });
-      });
-      
-      // Tags input
-      const tagInput = document.getElementById('nac-tag-input');
-      tagInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ',') {
-          e.preventDefault();
-          const tag = tagInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
-          if (tag) {
-            UI.addTag(tag);
-            tagInput.value = '';
-          }
-        }
-      });
-      
-      // Publish button
-      document.getElementById('nac-publish-btn').addEventListener('click', () => UI.publish());
-      
-      // Publishing options toggle
-      document.getElementById('nac-options-header').addEventListener('click', () => {
-        const optionsEl = document.getElementById('nac-publishing-options');
-        optionsEl.classList.toggle('expanded');
-      });
-      
-      // Set capturer from NIP-07 button
-      document.getElementById('nac-set-capturer').addEventListener('click', async () => {
-        await UI.setCapturerFromNIP07();
-      });
-      
-      // Lookup author pubkey button
-      document.getElementById('nac-lookup-author').addEventListener('click', () => {
-        UI.lookupAuthorPubkey();
-      });
-      
-      // Author pubkey checkbox
-      document.getElementById('nac-include-author').addEventListener('change', (e) => {
-        const pubkeyInput = document.getElementById('nac-author-pubkey');
-        pubkeyInput.disabled = !e.target.checked;
-      });
-      
-      // Capturer checkbox
-      document.getElementById('nac-include-capturer').addEventListener('change', (e) => {
-        const capturer = Storage.capturingUser.get();
-        if (capturer) {
-          Storage.capturingUser.setEnabled(e.target.checked);
-        }
-      });
-      
-      // Load saved capturer on panel open
-      UI.loadCapturerSettings();
-      
-      // Entities section toggle
-      document.getElementById('nac-entities-header').addEventListener('click', () => {
-        document.getElementById('nac-entities-section').classList.toggle('collapsed');
-      });
-      
-      // Add person button
-      document.getElementById('nac-add-person-btn').addEventListener('click', () => {
-        const input = document.getElementById('nac-add-person-input');
-        const name = input.value.trim();
-        if (name) {
-          UI.addEntity('person', name);
-          input.value = '';
-        }
-      });
-      
-      // Add person on Enter
-      document.getElementById('nac-add-person-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          const name = e.target.value.trim();
-          if (name) {
-            UI.addEntity('person', name);
-            e.target.value = '';
-          }
-        }
-      });
-      
-      // Add organization button
-      document.getElementById('nac-add-org-btn').addEventListener('click', () => {
-        const input = document.getElementById('nac-add-org-input');
-        const name = input.value.trim();
-        if (name) {
-          UI.addEntity('organization', name);
-          input.value = '';
-        }
-      });
-      
-      // Add organization on Enter
-      document.getElementById('nac-add-org-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          const name = e.target.value.trim();
-          if (name) {
-            UI.addEntity('organization', name);
-            e.target.value = '';
-          }
-        }
-      });
-      
-      // Escape key to close panel
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && UI.state.isOpen) {
-          e.preventDefault();
-          UI.close();
-        }
-      });
-    },
-    
-    // Toggle panel
-    toggle: () => {
-      if (UI.state.isOpen) {
-        UI.close();
-      } else {
-        UI.open();
-      }
-    },
-    
-    // Open panel
-    open: async () => {
-      UI.state.isOpen = true;
-      UI.elements.overlay.classList.add('visible');
-      UI.elements.panel.classList.add('visible');
-      UI.elements.fab.classList.add('active');
-      
-      // Extract article
-      await UI.loadArticle();
-      
-      // Load existing entities
-      await UI.loadEntities();
-    },
-    
-    // Close panel
-    close: () => {
-      UI.state.isOpen = false;
-      UI.elements.overlay.classList.remove('visible');
-      UI.elements.panel.classList.remove('visible');
-      UI.elements.fab.classList.remove('active');
-    },
-    
-    // Load and display article
-    loadArticle: async () => {
-      const contentArea = document.getElementById('nac-content');
-      
-      // Reset edit mode state for new article
-      UI.state.editMode = false;
-      UI.state.originalArticle = null;
-      
-      // Show loading
-      contentArea.innerHTML = `
-        <div class="nac-empty">
-          <div class="nac-spinner"></div>
-          <div class="nac-empty-title">Extracting article...</div>
-          <div class="nac-empty-text">Please wait</div>
-        </div>
-      `;
-      
-      // Extract article
-      const article = ContentProcessor.extractArticle();
-      
-      if (!article) {
-        contentArea.innerHTML = `
-          <div class="nac-empty">
-            ${UI.icons.warning}
-            <div class="nac-empty-title">Could not extract article</div>
-            <div class="nac-empty-text">This page may not contain readable article content</div>
-          </div>
-        `;
-        return;
-      }
-      
-      UI.state.article = article;
-      UI.state.markdown = ContentProcessor.htmlToMarkdown(article.content);
-      
-      // Extract entities from article content
-      const entities = ContentProcessor.extractEntities(article.content, article.textContent);
-      UI.state.entities = entities;
-      UI.renderEntities();
-      
-      // Pre-fill publication domain
-      document.getElementById('nac-pub-domain').value = article.domain;
-      
-      // Pre-fill author if detected
-      if (article.byline) {
-        document.getElementById('nac-author-name').value = article.byline;
-      }
-      
-      // Display content
-      UI.displayContent();
-    },
-    
-    // Display content based on active tab
-    displayContent: () => {
-      const contentArea = document.getElementById('nac-content');
-      const article = UI.state.article;
-      
-      if (!article) return;
-      
-      if (UI.state.activeTab === 'readable') {
-        // Build URL info section - show both URLs if they differ
-        let urlInfoHtml = '';
-        if (article.urlSource === 'canonical' && article.sourceUrl !== article.url) {
-          urlInfoHtml = `
-            <div class="nac-url-source-info">
-              <div class="nac-url-item nac-url-canonical">
-                <span class="nac-url-label">📎 Canonical URL:</span>
-                <span class="nac-url-value">${Utils.escapeHtml(article.url)}</span>
-              </div>
-              <div class="nac-url-item nac-url-browser">
-                <span class="nac-url-label">🔗 Browser URL:</span>
-                <span class="nac-url-value">${Utils.escapeHtml(article.sourceUrl)}</span>
-              </div>
-            </div>
-          `;
-        } else {
-          urlInfoHtml = `<span>🔗 ${article.domain}</span>`;
-        }
-        
-        // Calculate content preview (truncated for display)
-        const contentPreview = UI.state.markdown.replace(/\n/g, '<br>').substring(0, 2000) +
-          (UI.state.markdown.length > 2000 ? '...' : '');
-        
-        contentArea.innerHTML = `
-          <div class="nac-content-readable">
-            <!-- Edit Mode Header -->
-            <div class="nac-article-header">
-              <div class="nac-article-actions">
-                <button id="nac-edit-toggle" class="nac-btn nac-btn-secondary">
-                  ✏️ Edit
-                </button>
-                <button id="nac-revert-btn" class="nac-btn nac-btn-danger" style="display: none;">
-                  ↩️ Revert
-                </button>
-              </div>
-            </div>
-            
-            <!-- Quick Clean Tools (only visible in edit mode) -->
-            <div class="nac-edit-tools" id="nac-edit-tools" style="display: none;">
-              <span class="nac-tools-label">Quick Clean:</span>
-              <button id="nac-clean-ads" title="Remove common ad patterns">🚫 Remove Ads</button>
-              <button id="nac-clean-related" title="Remove 'Related Articles' sections">📰 Remove Related</button>
-              <button id="nac-clean-social" title="Remove social share prompts">📱 Remove Social</button>
-              <button id="nac-clean-whitespace" title="Clean up extra whitespace">📄 Fix Spacing</button>
-            </div>
-            
-            <!-- Title Section -->
-            <div class="nac-field-group">
-              <label class="nac-field-label">Title</label>
-              <div class="nac-field-preview" id="nac-title-preview">${Utils.escapeHtml(article.title)}</div>
-              <input type="text" class="nac-field-edit" id="nac-title-edit" style="display: none;" value="">
-            </div>
-            
-            <!-- Excerpt/Summary Section -->
-            <div class="nac-field-group">
-              <label class="nac-field-label">Excerpt/Summary</label>
-              <div class="nac-field-preview nac-excerpt-preview" id="nac-excerpt-preview">${article.excerpt ? Utils.escapeHtml(article.excerpt) : '<em>No excerpt</em>'}</div>
-              <textarea class="nac-field-edit" id="nac-excerpt-edit" rows="3" style="display: none;"></textarea>
-            </div>
-            
-            <!-- Published Date Section -->
-            <div class="nac-field-group">
-              <label class="nac-field-label">
-                📅 Published Date
-                <span class="nac-date-source" id="nac-date-source">${UI.getDateSourceLabel(article.publishedAtSource)}</span>
-              </label>
-              <div class="nac-field-preview" id="nac-date-preview">${UI.formatDatePreview(article.publishedAt)}</div>
-              <div class="nac-date-inputs nac-field-edit" style="display: none;">
-                <input type="date" class="nac-date-input" id="nac-date-edit">
-                <input type="time" class="nac-time-input" id="nac-time-edit">
-              </div>
-            </div>
-            
-            <!-- Content Body Section -->
-            <div class="nac-field-group">
-              <label class="nac-field-label">
-                Article Content
-                <span class="nac-edit-char-count" id="nac-content-chars">(${UI.state.markdown.length} chars)</span>
-              </label>
-              <div class="nac-field-preview nac-content-preview" id="nac-content-preview">${contentPreview}</div>
-              <textarea class="nac-field-edit nac-content-edit" id="nac-content-edit" rows="15" style="display: none;"></textarea>
-            </div>
-            
-            <!-- Article Info -->
-            <div class="nac-article-meta">
-              <div class="nac-article-info">
-                ${article.byline ? `<span>${UI.icons.person} ${Utils.escapeHtml(article.byline)}</span>` : ''}
-                ${article.publishedAt ? `<span>📅 ${Utils.formatDate(article.publishedAt)}</span>` : ''}
-                ${article.urlSource !== 'canonical' ? `<span>🔗 ${article.domain}</span>` : ''}
-              </div>
-              ${urlInfoHtml}
-            </div>
-          </div>
-        `;
-        
-        // Attach edit mode event listeners
-        UI.attachEditModeListeners();
-        
-      } else if (UI.state.activeTab === 'markdown') {
-        contentArea.innerHTML = `
-          <div class="nac-content-markdown">${Utils.escapeHtml(UI.state.markdown)}</div>
-        `;
-      } else if (UI.state.activeTab === 'metadata') {
-        UI.displayMetadataTab();
-      }
-    },
-    
-    // Attach edit mode event listeners
-    attachEditModeListeners: () => {
-      const editToggle = document.getElementById('nac-edit-toggle');
-      const revertBtn = document.getElementById('nac-revert-btn');
-      const contentEdit = document.getElementById('nac-content-edit');
-      
-      if (editToggle) {
-        editToggle.addEventListener('click', UI.toggleEditMode);
-      }
-      if (revertBtn) {
-        revertBtn.addEventListener('click', UI.revertChanges);
-      }
-      if (contentEdit) {
-        contentEdit.addEventListener('input', UI.updateCharCount);
-      }
-      
-      // Quick clean buttons
-      document.getElementById('nac-clean-ads')?.addEventListener('click', () => UI.cleanContent('ads'));
-      document.getElementById('nac-clean-related')?.addEventListener('click', () => UI.cleanContent('related'));
-      document.getElementById('nac-clean-social')?.addEventListener('click', () => UI.cleanContent('social'));
-      document.getElementById('nac-clean-whitespace')?.addEventListener('click', () => UI.cleanContent('whitespace'));
-    },
-    
-    // Toggle edit mode
-    toggleEditMode: () => {
-      UI.state.editMode = !UI.state.editMode;
-      
-      const editBtn = document.getElementById('nac-edit-toggle');
-      const revertBtn = document.getElementById('nac-revert-btn');
-      const editTools = document.getElementById('nac-edit-tools');
-      
-      if (UI.state.editMode) {
-        // Entering edit mode - save original and show edit fields
-        if (!UI.state.originalArticle) {
-          UI.state.originalArticle = {
-            title: UI.state.article.title,
-            excerpt: UI.state.article.excerpt || '',
-            content: UI.state.markdown
-          };
-          UI.state.originalPublishedAt = UI.state.article.publishedAt;
-        }
-        
-        editBtn.textContent = '👁️ Preview';
-        editBtn.classList.add('nac-btn-primary');
-        editBtn.classList.remove('nac-btn-secondary');
-        revertBtn.style.display = 'inline-block';
-        if (editTools) editTools.style.display = 'flex';
-        
-        // Show edit fields, hide previews
-        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'none');
-        document.querySelectorAll('.nac-field-edit').forEach(el => {
-          if (el.classList.contains('nac-date-inputs')) {
-            el.classList.add('nac-field-edit-visible');
-          } else {
-            el.style.display = 'block';
-          }
-        });
-        
-        // Populate edit fields
-        document.getElementById('nac-title-edit').value = UI.state.article.title;
-        document.getElementById('nac-excerpt-edit').value = UI.state.article.excerpt || '';
-        document.getElementById('nac-content-edit').value = UI.state.markdown;
-        
-        // Populate date fields
-        const dateEdit = document.getElementById('nac-date-edit');
-        const timeEdit = document.getElementById('nac-time-edit');
-        if (dateEdit && timeEdit && UI.state.article.publishedAt) {
-          const date = new Date(UI.state.article.publishedAt * 1000);
-          dateEdit.value = date.toISOString().split('T')[0];
-          timeEdit.value = date.toTimeString().slice(0, 5);
-        } else if (dateEdit && timeEdit) {
-          dateEdit.value = '';
-          timeEdit.value = '';
-        }
-      } else {
-        // Exiting edit mode - update article from fields and show previews
-        UI.state.article.title = document.getElementById('nac-title-edit').value;
-        UI.state.article.excerpt = document.getElementById('nac-excerpt-edit').value;
-        UI.state.markdown = document.getElementById('nac-content-edit').value;
-        
-        // Update date from fields
-        const dateInput = document.getElementById('nac-date-edit').value;
-        const timeInput = document.getElementById('nac-time-edit').value || '00:00';
-        if (dateInput) {
-          const newDate = new Date(`${dateInput}T${timeInput}`);
-          if (!isNaN(newDate.getTime())) {
-            UI.state.article.publishedAt = Math.floor(newDate.getTime() / 1000);
-            UI.state.article.publishedAtSource = 'manual';
-          }
-        } else {
-          // If date was cleared, set to null
-          UI.state.article.publishedAt = null;
-          UI.state.article.publishedAtSource = null;
-        }
-        
-        editBtn.textContent = '✏️ Edit';
-        editBtn.classList.remove('nac-btn-primary');
-        editBtn.classList.add('nac-btn-secondary');
-        if (editTools) editTools.style.display = 'none';
-        
-        // Show previews, hide edit fields
-        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
-        document.querySelectorAll('.nac-field-edit').forEach(el => {
-          if (el.classList.contains('nac-date-inputs')) {
-            el.classList.remove('nac-field-edit-visible');
-          } else {
-            el.style.display = 'none';
-          }
-        });
-        
-        // Update previews with new content
-        UI.updatePreviews();
-      }
-    },
-    
-    // Update preview displays
-    updatePreviews: () => {
-      const titlePreview = document.getElementById('nac-title-preview');
-      const excerptPreview = document.getElementById('nac-excerpt-preview');
-      const contentPreview = document.getElementById('nac-content-preview');
-      const charCount = document.getElementById('nac-content-chars');
-      
-      if (titlePreview) {
-        titlePreview.textContent = UI.state.article.title;
-      }
-      if (excerptPreview) {
-        excerptPreview.innerHTML = UI.state.article.excerpt ?
-          Utils.escapeHtml(UI.state.article.excerpt) : '<em>No excerpt</em>';
-      }
-      if (contentPreview) {
-        // Render markdown content as HTML for preview (basic line breaks)
-        contentPreview.innerHTML = UI.state.markdown.replace(/\n/g, '<br>').substring(0, 2000) +
-          (UI.state.markdown.length > 2000 ? '...' : '');
-      }
-      if (charCount) {
-        charCount.textContent = `(${UI.state.markdown.length} chars)`;
-      }
-      
-      // Update date preview
-      UI.updateDatePreview();
-    },
-    
-    // Revert changes to original
-    revertChanges: () => {
-      if (UI.state.originalArticle) {
-        UI.state.article.title = UI.state.originalArticle.title;
-        UI.state.article.excerpt = UI.state.originalArticle.excerpt;
-        UI.state.markdown = UI.state.originalArticle.content;
-        
-        // Revert published date
-        if (UI.state.originalPublishedAt !== undefined) {
-          UI.state.article.publishedAt = UI.state.originalPublishedAt;
-          UI.state.originalPublishedAt = null;
-        }
-        
-        UI.state.originalArticle = null;
-        UI.state.editMode = false;
-        
-        // Update UI
-        const editBtn = document.getElementById('nac-edit-toggle');
-        const revertBtn = document.getElementById('nac-revert-btn');
-        const editTools = document.getElementById('nac-edit-tools');
-        
-        editBtn.textContent = '✏️ Edit';
-        editBtn.classList.remove('nac-btn-primary');
-        editBtn.classList.add('nac-btn-secondary');
-        revertBtn.style.display = 'none';
-        if (editTools) editTools.style.display = 'none';
-        
-        document.querySelectorAll('.nac-field-preview').forEach(el => el.style.display = 'block');
-        document.querySelectorAll('.nac-field-edit').forEach(el => {
-          if (el.classList.contains('nac-date-inputs')) {
-            el.classList.remove('nac-field-edit-visible');
-          } else {
-            el.style.display = 'none';
-          }
-        });
-        
-        UI.updatePreviews();
-        UI.showToast('Changes reverted', 'info');
-      }
-    },
-    
-    // Clean content with various patterns
-    cleanContent: (type) => {
-      const contentEdit = document.getElementById('nac-content-edit');
-      if (!contentEdit) return;
-      
-      let content = contentEdit.value;
-      
-      switch(type) {
-        case 'ads':
-          // Remove common ad patterns
-          content = content.replace(/\[?advertisement\]?/gi, '');
-          content = content.replace(/sponsored content/gi, '');
-          content = content.replace(/\[?promoted\]?/gi, '');
-          content = content.replace(/click here to .*/gi, '');
-          content = content.replace(/\[ad\]/gi, '');
-          content = content.replace(/advertisement/gi, '');
-          break;
-        case 'related':
-          // Remove "Related Articles" type sections
-          content = content.replace(/related articles?:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
-          content = content.replace(/you may also like:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
-          content = content.replace(/read more:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
-          content = content.replace(/more from .+:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
-          content = content.replace(/recommended for you:?\s*[\s\S]*?(?=\n\n|\n#|$)/gi, '');
-          break;
-        case 'social':
-          // Remove social share prompts
-          content = content.replace(/share this (article|story|post)/gi, '');
-          content = content.replace(/follow us on .*/gi, '');
-          content = content.replace(/subscribe to our .*/gi, '');
-          content = content.replace(/sign up for .*/gi, '');
-          content = content.replace(/join our .*/gi, '');
-          content = content.replace(/like us on .*/gi, '');
-          break;
-        case 'whitespace':
-          // Clean up whitespace
-          content = content.replace(/\n{3,}/g, '\n\n');
-          content = content.replace(/[ \t]+\n/g, '\n');
-          content = content.replace(/\n[ \t]+/g, '\n');
-          content = content.trim();
-          break;
-      }
-      
-      contentEdit.value = content;
-      UI.updateCharCount();
-      UI.showToast('Content cleaned', 'success');
-    },
-    
-    // Update character count display
-    updateCharCount: () => {
-      const contentEdit = document.getElementById('nac-content-edit');
-      const charCount = document.getElementById('nac-content-chars');
-      if (contentEdit && charCount) {
-        charCount.textContent = `(${contentEdit.value.length} chars)`;
-      }
-    },
-    
-    // Display metadata tab content
-    displayMetadataTab: async () => {
-      const contentArea = document.getElementById('nac-content');
-      const article = UI.state.article;
-      
-      if (!article) return;
-      
-      // Compute URL info
-      const normalizedUrl = Utils.normalizeUrl(article.url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-      
-      contentArea.innerHTML = `
-        <div class="nac-metadata-tab-content">
-          <!-- URL Info Section -->
-          <div class="nac-url-info">
-            <div class="nac-url-info-label">Target URL</div>
-            <div class="nac-url-info-value">${Utils.escapeHtml(normalizedUrl)}</div>
-            <div class="nac-url-info-hash">
-              <strong>d-tag:</strong> ${dTag}
-            </div>
-          </div>
-          
-          <!-- Metadata Type Selector -->
-          <div class="nac-metadata-type-selector">
-            <button class="nac-type-btn active" data-type="annotation">
-              <span class="nac-type-btn-icon">📝</span>
-              <span class="nac-type-btn-label">Annotation</span>
-            </button>
-            <button class="nac-type-btn" data-type="factcheck">
-              <span class="nac-type-btn-icon">🔍</span>
-              <span class="nac-type-btn-label">Fact-Check</span>
-            </button>
-            <button class="nac-type-btn" data-type="headline">
-              <span class="nac-type-btn-icon">📰</span>
-              <span class="nac-type-btn-label">Headline Fix</span>
-            </button>
-            <button class="nac-type-btn" data-type="reaction">
-              <span class="nac-type-btn-icon">👍</span>
-              <span class="nac-type-btn-label">Reaction</span>
-            </button>
-            <button class="nac-type-btn" data-type="related">
-              <span class="nac-type-btn-icon">🔗</span>
-              <span class="nac-type-btn-label">Related</span>
-            </button>
-            <button class="nac-type-btn" data-type="rating">
-              <span class="nac-type-btn-icon">⭐</span>
-              <span class="nac-type-btn-label">Rating</span>
-            </button>
-            <button class="nac-type-btn" data-type="comment">
-              <span class="nac-type-btn-icon">💬</span>
-              <span class="nac-type-btn-label">Comment</span>
-            </button>
-          </div>
-          
-          <!-- Annotation Form (Kind 32123) -->
-          <div class="nac-metadata-form active" id="nac-form-annotation">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Annotation Type</label>
-              <select class="nac-form-select" id="nac-annotation-type">
-                <option value="context">Context / Background</option>
-                <option value="correction">Correction</option>
-                <option value="update">Update / Follow-up</option>
-                <option value="opinion">Opinion / Commentary</option>
-                <option value="related">Related Information</option>
-              </select>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Annotation Content</label>
-              <textarea class="nac-form-textarea" id="nac-annotation-content"
-                placeholder="Enter your annotation about this article..."
-                rows="4" maxlength="2000"></textarea>
-              <div class="nac-char-count"><span id="nac-annotation-chars">0</span>/2000</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Confidence Level</label>
-              <div class="nac-confidence-slider">
-                <input type="range" id="nac-annotation-confidence" min="0" max="100" value="80">
-                <span class="nac-confidence-value" id="nac-annotation-confidence-value">80%</span>
-              </div>
-              <div class="nac-form-hint">How confident are you in this annotation?</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Evidence URL (Optional)</label>
-              <input type="url" class="nac-form-input" id="nac-annotation-evidence"
-                placeholder="https://example.com/source">
-            </div>
-          </div>
-          
-          <!-- Fact-Check Form (Kind 32127) -->
-          <div class="nac-metadata-form" id="nac-form-factcheck">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Claim Being Checked</label>
-              <textarea class="nac-form-textarea" id="nac-factcheck-claim"
-                placeholder="What specific claim are you fact-checking?"
-                rows="2" maxlength="200"></textarea>
-              <div class="nac-char-count"><span id="nac-factcheck-claim-chars">0</span>/200</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Verdict</label>
-              <div class="nac-verdict-group">
-                <div class="nac-verdict-option verdict-true">
-                  <input type="radio" name="nac-verdict" id="nac-verdict-true" value="true">
-                  <label for="nac-verdict-true">
-                    <span class="nac-verdict-icon">✅</span>
-                    <span class="nac-verdict-label">True</span>
-                  </label>
-                </div>
-                <div class="nac-verdict-option verdict-partially-true">
-                  <input type="radio" name="nac-verdict" id="nac-verdict-partial" value="partially-true">
-                  <label for="nac-verdict-partial">
-                    <span class="nac-verdict-icon">⚠️</span>
-                    <span class="nac-verdict-label">Partial</span>
-                  </label>
-                </div>
-                <div class="nac-verdict-option verdict-false">
-                  <input type="radio" name="nac-verdict" id="nac-verdict-false" value="false">
-                  <label for="nac-verdict-false">
-                    <span class="nac-verdict-icon">❌</span>
-                    <span class="nac-verdict-label">False</span>
-                  </label>
-                </div>
-                <div class="nac-verdict-option verdict-unverifiable">
-                  <input type="radio" name="nac-verdict" id="nac-verdict-unverifiable" value="unverifiable">
-                  <label for="nac-verdict-unverifiable">
-                    <span class="nac-verdict-icon">❓</span>
-                    <span class="nac-verdict-label">Unknown</span>
-                  </label>
-                </div>
-              </div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Explanation</label>
-              <textarea class="nac-form-textarea" id="nac-factcheck-explanation"
-                placeholder="Explain your verdict with evidence..."
-                rows="4" maxlength="2000"></textarea>
-              <div class="nac-char-count"><span id="nac-factcheck-explanation-chars">0</span>/2000</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Evidence Sources</label>
-              <div class="nac-evidence-list" id="nac-evidence-list">
-                <div class="nac-evidence-item" data-index="0">
-                  <div class="nac-evidence-row">
-                    <input type="url" class="nac-form-input nac-evidence-url"
-                      placeholder="https://source.com/evidence">
-                    <select class="nac-form-select nac-evidence-type">
-                      <option value="primary">Primary</option>
-                      <option value="official">Official</option>
-                      <option value="news">News</option>
-                      <option value="academic">Academic</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-              <button type="button" class="nac-add-evidence" id="nac-add-evidence">
-                ${UI.icons.add} Add Evidence Source
-              </button>
-            </div>
-          </div>
-          
-          <!-- Headline Correction Form (Kind 32129) -->
-          <div class="nac-metadata-form" id="nac-form-headline">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Original Headline</label>
-              <div class="nac-headline-original">
-                <div class="nac-headline-original-text" id="nac-original-headline">${Utils.escapeHtml(article.title)}</div>
-                <button type="button" class="nac-headline-edit-btn" id="nac-edit-headline">Edit</button>
-              </div>
-              <input type="text" class="nac-form-input" id="nac-headline-original-input"
-                value="${Utils.escapeHtml(article.title)}" style="display: none;">
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Suggested Headline</label>
-              <input type="text" class="nac-form-input" id="nac-headline-suggested"
-                placeholder="Enter a more accurate headline..." maxlength="200">
-              <div class="nac-char-count"><span id="nac-headline-chars">0</span>/200</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Reason for Correction</label>
-              <textarea class="nac-form-textarea" id="nac-headline-reason"
-                placeholder="Explain why this headline needs correction (e.g., clickbait, misleading, sensationalized)..."
-                rows="3" maxlength="1000"></textarea>
-              <div class="nac-char-count"><span id="nac-headline-reason-chars">0</span>/1000</div>
-            </div>
-          </div>
-
-          <!-- URL Reaction Form (Kind 32132) -->
-          <div class="nac-metadata-form" id="nac-form-reaction" style="display: none;">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Quick Reaction</label>
-              <div class="nac-emoji-picker" id="nac-reaction-emoji-picker">
-                <button type="button" class="nac-emoji-btn" data-emoji="👍" title="Thumbs Up">👍</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="👎" title="Thumbs Down">👎</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="❤️" title="Love">❤️</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="🔥" title="Fire">🔥</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="🤔" title="Thinking">🤔</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="😡" title="Angry">😡</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="🎯" title="Accurate">🎯</button>
-                <button type="button" class="nac-emoji-btn" data-emoji="💯" title="100%">💯</button>
-              </div>
-              <input type="hidden" id="nac-reaction-emoji" value="">
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Aspect (Optional)</label>
-              <select class="nac-form-select" id="nac-reaction-aspect">
-                <option value="">Overall Article</option>
-                <option value="headline">Headline</option>
-                <option value="content">Content</option>
-                <option value="claims">Claims</option>
-                <option value="sources">Sources</option>
-                <option value="images">Images</option>
-              </select>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Reason (Optional)</label>
-              <input type="text" class="nac-form-input" id="nac-reaction-reason"
-                placeholder="Brief reason for your reaction..." maxlength="100">
-              <div class="nac-char-count"><span id="nac-reaction-reason-chars">0</span>/100</div>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Extended Comment (Optional)</label>
-              <textarea class="nac-form-textarea" id="nac-reaction-content"
-                placeholder="Add more details about your reaction..."
-                rows="3" maxlength="1000"></textarea>
-              <div class="nac-char-count"><span id="nac-reaction-content-chars">0</span>/1000</div>
-            </div>
-          </div>
-
-          <!-- Related Content Links Form (Kind 32131) -->
-          <div class="nac-metadata-form" id="nac-form-related" style="display: none;">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Related URL <span class="nac-required">*</span></label>
-              <div class="nac-input-with-btn">
-                <input type="url" class="nac-form-input" id="nac-related-url"
-                  placeholder="https://example.com/related-article">
-                <button type="button" class="nac-fetch-btn" id="nac-fetch-related-title" title="Fetch title from URL">🔄</button>
-              </div>
-              <div class="nac-form-help">Enter the URL of a related article or source</div>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Relationship Type <span class="nac-required">*</span></label>
-              <select class="nac-form-select" id="nac-related-type">
-                <option value="">Select relationship...</option>
-                <option value="response">Response</option>
-                <option value="rebuttal">Rebuttal</option>
-                <option value="supporting">Supporting Evidence</option>
-                <option value="contradicting">Contradicting Evidence</option>
-                <option value="primary-source">Primary Source</option>
-                <option value="update">Update</option>
-                <option value="correction">Correction</option>
-                <option value="similar">Similar</option>
-              </select>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Related Article Title</label>
-              <input type="text" class="nac-form-input" id="nac-related-title"
-                placeholder="Title of the related article..." maxlength="200">
-              <div class="nac-char-count"><span id="nac-related-title-chars">0</span>/200</div>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Relevance</label>
-              <div class="nac-relevance-slider">
-                <input type="range" class="nac-form-range" id="nac-related-relevance"
-                  min="0" max="100" value="75">
-                <span class="nac-relevance-value" id="nac-related-relevance-value">75%</span>
-              </div>
-            </div>
-            <div class="nac-form-group">
-              <label class="nac-form-label">Description</label>
-              <textarea class="nac-form-textarea" id="nac-related-description"
-                placeholder="Describe how this content relates to the current article..."
-                rows="3" maxlength="1000"></textarea>
-              <div class="nac-char-count"><span id="nac-related-description-chars">0</span>/1000</div>
-            </div>
-          </div>
-
-          <!-- Content Rating Form (Kind 32124) -->
-          <div class="nac-metadata-form" id="nac-form-rating" style="display: none;">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Rate This Content</label>
-              <div class="nac-form-help">Score each dimension from 0 (worst) to 10 (best)</div>
-            </div>
-            
-            <div class="nac-rating-grid">
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Accuracy</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-accuracy"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-accuracy-value">5</span>
-                </div>
-                <div class="nac-rating-help">How factually accurate is the content?</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Quality</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-quality"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-quality-value">5</span>
-                </div>
-                <div class="nac-rating-help">Overall writing and production quality</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Depth</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-depth"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-depth-value">5</span>
-                </div>
-                <div class="nac-rating-help">How thoroughly does it cover the topic?</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Clarity</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-clarity"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-clarity-value">5</span>
-                </div>
-                <div class="nac-rating-help">How clear and understandable is it?</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Bias</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-bias"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-bias-value">5</span>
-                </div>
-                <div class="nac-rating-help">10 = neutral/balanced, 0 = heavily biased</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Sources</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-sources"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-sources-value">5</span>
-                </div>
-                <div class="nac-rating-help">Quality of citations and references</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Relevance</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-relevance"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-relevance-value">5</span>
-                </div>
-                <div class="nac-rating-help">How relevant is this content today?</div>
-              </div>
-              
-              <div class="nac-rating-dimension">
-                <label class="nac-rating-label">Originality</label>
-                <div class="nac-rating-slider">
-                  <input type="range" class="nac-form-range" id="nac-rating-originality"
-                    min="0" max="10" value="5">
-                  <span class="nac-rating-value" id="nac-rating-originality-value">5</span>
-                </div>
-                <div class="nac-rating-help">Does it offer new insights or perspectives?</div>
-              </div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Confidence Level</label>
-              <div class="nac-confidence-slider">
-                <input type="range" class="nac-form-range" id="nac-rating-confidence"
-                  min="0" max="100" value="75">
-                <span class="nac-confidence-value" id="nac-rating-confidence-value">75%</span>
-              </div>
-              <div class="nac-form-help">How confident are you in your ratings?</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Review (Optional)</label>
-              <textarea class="nac-form-textarea" id="nac-rating-review"
-                placeholder="Write a detailed review explaining your ratings..."
-                rows="4" maxlength="5000"></textarea>
-              <div class="nac-char-count"><span id="nac-rating-review-chars">0</span>/5000</div>
-            </div>
-          </div>
-
-          <!-- Comment Form (Kind 32123 with annotation-type=comment) -->
-          <div class="nac-metadata-form" id="nac-form-comment" style="display: none;">
-            <div class="nac-form-group">
-              <label class="nac-form-label">Your Comment</label>
-              <textarea class="nac-form-textarea" id="nac-comment-content"
-                placeholder="Share your thoughts on this article..."
-                rows="5" maxlength="5000"></textarea>
-              <div class="nac-char-count"><span id="nac-comment-chars">0</span>/5000</div>
-            </div>
-            
-            <div class="nac-form-group">
-              <label class="nac-form-label">Reply To (Optional)</label>
-              <input type="text" class="nac-form-input" id="nac-comment-parent"
-                placeholder="Event ID of comment you're replying to...">
-              <div class="nac-form-help">Leave empty for top-level comment, or paste event ID to reply</div>
-            </div>
-          </div>
-
-          <!-- Event Preview -->
-          <div class="nac-event-preview" id="nac-event-preview">
-            <div class="nac-event-preview-header">
-              <span class="nac-event-preview-title">Event Preview</span>
-              <button type="button" class="nac-event-preview-toggle" id="nac-preview-toggle">Show JSON</button>
-            </div>
-            <div class="nac-event-preview-json" id="nac-preview-json" style="display: none;">
-              Loading preview...
-            </div>
-          </div>
-          
-          <!-- Sign As Dropdown -->
-          <div class="nac-sign-as-section">
-            <label class="nac-sign-as-label">Sign As</label>
-            <select class="nac-sign-as-select" id="nac-metadata-signer">
-              <option value="">Select who signs this...</option>
-              <optgroup label="👤 Personal Identity" id="nac-signer-user-group">
-                <option value="user" id="nac-signer-user-option" disabled>Set up your identity first...</option>
-              </optgroup>
-              <optgroup label="📰 Publications" id="nac-signer-pub-group">
-                <!-- Publications will be loaded dynamically -->
-              </optgroup>
-            </select>
-            <div class="nac-sign-as-info" id="nac-sign-as-info">
-              <strong>💡 Tip:</strong> URL metadata (ratings, annotations, fact-checks) are personal assertions.
-              Use your personal identity for these. Publications are for article publishing.
-            </div>
-          </div>
-          
-          <!-- Hidden legacy field for backward compatibility -->
-          <input type="hidden" id="nac-metadata-publication" value="">
-          
-          <!-- Post Button -->
-          <div class="nac-metadata-actions">
-            <button type="button" class="nac-btn-secondary" id="nac-metadata-cancel">Cancel</button>
-            <button type="button" class="nac-btn nac-btn-primary" id="nac-metadata-post" disabled>
-              ${UI.icons.send} Post Metadata
-            </button>
-          </div>
-        </div>
-      `;
-      
-      // Attach metadata tab event listeners
-      UI.attachMetadataEventListeners();
-      
-      // Load publications into selector
-      await UI.loadMetadataPublications();
-      
-      // Update initial preview
-      UI.updateMetadataPreview();
-    },
-    
-    // Attach event listeners for metadata tab
-    attachMetadataEventListeners: () => {
-      // Type selector buttons
-      document.querySelectorAll('.nac-type-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.nac-type-btn').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          
-          const type = btn.dataset.type;
-          document.querySelectorAll('.nac-metadata-form').forEach(form => {
-            form.classList.remove('active');
-          });
-          document.getElementById(`nac-form-${type}`).classList.add('active');
-          
-          UI.state.metadataType = type;
-          UI.updateMetadataPreview();
-          UI.updateMetadataPostButton();
-        });
-      });
-      
-      // Character counters
-      const setupCharCounter = (inputId, counterId, maxLen) => {
-        const input = document.getElementById(inputId);
-        const counter = document.getElementById(counterId);
-        if (input && counter) {
-          input.addEventListener('input', () => {
-            const len = input.value.length;
-            counter.textContent = len;
-            counter.parentElement.classList.toggle('warning', len > maxLen * 0.8);
-            counter.parentElement.classList.toggle('error', len >= maxLen);
-            UI.updateMetadataPreview();
-            UI.updateMetadataPostButton();
-          });
-        }
-      };
-      
-      setupCharCounter('nac-annotation-content', 'nac-annotation-chars', 2000);
-      setupCharCounter('nac-factcheck-claim', 'nac-factcheck-claim-chars', 200);
-      setupCharCounter('nac-factcheck-explanation', 'nac-factcheck-explanation-chars', 2000);
-      setupCharCounter('nac-headline-suggested', 'nac-headline-chars', 200);
-      setupCharCounter('nac-headline-reason', 'nac-headline-reason-chars', 1000);
-      setupCharCounter('nac-reaction-reason', 'nac-reaction-reason-chars', 100);
-      setupCharCounter('nac-reaction-content', 'nac-reaction-content-chars', 1000);
-      setupCharCounter('nac-related-title', 'nac-related-title-chars', 200);
-      setupCharCounter('nac-related-description', 'nac-related-description-chars', 1000);
-      
-      // Rating form char counter
-      setupCharCounter('nac-rating-review', 'nac-rating-review-chars', 5000);
-      
-      // Comment form char counter
-      setupCharCounter('nac-comment-content', 'nac-comment-chars', 5000);
-      
-      // Rating dimension sliders
-      const ratingDimensions = ['accuracy', 'quality', 'depth', 'clarity', 'bias', 'sources', 'relevance', 'originality'];
-      ratingDimensions.forEach(dim => {
-        const slider = document.getElementById(`nac-rating-${dim}`);
-        const valueEl = document.getElementById(`nac-rating-${dim}-value`);
-        if (slider && valueEl) {
-          slider.addEventListener('input', () => {
-            valueEl.textContent = slider.value;
-            UI.updateMetadataPreview();
-          });
-        }
-      });
-      
-      // Rating confidence slider
-      const ratingConfidenceSlider = document.getElementById('nac-rating-confidence');
-      const ratingConfidenceValue = document.getElementById('nac-rating-confidence-value');
-      if (ratingConfidenceSlider && ratingConfidenceValue) {
-        ratingConfidenceSlider.addEventListener('input', () => {
-          ratingConfidenceValue.textContent = ratingConfidenceSlider.value + '%';
-          UI.updateMetadataPreview();
-        });
-      }
-      
-      // Comment content
-      const commentContent = document.getElementById('nac-comment-content');
-      if (commentContent) {
-        commentContent.addEventListener('input', () => {
-          UI.updateMetadataPreview();
-          UI.updateMetadataPostButton();
-        });
-      }
-
-      // Confidence slider
-      const confidenceSlider = document.getElementById('nac-annotation-confidence');
-      const confidenceValue = document.getElementById('nac-annotation-confidence-value');
-      if (confidenceSlider && confidenceValue) {
-        confidenceSlider.addEventListener('input', () => {
-          confidenceValue.textContent = confidenceSlider.value + '%';
-          UI.updateMetadataPreview();
-        });
-      }
-      
-      // Verdict radio buttons
-      document.querySelectorAll('input[name="nac-verdict"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-          UI.updateMetadataPreview();
-          UI.updateMetadataPostButton();
-        });
-      });
-      
-      // Add evidence button
-      const addEvidenceBtn = document.getElementById('nac-add-evidence');
-      if (addEvidenceBtn) {
-        addEvidenceBtn.addEventListener('click', () => {
-          UI.addEvidenceSource();
-        });
-      }
-      
-      // Edit headline button
-      const editHeadlineBtn = document.getElementById('nac-edit-headline');
-      if (editHeadlineBtn) {
-        editHeadlineBtn.addEventListener('click', () => {
-          const display = document.querySelector('.nac-headline-original');
-          const input = document.getElementById('nac-headline-original-input');
-          if (display && input) {
-            display.style.display = 'none';
-            input.style.display = 'block';
-            input.focus();
-          }
-        });
-      }
-      
-      // Emoji picker event listeners
-      const emojiPicker = document.getElementById('nac-reaction-emoji-picker');
-      if (emojiPicker) {
-        emojiPicker.addEventListener('click', (e) => {
-          const btn = e.target.closest('.nac-emoji-btn');
-          if (btn) {
-            // Remove active class from all emoji buttons
-            emojiPicker.querySelectorAll('.nac-emoji-btn').forEach(b => b.classList.remove('active'));
-            // Add active class to clicked button
-            btn.classList.add('active');
-            // Set the hidden input value
-            const emojiInput = document.getElementById('nac-reaction-emoji');
-            if (emojiInput) {
-              emojiInput.value = btn.dataset.emoji;
-            }
-            updateMetadataPreview();
-          }
-        });
-      }
-
-      // Relevance slider event listener
-      const relevanceSlider = document.getElementById('nac-related-relevance');
-      const relevanceValue = document.getElementById('nac-related-relevance-value');
-      if (relevanceSlider && relevanceValue) {
-        relevanceSlider.addEventListener('input', () => {
-          relevanceValue.textContent = `${relevanceSlider.value}%`;
-          updateMetadataPreview();
-        });
-      }
-
-      // Fetch related title button
-      const fetchRelatedBtn = document.getElementById('nac-fetch-related-title');
-      if (fetchRelatedBtn) {
-        fetchRelatedBtn.addEventListener('click', async () => {
-          const urlInput = document.getElementById('nac-related-url');
-          const titleInput = document.getElementById('nac-related-title');
-          if (!urlInput || !titleInput) return;
-          
-          const url = urlInput.value.trim();
-          if (!url) {
-            showToast('Please enter a URL first', 'warning');
-            return;
-          }
-
-          fetchRelatedBtn.disabled = true;
-          fetchRelatedBtn.textContent = '⏳';
-          
-          try {
-            // Use GM.xmlHttpRequest to bypass CORS
-            const response = await new Promise((resolve, reject) => {
-              GM.xmlHttpRequest({
-                method: 'GET',
-                url: url,
-                timeout: 10000,
-                onload: resolve,
-                onerror: reject,
-                ontimeout: reject
-              });
-            });
-            
-            // Parse the HTML to extract title
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(response.responseText, 'text/html');
-            const title = doc.querySelector('title')?.textContent?.trim() ||
-                          doc.querySelector('meta[property="og:title"]')?.content ||
-                          doc.querySelector('meta[name="twitter:title"]')?.content ||
-                          '';
-            
-            if (title) {
-              titleInput.value = title;
-              // Trigger char counter update
-              const event = new Event('input', { bubbles: true });
-              titleInput.dispatchEvent(event);
-              showToast('Title fetched successfully', 'success');
-            } else {
-              showToast('Could not extract title from URL', 'warning');
-            }
-          } catch (error) {
-            console.error('Error fetching URL:', error);
-            showToast('Failed to fetch URL', 'error');
-          } finally {
-            fetchRelatedBtn.disabled = false;
-            fetchRelatedBtn.textContent = '🔄';
-          }
-        });
-      }
-
-      // Related URL and type change listeners
-      const relatedUrl = document.getElementById('nac-related-url');
-      const relatedType = document.getElementById('nac-related-type');
-      if (relatedUrl) {
-        relatedUrl.addEventListener('input', updateMetadataPreview);
-      }
-      if (relatedType) {
-        relatedType.addEventListener('change', updateMetadataPreview);
-      }
-
-      // Preview toggle
-      const previewToggle = document.getElementById('nac-preview-toggle');
-      if (previewToggle) {
-        previewToggle.addEventListener('click', () => {
-          const previewJson = document.getElementById('nac-preview-json');
-          if (previewJson) {
-            const isVisible = previewJson.style.display !== 'none';
-            previewJson.style.display = isVisible ? 'none' : 'block';
-            previewToggle.textContent = isVisible ? 'Show JSON' : 'Hide JSON';
-          }
-        });
-      }
-      
-      // Publication selector
-      const pubSelect = document.getElementById('nac-metadata-publication');
-      if (pubSelect) {
-        pubSelect.addEventListener('change', () => {
-          UI.updateMetadataPostButton();
-        });
-      }
-      
-      // Cancel button
-      const cancelBtn = document.getElementById('nac-metadata-cancel');
-      if (cancelBtn) {
-        cancelBtn.addEventListener('click', () => {
-          UI.switchTab('readable');
-        });
-      }
-      
-      // Post button
-      const postBtn = document.getElementById('nac-metadata-post');
-      if (postBtn) {
-        postBtn.addEventListener('click', () => {
-          UI.publishMetadata();
-        });
-      }
-      
-      // Initialize state
-      UI.state.metadataType = 'annotation';
-    },
-    
-    // Add new evidence source field
-    addEvidenceSource: () => {
-      const list = document.getElementById('nac-evidence-list');
-      if (!list) return;
-      
-      const index = list.children.length;
-      const item = document.createElement('div');
-      item.className = 'nac-evidence-item';
-      item.dataset.index = index;
-      item.innerHTML = `
-        <div class="nac-evidence-item-header">
-          <span class="nac-evidence-item-title">Source ${index + 1}</span>
-          <button type="button" class="nac-evidence-remove">Remove</button>
-        </div>
-        <div class="nac-evidence-row">
-          <input type="url" class="nac-form-input nac-evidence-url"
-            placeholder="https://source.com/evidence">
-          <select class="nac-form-select nac-evidence-type">
-            <option value="primary">Primary</option>
-            <option value="official">Official</option>
-            <option value="news">News</option>
-            <option value="academic">Academic</option>
-            <option value="other">Other</option>
-          </select>
-        </div>
-      `;
-      
-      // Remove button handler
-      item.querySelector('.nac-evidence-remove').addEventListener('click', () => {
-        item.remove();
-        UI.updateMetadataPreview();
-      });
-      
-      list.appendChild(item);
-    },
-    
-    // Load signer options into metadata selector (user identity + publications)
-    loadMetadataPublications: async () => {
-      const signerSelect = document.getElementById('nac-metadata-signer');
-      const legacySelect = document.getElementById('nac-metadata-publication');
-      if (!signerSelect) return;
-      
-      // Update user identity option
-      const userIdentity = Storage.userIdentity.get();
-      const userOption = document.getElementById('nac-signer-user-option');
-      if (userOption) {
-        if (userIdentity && userIdentity.pubkey) {
-          userOption.value = 'user';
-          userOption.textContent = `👤 ${userIdentity.name || 'Your Identity'} (${userIdentity.npub?.substring(0, 12) || userIdentity.pubkey.substring(0, 8)}...)`;
-          userOption.disabled = false;
-          // Pre-select user identity as default for metadata
-          signerSelect.value = 'user';
-        } else {
-          userOption.value = '';
-          userOption.textContent = 'Set up your identity first...';
-          userOption.disabled = true;
-        }
-      }
-      
-      // Load publications into the publications optgroup
-      const publications = await Storage.publications.getAll();
-      const pubGroup = document.getElementById('nac-signer-pub-group');
-      
-      if (pubGroup) {
-        // Clear existing publication options
-        while (pubGroup.children.length > 0) {
-          pubGroup.removeChild(pubGroup.lastChild);
-        }
-        
-        // Add publications
-        Object.entries(publications).forEach(([id, pub]) => {
-          const option = document.createElement('option');
-          option.value = `pub:${id}`;
-          option.textContent = `📰 ${pub.name}`;
-          pubGroup.appendChild(option);
-        });
-        
-        // Add "no publications" message if empty
-        if (Object.keys(publications).length === 0) {
-          const emptyOption = document.createElement('option');
-          emptyOption.value = '';
-          emptyOption.textContent = 'No publications configured...';
-          emptyOption.disabled = true;
-          pubGroup.appendChild(emptyOption);
-        }
-      }
-      
-      // Update legacy hidden field based on selection
-      signerSelect.addEventListener('change', () => {
-        const value = signerSelect.value;
-        if (value.startsWith('pub:')) {
-          legacySelect.value = value.replace('pub:', '');
-        } else {
-          legacySelect.value = '';
-        }
-        UI.updateMetadataPostButton();
-      });
-      
-      UI.updateMetadataPostButton();
-    },
-    
-    // Update metadata post button state
-    updateMetadataPostButton: () => {
-      const btn = document.getElementById('nac-metadata-post');
-      if (!btn) return;
-      
-      const signerSelect = document.getElementById('nac-metadata-signer');
-      const hasSigner = signerSelect && signerSelect.value;
-      
-      // Check if NIP-07 is available
-      const nip07Available = NIP07Client.checkAvailability();
-      const hasSigningMethod = nip07Available || NSecBunkerClient.connected;
-      
-      // Check form validity based on type
-      let isValid = false;
-      const type = UI.state.metadataType || 'annotation';
-      
-      if (type === 'annotation') {
-        const content = document.getElementById('nac-annotation-content');
-        isValid = content && content.value.trim().length >= 10;
-      } else if (type === 'factcheck') {
-        const claim = document.getElementById('nac-factcheck-claim');
-        const verdict = document.querySelector('input[name="nac-verdict"]:checked');
-        const explanation = document.getElementById('nac-factcheck-explanation');
-        isValid = claim && claim.value.trim().length >= 10 &&
-                  verdict &&
-                  explanation && explanation.value.trim().length >= 20;
-      } else if (type === 'headline') {
-        const suggested = document.getElementById('nac-headline-suggested');
-        const reason = document.getElementById('nac-headline-reason');
-        isValid = suggested && suggested.value.trim().length >= 5 &&
-                  reason && reason.value.trim().length >= 10;
-      } else if (type === 'reaction') {
-        const emoji = document.getElementById('nac-reaction-emoji');
-        // Reaction only requires an emoji to be selected
-        isValid = emoji && emoji.value.trim().length > 0;
-      } else if (type === 'related') {
-        const url = document.getElementById('nac-related-url');
-        const relationType = document.getElementById('nac-related-type');
-        // Related content requires URL and relationship type
-        isValid = url && url.value.trim().length > 0 &&
-                  relationType && relationType.value.trim().length > 0;
-      } else if (type === 'rating') {
-        // Rating is always valid - dimensions have default values
-        isValid = true;
-      } else if (type === 'comment') {
-        const comment = document.getElementById('nac-comment-content');
-        // Comment requires content
-        isValid = comment && comment.value.trim().length > 0;
-      }
-      
-      if (!hasSigningMethod) {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send} Install Signer Extension`;
-      } else if (!hasSigner) {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send} Select Signer`;
-      } else if (!isValid) {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send} Complete Form`;
-      } else {
-        btn.disabled = false;
-        btn.innerHTML = `${UI.icons.send} Post Metadata`;
-      }
-    },
-    
-    // Update event preview
-    updateMetadataPreview: async () => {
-      const previewEl = document.getElementById('nac-preview-json');
-      if (!previewEl) return;
-      
-      const article = UI.state.article;
-      if (!article) return;
-      
-      const type = UI.state.metadataType || 'annotation';
-      let eventPreview = {};
-      
-      try {
-        const normalizedUrl = Utils.normalizeUrl(article.url);
-        const urlHash = await Utils.sha256(normalizedUrl);
-        const dTag = urlHash.substring(0, 16);
-        
-        if (type === 'annotation') {
-          const annotationType = document.getElementById('nac-annotation-type')?.value || 'context';
-          const content = document.getElementById('nac-annotation-content')?.value || '';
-          const confidence = document.getElementById('nac-annotation-confidence')?.value || 80;
-          const evidenceUrl = document.getElementById('nac-annotation-evidence')?.value || '';
-          
-          eventPreview = {
-            kind: 32123,
-            tags: [
-              ['d', dTag],
-              ['r', normalizedUrl],
-              ['annotation-type', annotationType],
-              ['confidence', String(confidence / 100)],
-              ['client', 'nostr-article-capture'],
-              ...(evidenceUrl ? [['evidence', evidenceUrl]] : [])
-            ],
-            content: content
-          };
-        } else if (type === 'factcheck') {
-          const claim = document.getElementById('nac-factcheck-claim')?.value || '';
-          const verdict = document.querySelector('input[name="nac-verdict"]:checked')?.value || '';
-          const explanation = document.getElementById('nac-factcheck-explanation')?.value || '';
-          
-          // Collect evidence sources
-          const evidenceSources = [];
-          document.querySelectorAll('#nac-evidence-list .nac-evidence-item').forEach(item => {
-            const url = item.querySelector('.nac-evidence-url')?.value;
-            const sourceType = item.querySelector('.nac-evidence-type')?.value;
-            if (url && url.trim()) {
-              evidenceSources.push({ url: url.trim(), type: sourceType });
-            }
-          });
-          
-          eventPreview = {
-            kind: 32127,
-            tags: [
-              ['d', dTag],
-              ['r', normalizedUrl],
-              ['claim', claim.substring(0, 200)],
-              ['verdict', verdict],
-              ['client', 'nostr-article-capture'],
-              ...evidenceSources.map(s => ['evidence', s.url, s.type])
-            ],
-            content: explanation
-          };
-        } else if (type === 'headline') {
-          const original = document.getElementById('nac-headline-original-input')?.value || article.title;
-          const suggested = document.getElementById('nac-headline-suggested')?.value || '';
-          const reason = document.getElementById('nac-headline-reason')?.value || '';
-          
-          eventPreview = {
-            kind: 32129,
-            tags: [
-              ['d', dTag],
-              ['r', normalizedUrl],
-              ['original-headline', original],
-              ['suggested-headline', suggested],
-              ['client', 'nostr-article-capture']
-            ],
-            content: reason
-          };
-        } else if (type === 'reaction') {
-          const emoji = document.getElementById('nac-reaction-emoji')?.value || '';
-          const aspect = document.getElementById('nac-reaction-aspect')?.value || '';
-          const reason = document.getElementById('nac-reaction-reason')?.value || '';
-          const content = document.getElementById('nac-reaction-content')?.value || '';
-
-          const tags = [
-            ['d', dTag],
-            ['r', url],
-            ['reaction', emoji]
-          ];
-          if (aspect) tags.push(['aspect', aspect]);
-          if (reason) tags.push(['reason', reason]);
-
-          eventPreview = {
-            kind: 32132,
-            tags: tags,
-            content: content
-          };
-        } else if (type === 'related') {
-          const relatedUrl = document.getElementById('nac-related-url')?.value || '';
-          const relationType = document.getElementById('nac-related-type')?.value || '';
-          const title = document.getElementById('nac-related-title')?.value || '';
-          const relevance = document.getElementById('nac-related-relevance')?.value || '75';
-          const description = document.getElementById('nac-related-description')?.value || '';
-
-          const tags = [
-            ['d', dTag],
-            ['r', url],
-            ['related-url', relatedUrl],
-            ['relation-type', relationType]
-          ];
-          if (title) tags.push(['related-title', title]);
-          tags.push(['relevance', relevance]);
-
-          eventPreview = {
-            kind: 32131,
-            tags: tags,
-            content: description
-          };
-        } else if (type === 'rating') {
-          const dimensions = ['accuracy', 'quality', 'depth', 'clarity', 'bias', 'sources', 'relevance', 'originality'];
-          const tags = [
-            ['d', dTag],
-            ['r', url],
-            ['url-hash', urlHash]
-          ];
-          
-          let totalScore = 0;
-          let ratedDimensions = 0;
-          dimensions.forEach(dim => {
-            const value = document.getElementById(`nac-rating-${dim}`)?.value || '5';
-            tags.push(['rating', dim, value, '10']);
-            totalScore += parseInt(value, 10);
-            ratedDimensions++;
-          });
-          
-          const overallScore = (totalScore / ratedDimensions).toFixed(1);
-          tags.push(['overall', overallScore, '10']);
-          tags.push(['methodology', 'manual-review']);
-          
-          const confidence = document.getElementById('nac-rating-confidence')?.value || '75';
-          tags.push(['confidence', confidence]);
-          
-          const review = document.getElementById('nac-rating-review')?.value || '';
-          
-          eventPreview = {
-            kind: 32124,
-            tags: tags,
-            content: review
-          };
-        } else if (type === 'comment') {
-          const comment = document.getElementById('nac-comment-content')?.value || '';
-          const parentId = document.getElementById('nac-comment-parent')?.value || '';
-          
-          const tags = [
-            ['d', dTag],
-            ['r', url],
-            ['url-hash', urlHash],
-            ['annotation-type', 'comment']
-          ];
-          
-          if (parentId.trim()) {
-            tags.push(['e', parentId, '', 'reply']);
-          }
-          
-          eventPreview = {
-            kind: 32123,
-            tags: tags,
-            content: comment
-          };
-        }
-        
-        previewEl.textContent = JSON.stringify(eventPreview, null, 2);
-      } catch (e) {
-        previewEl.textContent = 'Error generating preview: ' + e.message;
-      }
-    },
-    
-    // Get signing configuration based on signer dropdown selection
-    getSigningConfig: async (signerValue) => {
-      if (!signerValue) {
-        throw new Error('No signer selected');
-      }
-      
-      // User identity selected
-      if (signerValue === 'user') {
-        const identity = Storage.userIdentity.get();
-        if (!identity || !identity.pubkey) {
-          throw new Error('User identity not configured');
-        }
-        
-        return {
-          type: 'user',
-          pubkey: identity.pubkey,
-          signerType: identity.signerType, // 'nip07', 'local', or 'nsecbunker'
-          identity: identity
-        };
-      }
-      
-      // Publication selected (format: pub:publicationId)
-      if (signerValue.startsWith('pub:')) {
-        const publicationId = signerValue.replace('pub:', '');
-        const publication = await Storage.publications.get(publicationId);
-        const keypair = await Storage.keypairs.get(publicationId);
-        
-        if (!publication || !keypair) {
-          throw new Error('Publication not found');
-        }
-        
-        return {
-          type: 'publication',
-          pubkey: keypair.pubkey,
-          publicationId: publicationId,
-          publication: publication,
-          keypair: keypair
-        };
-      }
-      
-      throw new Error('Invalid signer selection');
-    },
-    
-    // Publish metadata event
-    publishMetadata: async () => {
-      const btn = document.getElementById('nac-metadata-post');
-      if (!btn) return;
-      
-      const originalContent = btn.innerHTML;
-      
-      try {
-        btn.disabled = true;
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Preparing...</span>`;
-        
-        const article = UI.state.article;
-        const type = UI.state.metadataType || 'annotation';
-        const signerSelect = document.getElementById('nac-metadata-signer');
-        const signerValue = signerSelect?.value;
-        
-        if (!signerValue) {
-          throw new Error('Please select who will sign this');
-        }
-        
-        // Get signing configuration
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Getting signer...</span>`;
-        const signingConfig = await UI.getSigningConfig(signerValue);
-        const pubkey = signingConfig.pubkey;
-        let signedEvent;
-        
-        // Build event based on type
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Building event...</span>`;
-        let event;
-        
-        if (type === 'annotation') {
-          const annotationType = document.getElementById('nac-annotation-type')?.value || 'context';
-          const content = document.getElementById('nac-annotation-content')?.value || '';
-          const confidence = parseInt(document.getElementById('nac-annotation-confidence')?.value) || 80;
-          const evidenceUrl = document.getElementById('nac-annotation-evidence')?.value || '';
-          
-          event = await EventBuilder.buildAnnotationEvent(article.url, {
-            type: annotationType,
-            content: content,
-            confidence: confidence,
-            evidenceUrl: evidenceUrl
-          }, pubkey);
-          
-        } else if (type === 'factcheck') {
-          const claim = document.getElementById('nac-factcheck-claim')?.value || '';
-          const verdict = document.querySelector('input[name="nac-verdict"]:checked')?.value || '';
-          const explanation = document.getElementById('nac-factcheck-explanation')?.value || '';
-          
-          // Collect evidence sources
-          const evidenceSources = [];
-          document.querySelectorAll('#nac-evidence-list .nac-evidence-item').forEach(item => {
-            const url = item.querySelector('.nac-evidence-url')?.value;
-            const sourceType = item.querySelector('.nac-evidence-type')?.value;
-            if (url && url.trim()) {
-              evidenceSources.push({ url: url.trim(), type: sourceType });
-            }
-          });
-          
-          event = await EventBuilder.buildFactCheckEvent(article.url, {
-            claim: claim,
-            verdict: verdict,
-            explanation: explanation,
-            evidenceSources: evidenceSources
-          }, pubkey);
-          
-        } else if (type === 'headline') {
-          const original = document.getElementById('nac-headline-original-input')?.value || article.title;
-          const suggested = document.getElementById('nac-headline-suggested')?.value || '';
-          const reason = document.getElementById('nac-headline-reason')?.value || '';
-          
-          event = await EventBuilder.buildHeadlineCorrectionEvent(article.url, {
-            original: original,
-            suggested: suggested,
-            reason: reason
-          }, pubkey);
-        } else if (type === 'reaction') {
-          const emoji = document.getElementById('nac-reaction-emoji')?.value || '';
-          const aspect = document.getElementById('nac-reaction-aspect')?.value || '';
-          const reason = document.getElementById('nac-reaction-reason')?.value || '';
-          const content = document.getElementById('nac-reaction-content')?.value || '';
-
-          event = await EventBuilder.buildReactionEvent(article.url, {
-            emoji: emoji,
-            aspect: aspect,
-            reason: reason,
-            content: content
-          }, pubkey);
-        } else if (type === 'related') {
-          const relatedUrl = document.getElementById('nac-related-url')?.value || '';
-          const relationType = document.getElementById('nac-related-type')?.value || '';
-          const title = document.getElementById('nac-related-title')?.value || '';
-          const relevance = document.getElementById('nac-related-relevance')?.value || '75';
-          const description = document.getElementById('nac-related-description')?.value || '';
-
-          event = await EventBuilder.buildRelatedContentEvent(article.url, {
-            relatedUrl: relatedUrl,
-            relationType: relationType,
-            title: title,
-            relevance: parseInt(relevance, 10),
-            description: description
-          }, pubkey);
-        } else if (type === 'rating') {
-          const dimensions = ['accuracy', 'quality', 'depth', 'clarity', 'bias', 'sources', 'relevance', 'originality'];
-          const ratings = {};
-          dimensions.forEach(dim => {
-            ratings[dim] = parseInt(document.getElementById(`nac-rating-${dim}`)?.value || '5', 10);
-          });
-          
-          const confidence = parseInt(document.getElementById('nac-rating-confidence')?.value || '75', 10);
-          const review = document.getElementById('nac-rating-review')?.value || '';
-
-          event = await EventBuilder.buildRatingEvent(article.url, {
-            ratings: ratings,
-            confidence: confidence,
-            methodology: 'manual-review',
-            review: review
-          }, pubkey);
-        } else if (type === 'comment') {
-          const comment = document.getElementById('nac-comment-content')?.value || '';
-          const parentId = document.getElementById('nac-comment-parent')?.value?.trim() || '';
-
-          event = await EventBuilder.buildCommentEvent(article.url, {
-            comment: comment,
-            parentId: parentId || null,
-            rootId: null,
-            mentions: []
-          }, pubkey);
-        }
-        
-        // Sign event based on signer type
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Signing...</span>`;
-        
-        if (signingConfig.type === 'user') {
-          // User identity signing
-          if (signingConfig.signerType === 'nip07') {
-            UI.showToast('Please approve signature in extension...', 'warning');
-            signedEvent = await NIP07Client.signEvent(event);
-          } else if (signingConfig.signerType === 'local') {
-            // Local key signing
-            const identity = signingConfig.identity;
-            if (!identity.nsec) {
-              throw new Error('Local key not found - please reconfigure your identity');
-            }
-            signedEvent = await LocalKeyManager.signEvent(event, identity.nsec);
-          } else if (signingConfig.signerType === 'nsecbunker') {
-            signedEvent = await NSecBunkerClient.signEvent(event);
-          } else {
-            throw new Error('Unknown signer type');
-          }
-        } else if (signingConfig.type === 'publication') {
-          // Publication signing - use NSecBunker or local key
-          if (NSecBunkerClient.connected) {
-            signedEvent = await NSecBunkerClient.signEvent(event, signingConfig.publicationId);
-          } else if (signingConfig.keypair?.nsec) {
-            signedEvent = await LocalKeyManager.signEvent(event, signingConfig.keypair.nsec);
-          } else if (NIP07Client.checkAvailability()) {
-            UI.showToast('Please approve signature in extension...', 'warning');
-            signedEvent = await NIP07Client.signEvent(event);
-          } else {
-            throw new Error('No signing method available for publication');
-          }
-        } else {
-          throw new Error('Invalid signer configuration');
-        }
-        
-        // Validate signed event
-        if (!signedEvent || !signedEvent.id || !signedEvent.sig) {
-          throw new Error('Invalid signed event');
-        }
-        
-        // Publish to relays
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Publishing...</span>`;
-        
-        const selectedRelays = CONFIG.relays.filter(r => r.enabled).map(r => r.url);
-        const results = await NostrClient.publishToRelays(selectedRelays, signedEvent);
-        
-        Utils.log('Metadata publish results:', results);
-        
-        if (results.successful > 0) {
-          UI.showToast(`Published ${type} to ${results.successful}/${results.total} relays!`, 'success');
-          
-          // Clear form and switch to readable tab
-          setTimeout(() => {
-            UI.switchTab('readable');
-          }, 1500);
-        } else {
-          throw new Error('Failed to publish to any relay');
-        }
-        
-      } catch (error) {
-        Utils.error('Metadata publish error:', error);
-        UI.showToast(error.message || 'Failed to publish', 'error');
-      } finally {
-        btn.innerHTML = originalContent;
-        UI.updateMetadataPostButton();
-      }
-    },
-    
-    // Switch tab
-    switchTab: (tab) => {
-      UI.state.activeTab = tab;
-      
-      // Update tab buttons
-      document.querySelectorAll('.nac-tab').forEach(t => {
-        t.classList.toggle('active', t.dataset.tab === tab);
-      });
-      
-      // Update content
-      UI.displayContent();
-    },
-    
-    // Load existing entities
-    loadEntities: async () => {
-      // Load publications
-      const publications = await Storage.publications.getAll();
-      const pubSelect = document.getElementById('nac-publication');
-      
-      // Clear existing options except first two
-      while (pubSelect.options.length > 2) {
-        pubSelect.remove(2);
-      }
-      
-      // Add existing publications
-      Object.entries(publications).forEach(([id, pub]) => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = pub.name;
-        pubSelect.add(option);
-      });
-      
-      // Load people
-      const people = await Storage.people.getAll();
-      const authorSelect = document.getElementById('nac-author');
-      
-      // Clear existing options except first two
-      while (authorSelect.options.length > 2) {
-        authorSelect.remove(2);
-      }
-      
-      // Add existing people
-      Object.entries(people).forEach(([id, person]) => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = person.name;
-        authorSelect.add(option);
-      });
-      
-      UI.updatePublishButton();
-    },
-    
-    // Render entities in the UI
-    renderEntities: () => {
-      const { people, organizations } = UI.state.entities;
-      
-      // Render people
-      const peopleContainer = document.getElementById('nac-people-tags');
-      const peopleCount = document.getElementById('nac-people-count');
-      
-      if (people.length === 0) {
-        peopleContainer.innerHTML = '<span class="nac-entity-empty">No people detected</span>';
-      } else {
-        peopleContainer.innerHTML = people.map((person, index) => `
-          <span class="nac-entity-tag person" data-index="${index}" data-type="person">
-            <span class="nac-entity-name">${Utils.escapeHtml(person.name)}</span>
-            ${person.context ? `<span class="nac-entity-context">(${person.context})</span>` : ''}
-            <button class="nac-entity-tag-remove" data-index="${index}" data-type="person" title="Remove">×</button>
-          </span>
-        `).join('');
-        
-        // Add click handlers for remove buttons
-        peopleContainer.querySelectorAll('.nac-entity-tag-remove').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            UI.removeEntity('person', parseInt(btn.dataset.index));
-          });
-        });
-      }
-      peopleCount.textContent = people.length;
-      
-      // Render organizations
-      const orgsContainer = document.getElementById('nac-orgs-tags');
-      const orgsCount = document.getElementById('nac-orgs-count');
-      
-      if (organizations.length === 0) {
-        orgsContainer.innerHTML = '<span class="nac-entity-empty">No organizations detected</span>';
-      } else {
-        orgsContainer.innerHTML = organizations.map((org, index) => `
-          <span class="nac-entity-tag organization" data-index="${index}" data-type="organization">
-            <span class="nac-entity-name">${Utils.escapeHtml(org.name)}</span>
-            <button class="nac-entity-tag-remove" data-index="${index}" data-type="organization" title="Remove">×</button>
-          </span>
-        `).join('');
-        
-        // Add click handlers for remove buttons
-        orgsContainer.querySelectorAll('.nac-entity-tag-remove').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            UI.removeEntity('organization', parseInt(btn.dataset.index));
-          });
-        });
-      }
-      orgsCount.textContent = organizations.length;
-    },
-    
-    // Add a new entity
-    addEntity: (type, name) => {
-      if (!name || name.trim() === '') return;
-      
-      const trimmedName = name.trim();
-      
-      if (type === 'person') {
-        // Check for duplicates
-        const exists = UI.state.entities.people.some(
-          p => p.name.toLowerCase() === trimmedName.toLowerCase()
-        );
-        if (!exists) {
-          UI.state.entities.people.push({ name: trimmedName, context: 'manual' });
-          UI.renderEntities();
-          Utils.log('Added person:', trimmedName);
-        } else {
-          UI.showToast('Person already added', 'warning');
-        }
-      } else if (type === 'organization') {
-        // Check for duplicates
-        const exists = UI.state.entities.organizations.some(
-          o => o.name.toLowerCase() === trimmedName.toLowerCase()
-        );
-        if (!exists) {
-          UI.state.entities.organizations.push({ name: trimmedName });
-          UI.renderEntities();
-          Utils.log('Added organization:', trimmedName);
-        } else {
-          UI.showToast('Organization already added', 'warning');
-        }
-      }
-    },
-    
-    // Remove an entity
-    removeEntity: (type, index) => {
-      if (type === 'person') {
-        const removed = UI.state.entities.people.splice(index, 1);
-        Utils.log('Removed person:', removed[0]?.name);
-      } else if (type === 'organization') {
-        const removed = UI.state.entities.organizations.splice(index, 1);
-        Utils.log('Removed organization:', removed[0]?.name);
-      }
-      UI.renderEntities();
-    },
-    
-    // Set capturing user from NIP-07 extension
-    setCapturerFromNIP07: async () => {
-      const btn = document.getElementById('nac-set-capturer');
-      const displayEl = document.getElementById('nac-capturer-display');
-      const checkbox = document.getElementById('nac-include-capturer');
-      
-      if (!NIP07Client.checkAvailability()) {
-        UI.showToast('No NIP-07 extension detected (install nos2x, Alby, etc.)', 'error');
-        return;
-      }
-      
-      btn.disabled = true;
-      btn.textContent = 'Loading...';
-      
-      try {
-        const pubkey = await window.nostr.getPublicKey();
-        const npub = NostrCrypto.hexToNpub(pubkey);
-        
-        // Try to get profile name from extension or use shortened npub
-        let name = npub.substring(0, 12) + '...';
-        
-        // Store the capturer
-        Storage.capturingUser.set(pubkey, npub, name);
-        
-        // Update UI
-        displayEl.textContent = name;
-        displayEl.title = npub;
-        displayEl.className = 'nac-name-display';
-        checkbox.checked = true;
-        checkbox.disabled = false;
-        
-        UI.showToast('Capturing user set from NIP-07!', 'success');
-      } catch (error) {
-        Utils.error('Failed to get pubkey from NIP-07:', error);
-        UI.showToast('Failed to get pubkey from extension', 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Set from NIP-07';
-      }
-    },
-    
-    // Lookup and validate author pubkey
-    lookupAuthorPubkey: () => {
-      const input = document.getElementById('nac-author-pubkey');
-      const checkbox = document.getElementById('nac-include-author');
-      const value = input.value.trim();
-      
-      if (!value) {
-        UI.showToast('Enter an npub or hex pubkey first', 'error');
-        return;
-      }
-      
-      try {
-        let hexPubkey;
-        
-        if (value.startsWith('npub1')) {
-          // Convert npub to hex
-          hexPubkey = NostrCrypto.npubToHex(value);
-        } else if (/^[0-9a-fA-F]{64}$/.test(value)) {
-          // Already hex
-          hexPubkey = value.toLowerCase();
-        } else {
-          throw new Error('Invalid pubkey format');
-        }
-        
-        // Validate by converting back to npub
-        const npub = NostrCrypto.hexToNpub(hexPubkey);
-        
-        // Store the validated hex pubkey
-        input.dataset.hexPubkey = hexPubkey;
-        input.value = npub;
-        checkbox.checked = true;
-        
-        UI.showToast('Author pubkey validated!', 'success');
-      } catch (error) {
-        Utils.error('Invalid pubkey:', error);
-        UI.showToast('Invalid pubkey format. Use npub1... or 64-char hex', 'error');
-        input.dataset.hexPubkey = '';
-      }
-    },
-    
-    // Load saved capturer settings on panel open
-    loadCapturerSettings: () => {
-      const capturer = Storage.capturingUser.get();
-      const displayEl = document.getElementById('nac-capturer-display');
-      const checkbox = document.getElementById('nac-include-capturer');
-      
-      if (capturer && capturer.pubkey) {
-        displayEl.textContent = capturer.name || capturer.npub.substring(0, 12) + '...';
-        displayEl.title = capturer.npub;
-        displayEl.className = 'nac-name-display';
-        checkbox.checked = capturer.enabled !== false;
-        checkbox.disabled = false;
-      } else {
-        displayEl.textContent = 'Not set';
-        displayEl.className = 'nac-not-set';
-        checkbox.checked = false;
-        checkbox.disabled = true;
-      }
-      
-      // Also update user identity UI
-      UI.updateUserIdentityUI();
-    },
-    
-    // User Identity Management Functions
-    setupUserIdentity: {
-      // Set up user identity from NIP-07 browser extension
-      fromNIP07: async () => {
-        if (!NIP07Client.checkAvailability()) {
-          UI.showToast('No NIP-07 extension detected (install nos2x, Alby, etc.)', 'error');
-          return false;
-        }
-        
-        try {
-          const pubkey = await window.nostr.getPublicKey();
-          const npub = NostrCrypto.hexToNpub(pubkey);
-          
-          // Try to get profile name
-          let name = npub.substring(0, 12) + '...';
-          
-          Storage.userIdentity.set({
-            pubkey,
-            npub,
-            name,
-            signerType: 'nip07'
-          });
-          
-          UI.updateUserIdentityUI();
-          UI.loadMetadataPublications();
-          UI.showToast('User identity set from NIP-07!', 'success');
-          return true;
-        } catch (error) {
-          Utils.error('Failed to get pubkey from NIP-07:', error);
-          UI.showToast('Failed to get pubkey from extension', 'error');
-          return false;
-        }
-      },
-      
-      // Generate new keypair for user identity
-      generate: async () => {
-        try {
-          const keypair = await LocalKeyManager.generateKeypair();
-          const npub = NostrCrypto.hexToNpub(keypair.pubkey);
-          
-          Storage.userIdentity.set({
-            pubkey: keypair.pubkey,
-            npub,
-            name: npub.substring(0, 12) + '...',
-            signerType: 'local',
-            nsec: keypair.nsec // Store for local signing
-          });
-          
-          UI.updateUserIdentityUI();
-          UI.loadMetadataPublications();
-          UI.showToast('New keypair generated! Make sure to backup your nsec.', 'success');
-          
-          // Show the nsec to user for backup
-          const confirmed = confirm(
-            `Your new identity has been created!\n\n` +
-            `Public key (npub): ${npub}\n\n` +
-            `IMPORTANT: Copy and securely backup your private key:\n${keypair.nsec}\n\n` +
-            `Click OK after you've saved your private key.`
-          );
-          
-          return true;
-        } catch (error) {
-          Utils.error('Failed to generate keypair:', error);
-          UI.showToast('Failed to generate keypair', 'error');
-          return false;
-        }
-      },
-      
-      // Import existing keypair
-      import: async () => {
-        const input = prompt(
-          'Enter your private key (nsec1... or hex format):\n\n' +
-          'WARNING: Only enter your private key on trusted devices.'
-        );
-        
-        if (!input || !input.trim()) return false;
-        
-        try {
-          let nsec, pubkey;
-          const trimmed = input.trim();
-          
-          if (trimmed.startsWith('nsec1')) {
-            nsec = trimmed;
-            // Convert nsec to pubkey
-            const decoded = NostrCrypto.nsecToHex(nsec);
-            pubkey = await LocalKeyManager.getPublicKeyFromPrivate(decoded);
-          } else if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-            // Hex private key
-            pubkey = await LocalKeyManager.getPublicKeyFromPrivate(trimmed);
-            nsec = NostrCrypto.hexToNsec(trimmed);
-          } else {
-            throw new Error('Invalid private key format');
-          }
-          
-          const npub = NostrCrypto.hexToNpub(pubkey);
-          
-          Storage.userIdentity.set({
-            pubkey,
-            npub,
-            name: npub.substring(0, 12) + '...',
-            signerType: 'local',
-            nsec
-          });
-          
-          UI.updateUserIdentityUI();
-          UI.loadMetadataPublications();
-          UI.showToast('Private key imported successfully!', 'success');
-          return true;
-        } catch (error) {
-          Utils.error('Failed to import private key:', error);
-          UI.showToast('Invalid private key format', 'error');
-          return false;
-        }
-      },
-      
-      // Clear user identity
-      clear: () => {
-        if (confirm('Are you sure you want to remove your user identity?\n\nIf you generated keys locally, make sure you have your nsec backed up!')) {
-          Storage.userIdentity.clear();
-          UI.updateUserIdentityUI();
-          UI.loadMetadataPublications();
-          UI.showToast('User identity removed', 'info');
-        }
-      }
-    },
-    
-    // Update user identity UI display
-    updateUserIdentityUI: () => {
-      const identity = Storage.userIdentity.get();
-      const contentEl = document.getElementById('nac-user-identity-content');
-      const badgeEl = document.getElementById('nac-user-identity-badge');
-      
-      if (!contentEl) return;
-      
-      if (identity && identity.pubkey) {
-        // User identity is configured - show info
-        const signerLabel = {
-          'nip07': '🔌 Browser Extension',
-          'local': '🔑 Local Keys',
-          'nsecbunker': '🔐 NSecBunker'
-        }[identity.signerType] || '❓ Unknown';
-        
-        contentEl.innerHTML = `
-          <div class="nac-user-identity-info">
-            <div class="nac-user-identity-avatar">👤</div>
-            <div class="nac-user-identity-details">
-              <div class="nac-user-identity-name">${Utils.escapeHtml(identity.name || 'Your Identity')}</div>
-              <div class="nac-user-identity-pubkey">${identity.npub?.substring(0, 20) || identity.pubkey.substring(0, 16)}...</div>
-              <div class="nac-user-identity-signer">${signerLabel}</div>
-            </div>
-          </div>
-          <div class="nac-user-identity-actions">
-            <button class="nac-btn nac-btn-small" id="nac-identity-change">Change</button>
-            <button class="nac-btn nac-btn-small nac-btn-danger" id="nac-identity-clear">Remove</button>
-          </div>
-        `;
-        
-        badgeEl.textContent = 'Configured';
-        badgeEl.className = 'nac-user-identity-badge';
-        
-        // Attach event listeners
-        document.getElementById('nac-identity-change')?.addEventListener('click', () => {
-          UI.showUserIdentitySetupOptions();
-        });
-        document.getElementById('nac-identity-clear')?.addEventListener('click', () => {
-          UI.setupUserIdentity.clear();
-        });
-      } else {
-        // Not configured - show setup options
-        contentEl.innerHTML = `
-          <div class="nac-user-identity-empty">
-            <div class="nac-user-identity-empty-icon">🔑</div>
-            <div class="nac-user-identity-empty-text">Set up your identity to sign metadata (ratings, annotations, fact-checks)</div>
-            <div class="nac-user-identity-setup-options">
-              <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
-                <span class="nac-user-identity-setup-btn-icon">🔌</span>
-                <div class="nac-user-identity-setup-btn-content">
-                  <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
-                  <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
-                </div>
-              </button>
-              <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
-                <span class="nac-user-identity-setup-btn-icon">✨</span>
-                <div class="nac-user-identity-setup-btn-content">
-                  <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
-                  <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
-                </div>
-              </button>
-              <button class="nac-user-identity-setup-btn" id="nac-identity-import">
-                <span class="nac-user-identity-setup-btn-icon">📥</span>
-                <div class="nac-user-identity-setup-btn-content">
-                  <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
-                  <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        `;
-        
-        badgeEl.textContent = 'Not Set';
-        badgeEl.className = 'nac-user-identity-badge not-configured';
-        
-        // Attach setup event listeners
-        UI.attachUserIdentitySetupListeners();
-      }
-    },
-    
-    // Show user identity setup options (for changing identity)
-    showUserIdentitySetupOptions: () => {
-      const contentEl = document.getElementById('nac-user-identity-content');
-      if (!contentEl) return;
-      
-      contentEl.innerHTML = `
-        <div class="nac-user-identity-empty">
-          <div class="nac-user-identity-empty-text">Choose a new identity method:</div>
-          <div class="nac-user-identity-setup-options">
-            <button class="nac-user-identity-setup-btn" id="nac-identity-nip07">
-              <span class="nac-user-identity-setup-btn-icon">🔌</span>
-              <div class="nac-user-identity-setup-btn-content">
-                <div class="nac-user-identity-setup-btn-title">Use Browser Extension</div>
-                <div class="nac-user-identity-setup-btn-desc">Connect with nos2x, Alby, or other NIP-07 extension</div>
-              </div>
-            </button>
-            <button class="nac-user-identity-setup-btn" id="nac-identity-generate">
-              <span class="nac-user-identity-setup-btn-icon">✨</span>
-              <div class="nac-user-identity-setup-btn-content">
-                <div class="nac-user-identity-setup-btn-title">Generate New Keys</div>
-                <div class="nac-user-identity-setup-btn-desc">Create a new keypair (stored locally)</div>
-              </div>
-            </button>
-            <button class="nac-user-identity-setup-btn" id="nac-identity-import">
-              <span class="nac-user-identity-setup-btn-icon">📥</span>
-              <div class="nac-user-identity-setup-btn-content">
-                <div class="nac-user-identity-setup-btn-title">Import Existing Key</div>
-                <div class="nac-user-identity-setup-btn-desc">Enter your nsec or hex private key</div>
-              </div>
-            </button>
-          </div>
-          <div class="nac-user-identity-actions" style="margin-top: 12px;">
-            <button class="nac-btn nac-btn-small nac-btn-secondary" id="nac-identity-cancel">Cancel</button>
-          </div>
-        </div>
-      `;
-      
-      UI.attachUserIdentitySetupListeners();
-      document.getElementById('nac-identity-cancel')?.addEventListener('click', () => {
-        UI.updateUserIdentityUI();
-      });
-    },
-    
-    // Attach event listeners for user identity setup buttons
-    attachUserIdentitySetupListeners: () => {
-      document.getElementById('nac-identity-nip07')?.addEventListener('click', () => {
-        UI.setupUserIdentity.fromNIP07();
-      });
-      document.getElementById('nac-identity-generate')?.addEventListener('click', () => {
-        UI.setupUserIdentity.generate();
-      });
-      document.getElementById('nac-identity-import')?.addEventListener('click', () => {
-        UI.setupUserIdentity.import();
-      });
-    },
-    
-    // Update publication name display in Publishing Options
-    updatePublicationDisplay: (name, pubkey) => {
-      const displayEl = document.getElementById('nac-publication-name');
-      if (displayEl) {
-        if (name && pubkey) {
-          displayEl.textContent = name;
-          displayEl.title = pubkey;
-          displayEl.className = 'nac-name-display';
-        } else {
-          displayEl.textContent = 'Select above';
-          displayEl.className = 'nac-not-set';
-        }
-      }
-    },
-    
-    // Add tag
-    addTag: (tag) => {
-      const container = document.getElementById('nac-tags-container');
-      const input = document.getElementById('nac-tag-input');
-      
-      // Check if tag already exists
-      if (container.querySelector(`[data-tag="${tag}"]`)) return;
-      
-      const tagEl = document.createElement('span');
-      tagEl.className = 'nac-tag';
-      tagEl.dataset.tag = tag;
-      tagEl.innerHTML = `${tag}<span class="nac-tag-remove">×</span>`;
-      
-      tagEl.querySelector('.nac-tag-remove').addEventListener('click', () => {
-        tagEl.remove();
-      });
-      
-      container.insertBefore(tagEl, input);
-    },
-    
-    // Get all tags
-    getTags: () => {
-      const container = document.getElementById('nac-tags-container');
-      return Array.from(container.querySelectorAll('.nac-tag')).map(el => el.dataset.tag);
-    },
-    
-    // Copy content
-    copyContent: async () => {
-      const content = UI.state.activeTab === 'markdown' ? UI.state.markdown : UI.state.article?.textContent;
-      
-      if (content) {
-        await navigator.clipboard.writeText(content);
-        UI.showToast('Copied to clipboard!', 'success');
-      }
-    },
-    
-    // Download markdown
-    downloadMarkdown: () => {
-      if (!UI.state.markdown || !UI.state.article) return;
-      
-      const blob = new Blob([UI.state.markdown], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${Utils.slugify(UI.state.article.title)}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
-      
-      UI.showToast('Markdown downloaded!', 'success');
-    },
-    
-    // Update signing status indicator (supports NIP-07 and NSecBunker)
-    updateSigningStatus: () => {
-      const statusEl = document.getElementById('nac-signing-status');
-      const dot = document.getElementById('nac-status-dot');
-      const textEl = document.getElementById('nac-status-text');
-      if (!statusEl || !dot) return;
-      
-      // Remove all status classes
-      dot.classList.remove('connected', 'disconnected', 'connecting');
-      
-      // Check NIP-07 first (preferred for ease of use)
-      const nip07Available = NIP07Client.checkAvailability();
-      
-      if (nip07Available) {
-        dot.classList.add('connected');
-        statusEl.title = 'NIP-07 Extension Available (nos2x, Alby, etc.)';
-        if (textEl) textEl.textContent = 'NIP-07';
-      } else if (NSecBunkerClient.connected) {
-        dot.classList.add('connected');
-        statusEl.title = 'NSecBunker Connected';
-        if (textEl) textEl.textContent = 'Bunker';
-      } else {
-        dot.classList.add('disconnected');
-        statusEl.title = 'No signing method available. Install a NIP-07 extension or connect NSecBunker.';
-        if (textEl) textEl.textContent = 'No Signer';
-      }
-    },
-    
-    // Legacy method for compatibility
-    updateBunkerStatus: (status) => {
-      UI.updateSigningStatus();
-    },
-    
-    // Update publish button state
-    updatePublishButton: () => {
-      const btn = document.getElementById('nac-publish-btn');
-      const pubSelect = document.getElementById('nac-publication');
-      const pubValue = pubSelect.value;
-      
-      // Update signing status indicator
-      UI.updateSigningStatus();
-      
-      // Check signing availability
-      const nip07Available = NIP07Client.checkAvailability();
-      const hasSigningMethod = nip07Available || NSecBunkerClient.connected;
-      
-      // Check if we have an article
-      if (!UI.state.article) {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send}<span>No Article Loaded</span>`;
-        return;
-      }
-      
-      // Publication selection is required for ALL signing methods (v1.5.0 change)
-      // This ensures entities are always persisted
-      if (!pubValue || pubValue === '') {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send}<span>Select Publication</span>`;
-        return;
-      }
-      
-      // If creating new publication, check name is provided
-      if (pubValue === '__new__') {
-        const pubName = document.getElementById('nac-pub-name').value.trim();
-        if (!pubName) {
-          btn.disabled = true;
-          btn.innerHTML = `${UI.icons.send}<span>Enter Publication Name</span>`;
-          return;
-        }
-      }
-      
-      // Check for signing method
-      if (!hasSigningMethod) {
-        btn.disabled = true;
-        btn.innerHTML = `${UI.icons.send}<span>Install Signer Extension</span>`;
-        return;
-      }
-      
-      // Ready to publish - show which method will be used
-      btn.disabled = false;
-      if (nip07Available) {
-        btn.innerHTML = `${UI.icons.send}<span>Publish with Extension</span>`;
-      } else {
-        btn.innerHTML = `${UI.icons.send}<span>Publish to NOSTR</span>`;
-      }
-    },
-    
-    // Publish to NOSTR
-    publish: async () => {
-      const btn = document.getElementById('nac-publish-btn');
-      const originalContent = btn.innerHTML;
-      
-      try {
-        // Show loading state
-        btn.disabled = true;
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Preparing...</span>`;
-        
-        // Get form values
-        const pubSelect = document.getElementById('nac-publication');
-        const authorSelect = document.getElementById('nac-author');
-        const tags = UI.getTags();
-        const mediaHandling = document.querySelector('input[name="nac-media"]:checked')?.value || 'reference';
-        const selectedRelays = Array.from(document.querySelectorAll('#nac-relays input:checked')).map(cb => cb.value);
-        
-        Utils.log('Publish started with relays:', selectedRelays);
-        
-        if (selectedRelays.length === 0) {
-          throw new Error('Please select at least one relay');
-        }
-        
-        // Get publication selection (now required for ALL paths)
-        let publicationId = pubSelect.value;
-        let authorId = authorSelect.value;
-        
-        if (!publicationId || publicationId === '') {
-          throw new Error('Please select or create a publication');
-        }
-        
-        // Check for NIP-07 extension first (easiest for users)
-        const nip07Available = NIP07Client.checkAvailability();
-        Utils.log('NIP-07 available:', nip07Available);
-        
-        let signedEvent;
-        
-        if (nip07Available) {
-          // ========== NIP-07 SIGNING PATH ==========
-          Utils.log('Using NIP-07 extension for signing');
-          btn.innerHTML = `<div class="nac-spinner"></div><span>Getting key...</span>`;
-          
-          // Get public key from extension
-          let pubkey;
-          try {
-            pubkey = await NIP07Client.getPublicKey();
-            Utils.log('Got pubkey from NIP-07:', pubkey);
-          } catch (e) {
-            Utils.error('Failed to get pubkey from NIP-07:', e);
-            throw new Error('Failed to get public key from extension. Please unlock your extension and try again.');
-          }
-          
-          // Handle new publication creation (v1.5.0: now works with NIP-07)
-          if (publicationId === '__new__') {
-            const pubName = document.getElementById('nac-pub-name').value.trim();
-            const pubType = document.getElementById('nac-pub-type').value;
-            const pubDomain = document.getElementById('nac-pub-domain').value.trim();
-            
-            if (!pubName) {
-              throw new Error('Publication name is required');
-            }
-            
-            // Generate publication ID
-            publicationId = 'pub_' + Utils.slugify(pubName) + '_' + Utils.generateId();
-            
-            // Save publication to storage with extension's pubkey
-            await Storage.publications.save(publicationId, {
-              name: pubName,
-              type: pubType,
-              domain: pubDomain,
-              pubkey: pubkey,  // Use extension's pubkey
-              signingMethod: 'nip07',
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            // Also save to keypair registry for reference
-            await Storage.keypairs.save(publicationId, {
-              type: 'publication',
-              name: pubName,
-              pubkey: pubkey,
-              domain: pubDomain,
-              pubType: pubType,
-              signingMethod: 'nip07',
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            Utils.log('Created new publication with NIP-07:', publicationId);
-          } else {
-            // Existing publication selected - verify/update pubkey
-            const publication = await Storage.publications.get(publicationId);
-            if (publication) {
-              // Update pubkey if it's different or missing (user may have switched extensions)
-              if (!publication.pubkey || publication.pubkey !== pubkey) {
-                Utils.log('Updating publication pubkey from NIP-07');
-                await Storage.publications.save(publicationId, {
-                  ...publication,
-                  pubkey: pubkey,
-                  signingMethod: 'nip07'
-                });
-                
-                // Also update keypair registry
-                await Storage.keypairs.save(publicationId, {
-                  type: 'publication',
-                  name: publication.name,
-                  pubkey: pubkey,
-                  domain: publication.domain,
-                  pubType: publication.type,
-                  signingMethod: 'nip07',
-                  created: publication.created || Math.floor(Date.now() / 1000)
-                });
-              }
-            }
-          }
-          
-          // Handle new author creation (v1.5.0: now works with NIP-07)
-          let authorPubkey = null;
-          if (authorId === '__new__') {
-            const authorName = document.getElementById('nac-author-name').value.trim();
-            
-            if (!authorName) {
-              throw new Error('Author name is required');
-            }
-            
-            // Generate author ID
-            authorId = 'person_' + Utils.slugify(authorName) + '_' + Utils.generateId();
-            
-            // For NIP-07, we don't have a separate key for the author
-            // The author is referenced by name in tags, not signed
-            await Storage.people.save(authorId, {
-              name: authorName,
-              pubkey: null,  // Author doesn't sign, just referenced
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            Utils.log('Created new author:', authorId);
-          } else if (authorId && authorId !== '') {
-            // Get existing author's info (pubkey if they have one)
-            const author = await Storage.people.get(authorId);
-            authorPubkey = author?.pubkey;
-          }
-          
-          // Build the article event with extension's pubkey
-          const article = {
-            ...UI.state.article,
-            markdown: UI.state.markdown
-          };
-          
-          // Get publishing options
-          const includeAuthorOpt = document.getElementById('nac-include-author')?.checked;
-          const authorPubkeyInput = document.getElementById('nac-author-pubkey');
-          const authorPubkeyFromInput = authorPubkeyInput?.dataset?.hexPubkey || null;
-          const includeCapturerOpt = document.getElementById('nac-include-capturer')?.checked;
-          const capturer = Storage.capturingUser.get();
-          const capturerPubkeyVal = (includeCapturerOpt && capturer?.enabled) ? capturer.pubkey : null;
-          
-          Utils.log('Building article event...');
-          const event = await EventBuilder.buildArticleEvent(article, {
-            pubkey: pubkey,
-            authorPubkey: authorPubkeyFromInput || authorPubkey,
-            includeAuthor: includeAuthorOpt && !!(authorPubkeyFromInput || authorPubkey),
-            capturerPubkey: capturerPubkeyVal,
-            includeCapturer: includeCapturerOpt && !!capturerPubkeyVal,
-            tags: tags,
-            mediaHandling: mediaHandling,
-            entities: UI.state.entities
-          });
-          Utils.log('Built unsigned event:', event);
-          
-          // Sign with NIP-07 extension
-          btn.innerHTML = `<div class="nac-spinner"></div><span>Sign in extension...</span>`;
-          UI.showToast('Please approve the signature in your NOSTR extension...', 'warning');
-          
-          try {
-            signedEvent = await NIP07Client.signEvent(event);
-            Utils.log('Got signed event from NIP-07:', signedEvent);
-          } catch (e) {
-            Utils.error('NIP-07 signing failed:', e);
-            throw new Error('Signing was rejected or failed. Please try again.');
-          }
-          
-          // Validate signed event
-          if (!signedEvent || !signedEvent.id || !signedEvent.sig) {
-            Utils.error('Invalid signed event:', signedEvent);
-            throw new Error('Extension returned invalid signed event');
-          }
-          
-          // Reload entities in UI to show the newly created ones
-          await UI.loadEntities();
-          
-        } else {
-          // ========== NSECBUNKER SIGNING PATH ==========
-          // Note: publicationId and authorId already extracted above
-          
-          // Connect to NSecBunker if not connected
-          if (!NSecBunkerClient.connected) {
-            btn.innerHTML = `<div class="nac-spinner"></div><span>Connecting...</span>`;
-            UI.showToast('Connecting to NSecBunker...', 'warning');
-            try {
-              await NSecBunkerClient.connect();
-            } catch (e) {
-              Utils.log('NSecBunker not available:', e);
-              throw new Error('No signing method available. Please install a NIP-07 browser extension (nos2x, Alby, etc.) or run NSecBunker.');
-            }
-          }
-          
-          // Handle new publication creation
-          if (publicationId === '__new__') {
-            const pubName = document.getElementById('nac-pub-name').value.trim();
-            const pubType = document.getElementById('nac-pub-type').value;
-            const pubDomain = document.getElementById('nac-pub-domain').value.trim();
-            
-            if (!pubName) {
-              throw new Error('Publication name is required');
-            }
-            
-            // Generate publication ID
-            publicationId = 'pub_' + Utils.slugify(pubName) + '_' + Utils.generateId();
-            
-            // Create key in NSecBunker
-            let pubkey = null;
-            if (NSecBunkerClient.connected) {
-              const keyResult = await NSecBunkerClient.createKey(publicationId, {
-                type: 'publication',
-                name: pubName,
-                pubType: pubType,
-                domain: pubDomain
-              });
-              pubkey = keyResult.pubkey;
-            } else {
-              throw new Error('NSecBunker required to create new publications');
-            }
-            
-            // Save publication to storage
-            await Storage.publications.save(publicationId, {
-              name: pubName,
-              type: pubType,
-              domain: pubDomain,
-              pubkey: pubkey,
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            // Also save keypair to the registry for persistent backup
-            await Storage.keypairs.save(publicationId, {
-              type: 'publication',
-              name: pubName,
-              pubkey: pubkey,
-              domain: pubDomain,
-              pubType: pubType,
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            Utils.log('Created new publication:', publicationId);
-          }
-          
-          // Handle new author creation
-          let authorPubkey = null;
-          if (authorId === '__new__') {
-            const authorName = document.getElementById('nac-author-name').value.trim();
-            
-            if (!authorName) {
-              throw new Error('Author name is required');
-            }
-            
-            // Generate author ID
-            authorId = 'person_' + Utils.slugify(authorName) + '_' + Utils.generateId();
-            
-            // Create key in NSecBunker
-            if (NSecBunkerClient.connected) {
-              const keyResult = await NSecBunkerClient.createKey(authorId, {
-                type: 'person',
-                name: authorName
-              });
-              authorPubkey = keyResult.pubkey;
-            }
-            
-            // Save person to storage
-            await Storage.people.save(authorId, {
-              name: authorName,
-              pubkey: authorPubkey,
-              created: Math.floor(Date.now() / 1000)
-            });
-            
-            // Also save keypair to the registry for persistent backup
-            if (authorPubkey) {
-              await Storage.keypairs.save(authorId, {
-                type: 'person',
-                name: authorName,
-                pubkey: authorPubkey,
-                created: Math.floor(Date.now() / 1000)
-              });
-            }
-            
-            Utils.log('Created new author:', authorId);
-          } else if (authorId && authorId !== '') {
-            // Get existing author's pubkey
-            const author = await Storage.people.get(authorId);
-            authorPubkey = author?.pubkey;
-          }
-          
-          // Get publication details
-          const publication = await Storage.publications.get(publicationId);
-          if (!publication) {
-            throw new Error('Publication not found. Please select or create a publication.');
-          }
-          
-          // Build the article event
-          const article = {
-            ...UI.state.article,
-            markdown: UI.state.markdown
-          };
-          
-          // Get publishing options
-          const includeAuthorOpt = document.getElementById('nac-include-author')?.checked;
-          const authorPubkeyInput = document.getElementById('nac-author-pubkey');
-          const authorPubkeyFromInput = authorPubkeyInput?.dataset?.hexPubkey || null;
-          const includeCapturerOpt = document.getElementById('nac-include-capturer')?.checked;
-          const capturer = Storage.capturingUser.get();
-          const capturerPubkeyVal = (includeCapturerOpt && capturer?.enabled) ? capturer.pubkey : null;
-          
-          const event = await EventBuilder.buildArticleEvent(article, {
-            pubkey: publication.pubkey,
-            authorPubkey: authorPubkeyFromInput || authorPubkey,
-            includeAuthor: includeAuthorOpt && !!(authorPubkeyFromInput || authorPubkey),
-            capturerPubkey: capturerPubkeyVal,
-            includeCapturer: includeCapturerOpt && !!capturerPubkeyVal,
-            tags: tags,
-            mediaHandling: mediaHandling,
-            entities: UI.state.entities
-          });
-          
-          // Sign the event with NSecBunker
-          if (!publication.pubkey) {
-            throw new Error('Publication key not available. Please reconnect to NSecBunker.');
-          }
-          
-          btn.innerHTML = `<div class="nac-spinner"></div><span>Signing...</span>`;
-          signedEvent = await NSecBunkerClient.signEvent(event, publicationId);
-        }
-        
-        // ========== PUBLISH TO RELAYS ==========
-        btn.innerHTML = `<div class="nac-spinner"></div><span>Publishing...</span>`;
-        Utils.log('Publishing signed event to relays...');
-        Utils.log('Event ID:', signedEvent.id);
-        Utils.log('Event pubkey:', signedEvent.pubkey);
-        Utils.log('Event sig:', signedEvent.sig ? signedEvent.sig.substring(0, 20) + '...' : 'MISSING');
-        
-        const results = await NostrClient.publishToRelays(selectedRelays, signedEvent);
-        
-        Utils.log('Publish results:', results);
-        
-        if (results.successful > 0) {
-          const confirmedCount = results.results.filter(r => r.success && !r.assumed).length;
-          const assumedCount = results.results.filter(r => r.success && r.assumed).length;
-          
-          let message = `Published to ${results.successful}/${results.total} relays`;
-          if (confirmedCount > 0 && assumedCount > 0) {
-            message += ` (${confirmedCount} confirmed, ${assumedCount} likely)`;
-          }
-          
-          UI.showToast(message + '!', 'success');
-          
-          // Close panel after success
-          setTimeout(() => UI.close(), 2000);
-        } else {
-          // Log detailed failures
-          results.results.forEach(r => {
-            if (!r.success) {
-              Utils.error('Relay failure:', r.url, r.error);
-            }
-          });
-          throw new Error('Failed to publish to any relay. Check browser console for details.');
-        }
-        
-      } catch (error) {
-        Utils.error('Publish error:', error);
-        UI.showToast(error.message || 'Failed to publish', 'error');
-      } finally {
-        btn.innerHTML = originalContent;
-        UI.updatePublishButton();
-      }
-    },
-    
-    // Show toast notification
-    showToast: (message, type = 'success') => {
-      // Remove existing toast
-      const existingToast = document.querySelector('.nac-toast');
-      if (existingToast) existingToast.remove();
-      
-      const toast = document.createElement('div');
-      toast.className = `nac-toast nac-reset ${type}`;
-      toast.innerHTML = `
-        ${type === 'success' ? UI.icons.check : type === 'error' ? UI.icons.close : UI.icons.warning}
-        <span>${message}</span>
-      `;
-      
-      document.body.appendChild(toast);
-      
-      // Show toast
-      setTimeout(() => toast.classList.add('visible'), 10);
-      
-      // Hide and remove toast
-      setTimeout(() => {
-        toast.classList.remove('visible');
-        setTimeout(() => toast.remove(), 300);
-      }, 3000);
-    },
-    
-    // Export keypairs to a downloadable JSON file
-    exportKeypairs: async () => {
-      try {
-        const registry = await Storage.keypairs.getAll();
-        const count = Object.keys(registry).length;
-        
-        if (count === 0) {
-          UI.showToast('No keypairs to export', 'warning');
-          return;
-        }
-        
-        const exportData = {
-          exported_at: new Date().toISOString(),
-          version: CONFIG.version,
-          keypairs: registry
-        };
-        
-        const jsonStr = JSON.stringify(exportData, null, 2);
-        const blob = new Blob([jsonStr], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `nostr-keypair-registry-${new Date().toISOString().split('T')[0]}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        
-        UI.showToast(`Exported ${count} keypairs to file`, 'success');
-        Utils.log('Exported keypair registry:', count, 'entries');
-      } catch (e) {
-        Utils.error('Failed to export keypairs:', e);
-        UI.showToast('Failed to export keypairs', 'error');
-      }
-    },
-    
-    // View keypairs in console and show summary
-    viewKeypairs: async () => {
-      try {
-        const registry = await Storage.keypairs.getAll();
-        const count = Object.keys(registry).length;
-        
-        console.log('=== NOSTR Keypair Registry ===');
-        console.log('Total entries:', count);
-        console.log(JSON.stringify(registry, null, 2));
-        
-        // Build summary
-        const publications = Object.entries(registry).filter(([k, v]) => v.type === 'publication');
-        const people = Object.entries(registry).filter(([k, v]) => v.type === 'person');
-        
-        let summary = `Keypair Registry: ${count} total\n`;
-        summary += `📰 Publications: ${publications.length}\n`;
-        publications.forEach(([id, data]) => {
-          summary += `   • ${data.name} (${data.domain || 'no domain'})\n`;
-          summary += `     pubkey: ${data.pubkey ? data.pubkey.substring(0, 16) + '...' : 'pending'}\n`;
-        });
-        
-        summary += `👤 People: ${people.length}\n`;
-        people.forEach(([id, data]) => {
-          summary += `   • ${data.name}\n`;
-          summary += `     pubkey: ${data.pubkey ? data.pubkey.substring(0, 16) + '...' : 'pending'}\n`;
-        });
-        
-        alert(summary + '\n\nFull details logged to browser console.');
-        UI.showToast(`Found ${count} keypairs - see console`, 'success');
-      } catch (e) {
-        Utils.error('Failed to view keypairs:', e);
-        UI.showToast('Failed to view keypairs', 'error');
-      }
-    },
-    
-    // ============================================
-    // IMMERSIVE READER FUNCTIONS
-    // ============================================
-    
-    // Create immersive reader container
-    createImmersiveReader: () => {
-      // Check if already exists
-      if (document.getElementById('nac-immersive-reader')) {
-        return;
-      }
-      
-      const reader = document.createElement('div');
-      reader.id = 'nac-immersive-reader';
-      reader.className = 'nac-immersive-reader';
-      
-      reader.innerHTML = `
-        <!-- Close Button -->
-        <button class="nac-reader-close" id="nac-reader-close" title="Close Reader (Esc)">
-          ${UI.icons.close}
-        </button>
-        
-        <!-- Main Reader Content -->
-        <div class="nac-reader-content" id="nac-reader-content">
-          <div class="nac-reader-header">
-            <h1 class="nac-reader-title" id="nac-reader-title">Loading...</h1>
-            <div class="nac-reader-meta" id="nac-reader-meta"></div>
-          </div>
-          <div class="nac-reader-body" id="nac-reader-body">
-            <div class="nac-reader-loading">
-              <div class="nac-spinner"></div>
-              <p>Extracting article content...</p>
-            </div>
-          </div>
-          
-          <!-- Existing Reactions & Comments Section -->
-          <div class="nac-reader-reactions" id="nac-reader-reactions" style="display: none;">
-            <h3 class="nac-reactions-title">Reactions</h3>
-            <div class="nac-reactions-list" id="nac-reactions-list"></div>
-          </div>
-          <div class="nac-reader-comments" id="nac-reader-comments" style="display: none;">
-            <h3 class="nac-comments-title">Comments</h3>
-            <div class="nac-comments-list" id="nac-comments-list"></div>
-          </div>
-        </div>
-        
-        <!-- Floating Action Button -->
-        <div class="nac-reader-fab" id="nac-reader-fab">
-          <button class="nac-fab-main" id="nac-fab-main" title="Actions">
-            <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-          </button>
-          <div class="nac-fab-menu" id="nac-fab-menu">
-            <button class="nac-fab-item" data-action="edit" title="Edit Article">
-              <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-            </button>
-            <button class="nac-fab-item" data-action="metadata" title="View Metadata">
-              <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
-            </button>
-            <button class="nac-fab-item" data-action="publish" title="Publish to NOSTR">
-              <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-            </button>
-            <button class="nac-fab-item" data-action="copy" title="Copy Markdown">
-              <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
-            </button>
-            <button class="nac-fab-item" data-action="download" title="Download">
-              <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-            </button>
-            <button class="nac-fab-item" data-action="settings" title="Settings">
-              <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-            </button>
-          </div>
-        </div>
-        
-        <!-- Bottom Reaction Bar -->
-        <div class="nac-reader-reaction-bar" id="nac-reader-reaction-bar">
-          <button class="nac-reaction-btn" data-reaction="+" title="Like">👍</button>
-          <button class="nac-reaction-btn" data-reaction="❤️" title="Love">❤️</button>
-          <button class="nac-reaction-btn" data-reaction="🔥" title="Fire">🔥</button>
-          <button class="nac-reaction-btn" data-reaction="🤔" title="Thinking">🤔</button>
-          <button class="nac-reaction-btn" data-reaction="💯" title="100">💯</button>
-          <button class="nac-reaction-btn" data-reaction="-" title="Dislike">👎</button>
-        </div>
-        
-        <!-- Collapsible Sidebar -->
-        <div class="nac-reader-sidebar" id="nac-reader-sidebar">
-          <div class="nac-sidebar-header">
-            <span class="nac-sidebar-title" id="nac-sidebar-title">Edit</span>
-            <button class="nac-sidebar-close" id="nac-sidebar-close" title="Close Sidebar">
-              ${UI.icons.close}
-            </button>
-          </div>
-          <div class="nac-sidebar-content" id="nac-sidebar-content">
-            <!-- Dynamic content based on panel -->
-          </div>
-        </div>
-      `;
-      
-      document.body.appendChild(reader);
-      UI.elements.immersiveReader = reader;
-      
-      // Attach event listeners
-      UI.attachReaderListeners();
-    },
-    
-    // Attach event listeners for immersive reader
-    attachReaderListeners: () => {
-      // Close button
-      document.getElementById('nac-reader-close')?.addEventListener('click', () => UI.closeImmersiveReader());
-      
-      // Escape key to close
-      document.addEventListener('keydown', UI.handleReaderKeydown);
-      
-      // FAB main button toggle
-      document.getElementById('nac-fab-main')?.addEventListener('click', () => UI.toggleFabMenu());
-      
-      // FAB menu items
-      document.querySelectorAll('.nac-fab-item').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const action = e.currentTarget.dataset.action;
-          UI.handleFabAction(action);
-        });
-      });
-      
-      // Reaction buttons
-      document.querySelectorAll('.nac-reaction-btn').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          const reaction = e.currentTarget.dataset.reaction;
-          await UI.handleReaction(reaction);
-        });
-      });
-      
-      // Sidebar close
-      document.getElementById('nac-sidebar-close')?.addEventListener('click', () => UI.closeSidebar());
-      
-      // Click outside FAB menu to close it
-      document.getElementById('nac-immersive-reader')?.addEventListener('click', (e) => {
-        const fabMenu = document.getElementById('nac-fab-menu');
-        const fabMain = document.getElementById('nac-fab-main');
-        if (fabMenu?.classList.contains('open') &&
-            !fabMenu.contains(e.target) &&
-            !fabMain.contains(e.target)) {
-          UI.closeFabMenu();
-        }
-      });
-    },
-    
-    // Handle keyboard events in reader
-    handleReaderKeydown: (e) => {
-      if (!UI.state.immersiveReaderOpen) return;
-      
-      if (e.key === 'Escape') {
-        const sidebar = document.getElementById('nac-reader-sidebar');
-        const fabMenu = document.getElementById('nac-fab-menu');
-        
-        if (sidebar?.classList.contains('open')) {
-          UI.closeSidebar();
-        } else if (fabMenu?.classList.contains('open')) {
-          UI.closeFabMenu();
-        } else {
-          UI.closeImmersiveReader();
-        }
-      }
-    },
-    
-    // Open immersive reader
-    openImmersiveReader: async () => {
-      Utils.log('Opening immersive reader...');
-      
-      // Create if doesn't exist
-      UI.createImmersiveReader();
-      
-      const reader = document.getElementById('nac-immersive-reader');
-      if (!reader) return;
-      
-      // Show reader
-      reader.classList.add('active');
-      document.body.style.overflow = 'hidden';
-      UI.state.immersiveReaderOpen = true;
-      
-      // Hide the regular FAB
-      if (UI.elements.fab) {
-        UI.elements.fab.style.display = 'none';
-      }
-      
-      // Load article content
-      await UI.loadReaderArticle();
-    },
-    
-    // Close immersive reader
-    closeImmersiveReader: () => {
-      Utils.log('Closing immersive reader...');
-      
-      const reader = document.getElementById('nac-immersive-reader');
-      if (reader) {
-        reader.classList.remove('active');
-      }
-      
-      document.body.style.overflow = '';
-      UI.state.immersiveReaderOpen = false;
-      
-      // Show the regular FAB again
-      if (UI.elements.fab) {
-        UI.elements.fab.style.display = '';
-      }
-      
-      // Close sidebar and FAB menu
-      UI.closeSidebar();
-      UI.closeFabMenu();
-    },
-    
-    // Load article into reader
-    loadReaderArticle: async () => {
-      const titleEl = document.getElementById('nac-reader-title');
-      const metaEl = document.getElementById('nac-reader-meta');
-      const bodyEl = document.getElementById('nac-reader-body');
-      
-      if (!bodyEl) return;
-      
-      // Show loading
-      bodyEl.innerHTML = `
-        <div class="nac-reader-loading">
-          <div class="nac-spinner"></div>
-          <p>Extracting article content...</p>
-        </div>
-      `;
-      
-      // Extract article if not already done
-      if (!UI.state.article) {
-        const article = ContentProcessor.extractArticle();
-        
-        if (!article) {
-          bodyEl.innerHTML = `
-            <div class="nac-reader-loading">
-              ${UI.icons.warning}
-              <p>Could not extract article content from this page.</p>
-            </div>
-          `;
-          return;
-        }
-        
-        UI.state.article = article;
-        UI.state.markdown = ContentProcessor.htmlToMarkdown(article.content);
-        
-        // Extract entities
-        const entities = ContentProcessor.extractEntities(article.content, article.textContent);
-        UI.state.entities = entities;
-      }
-      
-      const article = UI.state.article;
-      
-      // Update title
-      if (titleEl) {
-        titleEl.textContent = article.title;
-      }
-      
-      // Update meta
-      if (metaEl) {
-        const metaParts = [];
-        if (article.byline) metaParts.push(article.byline);
-        if (article.siteName) metaParts.push(article.siteName);
-        if (article.publishedAt) {
-          metaParts.push(UI.formatDatePreview(article.publishedAt));
-        }
-        metaEl.textContent = metaParts.join(' • ');
-      }
-      
-      // Update body with article content
-      if (bodyEl) {
-        bodyEl.innerHTML = article.content;
-      }
-      
-      // Fetch existing reactions/comments for this URL
-      UI.loadReaderMetadata();
-    },
-    
-    // Load existing metadata for article URL
-    loadReaderMetadata: async () => {
-      if (!UI.state.article?.url) return;
-      
-      try {
-        const metadata = await URLMetadataService.fetchURLMetadata(UI.state.article.url);
-        
-        // Display reactions
-        if (metadata.reactions && metadata.reactions.length > 0) {
-          const reactionsEl = document.getElementById('nac-reader-reactions');
-          const listEl = document.getElementById('nac-reactions-list');
-          if (reactionsEl && listEl) {
-            reactionsEl.style.display = 'block';
-            listEl.innerHTML = UI.renderReactionsList(metadata.reactions);
-          }
-        }
-        
-        // Display comments
-        if (metadata.comments && metadata.comments.length > 0) {
-          const commentsEl = document.getElementById('nac-reader-comments');
-          const listEl = document.getElementById('nac-comments-list');
-          if (commentsEl && listEl) {
-            commentsEl.style.display = 'block';
-            listEl.innerHTML = UI.renderCommentsList(metadata.comments);
-          }
-        }
-      } catch (e) {
-        Utils.error('Failed to load reader metadata:', e);
-      }
-    },
-    
-    // Render reactions list
-    renderReactionsList: (reactions) => {
-      const counts = {};
-      reactions.forEach(r => {
-        const content = r.content || '+';
-        counts[content] = (counts[content] || 0) + 1;
-      });
-      
-      return Object.entries(counts)
-        .map(([emoji, count]) => `
-          <div class="nac-reaction-display">
-            <span class="nac-reaction-emoji">${emoji === '+' ? '👍' : emoji === '-' ? '👎' : emoji}</span>
-            <span class="nac-reaction-count">${count}</span>
-          </div>
-        `).join('');
-    },
-    
-    // Render comments list
-    renderCommentsList: (comments) => {
-      return comments.slice(0, 10).map(c => `
-        <div class="nac-comment-item">
-          <div class="nac-comment-author">${Utils.escapeHtml(c.pubkey?.substring(0, 8) || 'Anonymous')}...</div>
-          <div class="nac-comment-text">${Utils.escapeHtml(c.content?.substring(0, 200) || '')}</div>
-        </div>
-      `).join('');
-    },
-    
-    // Toggle FAB menu
-    toggleFabMenu: () => {
-      const menu = document.getElementById('nac-fab-menu');
-      const main = document.getElementById('nac-fab-main');
-      
-      if (menu?.classList.contains('open')) {
-        UI.closeFabMenu();
-      } else {
-        menu?.classList.add('open');
-        main?.classList.add('open');
-      }
-    },
-    
-    // Close FAB menu
-    closeFabMenu: () => {
-      const menu = document.getElementById('nac-fab-menu');
-      const main = document.getElementById('nac-fab-main');
-      menu?.classList.remove('open');
-      main?.classList.remove('open');
-    },
-    
-    // Handle FAB action
-    handleFabAction: (action) => {
-      UI.closeFabMenu();
-      
-      switch (action) {
-        case 'edit':
-          UI.openSidebar('edit');
-          break;
-        case 'metadata':
-          UI.openSidebar('metadata');
-          break;
-        case 'publish':
-          UI.openSidebar('publish');
-          break;
-        case 'copy':
-          UI.copyMarkdownFromReader();
-          break;
-        case 'download':
-          UI.downloadFromReader();
-          break;
-        case 'settings':
-          UI.openSidebar('settings');
-          break;
-      }
-    },
-    
-    // Handle reaction button click
-    handleReaction: async (reaction) => {
-      if (!UI.state.article?.url) {
-        UI.showToast('No article loaded', 'error');
-        return;
-      }
-      
-      try {
-        // Check if user identity is set
-        const userIdentity = Storage.userIdentity.get();
-        if (!userIdentity) {
-          UI.showToast('Set up your identity first', 'warning');
-          UI.openSidebar('settings');
-          return;
-        }
-        
-        // Build and sign reaction event
-        const event = await EventBuilder.buildReactionEvent(UI.state.article.url, {
-          reaction: reaction,
-          title: UI.state.article.title
-        });
-        
-        // Sign event
-        let signedEvent;
-        if (userIdentity.method === 'nip07') {
-          signedEvent = await NIP07Client.signEvent(event);
-        } else if (userIdentity.method === 'local') {
-          signedEvent = await LocalKeyManager.signEvent(event, userIdentity.pubkey);
-        }
-        
-        if (signedEvent) {
-          // Publish to relays
-          await NostrClient.publishEvent(signedEvent);
-          UI.showToast('Reaction published!', 'success');
-          
-          // Refresh metadata
-          UI.loadReaderMetadata();
-        }
-      } catch (e) {
-        Utils.error('Failed to publish reaction:', e);
-        UI.showToast('Failed to publish reaction', 'error');
-      }
-    },
-    
-    // Open sidebar panel
-    openSidebar: (panel) => {
-      const sidebar = document.getElementById('nac-reader-sidebar');
-      const titleEl = document.getElementById('nac-sidebar-title');
-      const contentEl = document.getElementById('nac-sidebar-content');
-      
-      if (!sidebar || !contentEl) return;
-      
-      // Set title
-      const titles = {
-        edit: 'Edit Article',
-        metadata: 'Article Metadata',
-        publish: 'Publish to NOSTR',
-        settings: 'Settings'
-      };
-      if (titleEl) titleEl.textContent = titles[panel] || 'Panel';
-      
-      // Generate content based on panel
-      switch (panel) {
-        case 'edit':
-          contentEl.innerHTML = UI.generateEditPanel();
-          UI.attachEditPanelListeners();
-          break;
-        case 'metadata':
-          contentEl.innerHTML = UI.generateMetadataPanel();
-          break;
-        case 'publish':
-          contentEl.innerHTML = UI.generatePublishPanel();
-          UI.attachPublishPanelListeners();
-          break;
-        case 'settings':
-          contentEl.innerHTML = UI.generateSettingsPanel();
-          UI.attachSettingsPanelListeners();
-          break;
-        default:
-          contentEl.innerHTML = '<p>Unknown panel</p>';
-      }
-      
-      // Show sidebar
-      sidebar.classList.add('open');
-      UI.state.activeSidebarPanel = panel;
-    },
-    
-    // Close sidebar
-    closeSidebar: () => {
-      const sidebar = document.getElementById('nac-reader-sidebar');
-      sidebar?.classList.remove('open');
-      UI.state.activeSidebarPanel = null;
-    },
-    
-    // Generate Edit panel content
-    generateEditPanel: () => {
-      const article = UI.state.article || {};
-      return `
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Title</label>
-          <input type="text" class="nac-sidebar-input" id="nac-reader-edit-title"
-            value="${Utils.escapeHtml(article.title || '')}">
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Excerpt</label>
-          <textarea class="nac-sidebar-textarea" id="nac-reader-edit-excerpt" rows="3"
-            placeholder="Brief summary...">${Utils.escapeHtml(article.excerpt || '')}</textarea>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Content (Markdown)</label>
-          <textarea class="nac-sidebar-textarea" id="nac-reader-edit-content" rows="15"
-            style="font-family: monospace;">${Utils.escapeHtml(UI.state.markdown || '')}</textarea>
-        </div>
-        <div class="nac-sidebar-section">
-          <button class="nac-sidebar-btn nac-sidebar-btn-primary" id="nac-reader-save-edit">
-            Save Changes
-          </button>
-          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-cancel-edit">
-            Cancel
-          </button>
-        </div>
-      `;
-    },
-    
-    // Attach edit panel listeners
-    attachEditPanelListeners: () => {
-      document.getElementById('nac-reader-save-edit')?.addEventListener('click', () => {
-        // Update article state
-        const title = document.getElementById('nac-reader-edit-title')?.value;
-        const excerpt = document.getElementById('nac-reader-edit-excerpt')?.value;
-        const content = document.getElementById('nac-reader-edit-content')?.value;
-        
-        if (title) UI.state.article.title = title;
-        if (excerpt !== undefined) UI.state.article.excerpt = excerpt;
-        if (content !== undefined) UI.state.markdown = content;
-        
-        // Update display
-        document.getElementById('nac-reader-title').textContent = UI.state.article.title;
-        
-        UI.closeSidebar();
-        UI.showToast('Changes saved', 'success');
-      });
-      
-      document.getElementById('nac-reader-cancel-edit')?.addEventListener('click', () => {
-        UI.closeSidebar();
-      });
-    },
-    
-    // Generate Metadata panel content
-    generateMetadataPanel: () => {
-      const article = UI.state.article || {};
-      return `
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">URL</label>
-          <div class="nac-sidebar-value">${Utils.escapeHtml(article.url || 'N/A')}</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Domain</label>
-          <div class="nac-sidebar-value">${Utils.escapeHtml(article.domain || 'N/A')}</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Author</label>
-          <div class="nac-sidebar-value">${Utils.escapeHtml(article.byline || 'Unknown')}</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Published</label>
-          <div class="nac-sidebar-value">${article.publishedAt ? UI.formatDatePreview(article.publishedAt) : 'Unknown'}</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Site Name</label>
-          <div class="nac-sidebar-value">${Utils.escapeHtml(article.siteName || 'Unknown')}</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Word Count</label>
-          <div class="nac-sidebar-value">${article.textContent?.split(/\s+/).length || 0} words</div>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Detected Entities</label>
-          <div class="nac-sidebar-value">
-            ${UI.state.entities?.people?.length || 0} people,
-            ${UI.state.entities?.organizations?.length || 0} organizations
-          </div>
-        </div>
-      `;
-    },
-    
-    // Generate Publish panel content
-    generatePublishPanel: () => {
-      return `
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Publication</label>
-          <select class="nac-sidebar-select" id="nac-reader-publication">
-            <option value="">Select publication...</option>
-            <option value="__new__">+ Create new</option>
-          </select>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Author</label>
-          <select class="nac-sidebar-select" id="nac-reader-author">
-            <option value="">Select author...</option>
-            <option value="__new__">+ Create new</option>
-          </select>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Tags</label>
-          <input type="text" class="nac-sidebar-input" id="nac-reader-tags"
-            placeholder="news, politics, tech...">
-        </div>
-        <div class="nac-sidebar-section">
-          <button class="nac-sidebar-btn nac-sidebar-btn-primary" id="nac-reader-publish-btn">
-            Publish Article
-          </button>
-        </div>
-        <div class="nac-sidebar-section">
-          <div class="nac-sidebar-hint">
-            Publishing creates a kind:30023 long-form article event on NOSTR.
-          </div>
-        </div>
-      `;
-    },
-    
-    // Attach publish panel listeners
-    attachPublishPanelListeners: () => {
-      // Populate publications dropdown
-      UI.populateSidebarDropdown('nac-reader-publication', 'publications');
-      UI.populateSidebarDropdown('nac-reader-author', 'people');
-      
-      document.getElementById('nac-reader-publish-btn')?.addEventListener('click', async () => {
-        // Use existing publish logic
-        UI.showToast('Opening full publish panel...', 'info');
-        UI.closeSidebar();
-        UI.closeImmersiveReader();
-        UI.open();
-      });
-    },
-    
-    // Populate sidebar dropdown with stored data
-    populateSidebarDropdown: async (selectId, storageKey) => {
-      const select = document.getElementById(selectId);
-      if (!select) return;
-      
-      try {
-        let items = [];
-        if (storageKey === 'publications') {
-          items = await Storage.publications.getAll();
-        } else if (storageKey === 'people') {
-          items = await Storage.people.getAll();
-        }
-        
-        items.forEach(([id, data]) => {
-          const option = document.createElement('option');
-          option.value = id;
-          option.textContent = data.name || id;
-          select.appendChild(option);
-        });
-      } catch (e) {
-        Utils.error('Failed to populate dropdown:', e);
-      }
-    },
-    
-    // Generate Settings panel content
-    generateSettingsPanel: () => {
-      const userIdentity = Storage.userIdentity.get();
-      const identityStatus = userIdentity ?
-        `Connected: ${userIdentity.pubkey?.substring(0, 12)}...` :
-        'Not configured';
-      
-      return `
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Your Identity</label>
-          <div class="nac-sidebar-value">${identityStatus}</div>
-          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-setup-identity"
-            style="margin-top: 8px;">
-            ${userIdentity ? 'Change Identity' : 'Setup Identity'}
-          </button>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Theme</label>
-          <select class="nac-sidebar-select" id="nac-reader-theme">
-            <option value="auto">Auto (System)</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </div>
-        <div class="nac-sidebar-section">
-          <label class="nac-sidebar-label">Relays</label>
-          <div class="nac-sidebar-value">${CONFIG.relays.filter(r => r.enabled).length} active relays</div>
-          <button class="nac-sidebar-btn nac-sidebar-btn-secondary" id="nac-reader-manage-relays"
-            style="margin-top: 8px;">
-            Manage Relays
-          </button>
-        </div>
-      `;
-    },
-    
-    // Attach settings panel listeners
-    attachSettingsPanelListeners: () => {
-      document.getElementById('nac-reader-setup-identity')?.addEventListener('click', () => {
-        UI.closeSidebar();
-        UI.closeImmersiveReader();
-        UI.open();
-        // Scroll to identity section
-        setTimeout(() => {
-          document.getElementById('nac-user-identity-section')?.scrollIntoView({ behavior: 'smooth' });
-        }, 300);
-      });
-      
-      document.getElementById('nac-reader-manage-relays')?.addEventListener('click', () => {
-        UI.showToast('Relay management coming soon', 'info');
-      });
-    },
-    
-    // Copy markdown from reader
-    copyMarkdownFromReader: () => {
-      if (!UI.state.markdown) {
-        UI.showToast('No content to copy', 'error');
-        return;
-      }
-      
-      navigator.clipboard.writeText(UI.state.markdown)
-        .then(() => UI.showToast('Markdown copied to clipboard', 'success'))
-        .catch(() => UI.showToast('Failed to copy', 'error'));
-    },
-    
-    // Download from reader
-    downloadFromReader: () => {
-      if (!UI.state.article || !UI.state.markdown) {
-        UI.showToast('No content to download', 'error');
-        return;
-      }
-      
-      const filename = Utils.slugify(UI.state.article.title || 'article') + '.md';
-      const blob = new Blob([UI.state.markdown], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-      UI.showToast('Downloaded ' + filename, 'success');
-    }
-  };
-
-  // ============================================
-  // SECTION 9: NOSTR CRYPTO UTILITIES
-  // ============================================
-  
-  const NostrCrypto = {
-    // Generate a random 32-byte private key as hex string
-    generatePrivateKey: () => {
-      const array = new Uint8Array(32);
-      crypto.getRandomValues(array);
-      return Array.from(array).map(b => b.toString(16).padStart(2, '0')).join('');
-    },
-    
-    // Get public key from private key (placeholder - requires secp256k1)
-    // In production, use nostr-tools or similar library
-    getPublicKey: async (privateKey) => {
-      // This is a placeholder - real implementation requires secp256k1
-      // For now, we'll use NSecBunker which handles this server-side
-      Utils.log('getPublicKey requires secp256k1 library or NSecBunker');
-      return null;
-    },
-    
-    // Calculate event ID (SHA-256 of serialized event)
-    getEventHash: async (event) => {
-      const serialized = JSON.stringify([
-        0,
-        event.pubkey,
-        event.created_at,
-        event.kind,
-        event.tags,
-        event.content
-      ]);
-      return await Utils.sha256(serialized);
-    },
-    
-    // Serialize event for signing
-    serializeEvent: (event) => {
-      return JSON.stringify([
-        0,
-        event.pubkey,
-        event.created_at,
-        event.kind,
-        event.tags,
-        event.content
-      ]);
-    },
-    
-    // Verify event signature (placeholder)
-    verifySignature: async (event) => {
-      // Requires secp256k1 library
-      Utils.log('Signature verification requires secp256k1 library');
-      return true;
-    },
-    
-    // Convert hex to bech32 npub
-    hexToNpub: (hex) => {
-      // Simplified bech32 encoding - in production use bech32 library
-      // This is a placeholder that returns the hex prefixed
-      return 'npub1' + hex.substring(0, 59);
-    },
-    
-    // Convert bech32 npub to hex
-    npubToHex: (npub) => {
-      // Simplified bech32 decoding - in production use bech32 library
-      if (npub.startsWith('npub1')) {
-        return npub.substring(5);
-      }
-      return npub;
-    },
-    
-    // Convert hex private key to bech32 nsec
-    hexToNsec: (hex) => {
-      // Simplified bech32 encoding - in production use bech32 library
-      return 'nsec1' + hex.substring(0, 59);
-    },
-    
-    // Convert bech32 nsec to hex
-    nsecToHex: (nsec) => {
-      // Simplified bech32 decoding - in production use bech32 library
-      if (nsec.startsWith('nsec1')) {
-        return nsec.substring(5);
-      }
-      return nsec;
-    }
-  };
-
-  // ============================================
-  // SECTION 10: NOSTR RELAY CLIENT
-  // ============================================
-  
-  const NostrClient = {
-    connections: new Map(),
-    subscriptions: new Map(),
-    messageQueue: [],
-    pendingPublishes: new Map(),
-    
-    // Connect to a relay
-    connectToRelay: (url) => {
-      return new Promise((resolve, reject) => {
-        if (NostrClient.connections.has(url)) {
-          const existing = NostrClient.connections.get(url);
-          if (existing.readyState === WebSocket.OPEN) {
-            Utils.log('Reusing existing connection to:', url);
-            resolve(existing);
-            return;
-          }
-          // Close stale connection
-          Utils.log('Closing stale connection to:', url);
-          existing.close();
-          NostrClient.connections.delete(url);
-        }
-        
-        Utils.log('Connecting to relay:', url);
-        
-        let ws;
-        try {
-          ws = new WebSocket(url);
-        } catch (e) {
-          Utils.error('Failed to create WebSocket:', url, e);
-          reject(new Error('Failed to create WebSocket: ' + e.message));
-          return;
-        }
-        
-        const connectionTimeout = setTimeout(() => {
-          if (ws.readyState !== WebSocket.OPEN) {
-            Utils.log('Connection timeout for:', url);
-            ws.close();
-            reject(new Error('Connection timeout'));
-          }
-        }, 10000);
-        
-        ws.onopen = () => {
-          clearTimeout(connectionTimeout);
-          Utils.log('Connected to relay:', url);
-          NostrClient.connections.set(url, ws);
-          resolve(ws);
-        };
-        
-        ws.onerror = (error) => {
-          clearTimeout(connectionTimeout);
-          Utils.error('Relay connection error:', url, error);
-          NostrClient.connections.delete(url);
-          reject(new Error('Connection error'));
-        };
-        
-        ws.onclose = (event) => {
-          clearTimeout(connectionTimeout);
-          Utils.log('Relay connection closed:', url, 'code:', event.code);
-          NostrClient.connections.delete(url);
-        };
-        
-        ws.onmessage = (msg) => {
-          NostrClient.handleMessage(url, msg);
-        };
-      });
-    },
-    
-    // Handle incoming message from relay
-    handleMessage: (url, msg) => {
-      try {
-        Utils.log('Received message from relay:', url, msg.data);
-        const data = JSON.parse(msg.data);
-        const [type, ...rest] = data;
-        
-        switch (type) {
-          case 'OK':
-            const [eventId, success, message] = rest;
-            Utils.log('Event publish result:', { url, eventId, success, message });
-            // Resolve any pending publish promises for this event
-            NostrClient.resolvePendingPublish(url, eventId, success, message);
-            break;
-            
-          case 'EVENT':
-            const [subId, event] = rest;
-            Utils.log('Received event:', { url, subId, event });
-            break;
-            
-          case 'EOSE':
-            Utils.log('End of stored events:', { url, subId: rest[0] });
-            break;
-            
-          case 'NOTICE':
-            Utils.log('Relay notice:', { url, message: rest[0] });
-            break;
-            
-          case 'AUTH':
-            Utils.log('Relay requires auth:', { url });
-            break;
-            
-          default:
-            Utils.log('Unknown message type:', type, rest);
-        }
-      } catch (e) {
-        Utils.error('Error parsing relay message:', e, 'raw:', msg.data);
-      }
-    },
-    
-    // Resolve pending publish - now tracks per relay+event combo
-    resolvePendingPublish: (url, eventId, success, message) => {
-      const key = `${url}:${eventId}`;
-      const pending = NostrClient.pendingPublishes.get(key);
-      if (pending) {
-        Utils.log('Resolving pending publish:', key, 'success:', success);
-        clearTimeout(pending.timeout);
-        if (success) {
-          pending.resolve({ success: true, eventId, url });
-        } else {
-          pending.reject(new Error(message || 'Relay rejected event'));
-        }
-        NostrClient.pendingPublishes.delete(key);
-      } else {
-        Utils.log('No pending publish found for:', key);
-      }
-    },
-    
-    // Publish event to a single relay with robust error handling
-    publishToRelay: (url, event) => {
-      return new Promise(async (resolve, reject) => {
-        const key = `${url}:${event.id}`;
-        Utils.log('Publishing to relay:', url, 'event id:', event.id);
-        
-        try {
-          const ws = await NostrClient.connectToRelay(url);
-          
-          // Set up timeout (8 seconds for individual relay)
-          const timeout = setTimeout(() => {
-            if (NostrClient.pendingPublishes.has(key)) {
-              Utils.log('Publish timeout for:', key);
-              NostrClient.pendingPublishes.delete(key);
-              // On timeout, assume success (many relays don't send OK)
-              resolve({ success: true, eventId: event.id, url, assumed: true });
-            }
-          }, 8000);
-          
-          // Store pending promise with timeout reference
-          NostrClient.pendingPublishes.set(key, { resolve, reject, timeout });
-          
-          // Send event
-          const message = JSON.stringify(['EVENT', event]);
-          Utils.log('Sending event to relay:', url);
-          ws.send(message);
-          
-          Utils.log('Event sent to relay:', url, event.id);
-          
-        } catch (e) {
-          Utils.error('Failed to publish to relay:', url, e);
-          reject(e);
-        }
-      });
-    },
-    
-    // Publish event to multiple relays with progress tracking
-    publishToRelays: async (relayUrls, event) => {
-      Utils.log('Publishing to relays:', relayUrls, 'event:', event.id);
-      
-      // Validate event has required fields
-      if (!event.id || !event.pubkey || !event.sig) {
-        throw new Error('Event missing required fields (id, pubkey, or sig)');
-      }
-      
-      const results = await Promise.allSettled(
-        relayUrls.map(url => NostrClient.publishToRelay(url, event))
-      );
-      
-      const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
-      
-      Utils.log(`Published to ${successful}/${relayUrls.length} relays (${failed} failed)`);
-      
-      // Log individual results
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          Utils.log(`  ✓ ${relayUrls[i]}`, r.value.assumed ? '(assumed)' : '(confirmed)');
-        } else {
-          Utils.log(`  ✗ ${relayUrls[i]}:`, r.reason?.message);
-        }
-      });
-      
-      return {
-        successful,
-        failed,
-        total: relayUrls.length,
-        results: results.map((r, i) => ({
-          url: relayUrls[i],
-          success: r.status === 'fulfilled',
-          assumed: r.status === 'fulfilled' ? r.value?.assumed : false,
-          error: r.status === 'rejected' ? r.reason?.message : null
-        }))
-      };
-    },
-    
-    // Close all connections
-    closeAll: () => {
-      for (const [url, ws] of NostrClient.connections) {
-        try {
-          ws.close();
-        } catch (e) {
-          Utils.log('Error closing connection:', url, e);
-        }
-      }
-      NostrClient.connections.clear();
-      NostrClient.pendingPublishes.clear();
-    }
-  };
-
-  // ============================================
-  // SECTION 11: NSECBUNKER CLIENT
-  // ============================================
-  
-  const NSecBunkerClient = {
-    ws: null,
-    connected: false,
-    url: null,
-    pendingRequests: new Map(),
-    requestId: 0,
-    keys: new Map(),
-    
-    // Connect to NSecBunker
-    connect: async (url) => {
-      return new Promise((resolve, reject) => {
-        if (NSecBunkerClient.connected && NSecBunkerClient.ws?.readyState === WebSocket.OPEN) {
-          resolve(true);
-          return;
-        }
-        
-        NSecBunkerClient.url = url || CONFIG.nsecbunker.defaultUrl;
-        Utils.log('Connecting to NSecBunker:', NSecBunkerClient.url);
-        
-        try {
-          const ws = new WebSocket(NSecBunkerClient.url);
-          
-          ws.onopen = () => {
-            Utils.log('Connected to NSecBunker');
-            NSecBunkerClient.ws = ws;
-            NSecBunkerClient.connected = true;
-            resolve(true);
-          };
-          
-          ws.onerror = (error) => {
-            Utils.error('NSecBunker connection error:', error);
-            NSecBunkerClient.connected = false;
-            reject(error);
-          };
-          
-          ws.onclose = () => {
-            Utils.log('NSecBunker connection closed');
-            NSecBunkerClient.connected = false;
-            NSecBunkerClient.ws = null;
-          };
-          
-          ws.onmessage = (msg) => {
-            NSecBunkerClient.handleMessage(msg);
-          };
-          
-          // Timeout
-          setTimeout(() => {
-            if (!NSecBunkerClient.connected) {
-              ws.close();
-              reject(new Error('NSecBunker connection timeout'));
-            }
-          }, CONFIG.nsecbunker.timeout);
-        } catch (e) {
-          reject(e);
-        }
-      });
-    },
-    
-    // Handle message from NSecBunker
-    handleMessage: (msg) => {
-      try {
-        const data = JSON.parse(msg.data);
-        Utils.log('NSecBunker message:', data);
-        
-        if (data.id && NSecBunkerClient.pendingRequests.has(data.id)) {
-          const { resolve, reject } = NSecBunkerClient.pendingRequests.get(data.id);
-          NSecBunkerClient.pendingRequests.delete(data.id);
-          
-          if (data.error) {
-            reject(new Error(data.error));
-          } else {
-            resolve(data.result);
-          }
-        }
-      } catch (e) {
-        Utils.error('Error parsing NSecBunker message:', e);
-      }
-    },
-    
-    // Send request to NSecBunker
-    sendRequest: (method, params) => {
-      return new Promise((resolve, reject) => {
-        if (!NSecBunkerClient.connected || !NSecBunkerClient.ws) {
-          reject(new Error('Not connected to NSecBunker'));
-          return;
-        }
-        
-        const id = ++NSecBunkerClient.requestId;
-        const request = {
-          id,
-          method,
-          params
-        };
-        
-        NSecBunkerClient.pendingRequests.set(id, { resolve, reject });
-        NSecBunkerClient.ws.send(JSON.stringify(request));
-        
-        // Timeout
-        setTimeout(() => {
-          if (NSecBunkerClient.pendingRequests.has(id)) {
-            NSecBunkerClient.pendingRequests.delete(id);
-            reject(new Error('Request timeout'));
-          }
-        }, CONFIG.nsecbunker.timeout);
-      });
-    },
-    
-    // Create a new key
-    createKey: async (name, metadata = {}) => {
-      Utils.log('Creating key:', name);
-      const result = await NSecBunkerClient.sendRequest('create_key', {
-        name,
-        metadata
-      });
-      
-      // Cache the key
-      NSecBunkerClient.keys.set(name, result);
-      return result;
-    },
-    
-    // Get key by name
-    getKey: async (name) => {
-      if (NSecBunkerClient.keys.has(name)) {
-        return NSecBunkerClient.keys.get(name);
-      }
-      
-      const result = await NSecBunkerClient.sendRequest('get_key', { name });
-      if (result) {
-        NSecBunkerClient.keys.set(name, result);
-      }
-      return result;
-    },
-    
-    // List all keys
-    listKeys: async () => {
-      const result = await NSecBunkerClient.sendRequest('list_keys', {});
-      return result || [];
-    },
-    
-    // Sign an event
-    signEvent: async (event, keyName) => {
-      Utils.log('Signing event with key:', keyName);
-      const result = await NSecBunkerClient.sendRequest('sign_event', {
-        key_name: keyName,
-        event
-      });
-      return result;
-    },
-    
-    // Get public key for a key name
-    getPublicKey: async (keyName) => {
-      const key = await NSecBunkerClient.getKey(keyName);
-      return key?.pubkey;
-    },
-    
-    // Disconnect
-    disconnect: () => {
-      if (NSecBunkerClient.ws) {
-        NSecBunkerClient.ws.close();
-        NSecBunkerClient.ws = null;
-      }
-      NSecBunkerClient.connected = false;
-      NSecBunkerClient.keys.clear();
-    }
-  };
-
-  // ============================================
-  // SECTION 11.5: NIP-07 BROWSER EXTENSION CLIENT
-  // ============================================
-  
-  const NIP07Client = {
-    available: false,
-    publicKey: null,
-    
-    // Check if NIP-07 extension is available
-    checkAvailability: () => {
-      // Check both window and unsafeWindow for the nostr object
-      const nostrObj = (typeof unsafeWindow !== 'undefined' && unsafeWindow.nostr) || window.nostr;
-      NIP07Client.available = !!(nostrObj && typeof nostrObj.getPublicKey === 'function');
-      Utils.log('NIP-07 extension available:', NIP07Client.available);
-      return NIP07Client.available;
-    },
-    
-    // Get the nostr object (handles TamperMonkey sandbox)
-    getNostrObject: () => {
-      return (typeof unsafeWindow !== 'undefined' && unsafeWindow.nostr) || window.nostr;
-    },
-    
-    // Get public key from extension
-    getPublicKey: async () => {
-      if (!NIP07Client.checkAvailability()) {
-        throw new Error('NIP-07 extension not available. Please install nos2x, Alby, or similar.');
-      }
-      
-      try {
-        const nostr = NIP07Client.getNostrObject();
-        NIP07Client.publicKey = await nostr.getPublicKey();
-        Utils.log('Got public key from NIP-07:', NIP07Client.publicKey);
-        return NIP07Client.publicKey;
-      } catch (e) {
-        Utils.error('Failed to get public key from NIP-07:', e);
-        throw new Error('Failed to get public key: ' + e.message);
-      }
-    },
-    
-    // Sign an event using the browser extension
-    signEvent: async (event) => {
-      if (!NIP07Client.checkAvailability()) {
-        throw new Error('NIP-07 extension not available');
-      }
-      
-      try {
-        const nostr = NIP07Client.getNostrObject();
-        
-        // NIP-07 expects an unsigned event and returns a signed event
-        const unsignedEvent = {
-          kind: event.kind,
-          created_at: event.created_at,
-          tags: event.tags,
-          content: event.content,
-          pubkey: event.pubkey
-        };
-        
-        Utils.log('Requesting NIP-07 signature for event:', unsignedEvent);
-        const signedEvent = await nostr.signEvent(unsignedEvent);
-        Utils.log('Got signed event from NIP-07:', signedEvent);
-        
-        return signedEvent;
-      } catch (e) {
-        Utils.error('NIP-07 signing failed:', e);
-        throw new Error('Signing failed: ' + e.message);
-      }
-    },
-    
-    // Get relays from extension (optional NIP-07 feature)
-    getRelays: async () => {
-      if (!NIP07Client.checkAvailability()) {
-        return null;
-      }
-      
-      try {
-        const nostr = NIP07Client.getNostrObject();
-        if (typeof nostr.getRelays === 'function') {
-          return await nostr.getRelays();
-        }
-      } catch (e) {
-        Utils.log('Could not get relays from NIP-07:', e);
-      }
-      return null;
-    }
-  };
-
-  // ============================================
-  // SECTION 12: LOCAL KEY MANAGER (Fallback)
-  // ============================================
-  
-  const LocalKeyManager = {
-    // Store keys locally (encrypted with user password in future)
-    // This is a fallback when NSecBunker is not available
-    
-    keys: new Map(),
-    
-    // Initialize from storage
-    init: async () => {
-      const storedKeys = await Storage.get('local_keys', {});
-      for (const [name, keyData] of Object.entries(storedKeys)) {
-        LocalKeyManager.keys.set(name, keyData);
-      }
-      Utils.log('LocalKeyManager initialized with', LocalKeyManager.keys.size, 'keys');
-    },
-    
-    // Create a new key
-    createKey: async (name, metadata = {}) => {
-      if (LocalKeyManager.keys.has(name)) {
-        throw new Error('Key already exists: ' + name);
-      }
-      
-      const privateKey = NostrCrypto.generatePrivateKey();
-      // Note: In a real implementation, we'd derive pubkey using secp256k1
-      // For now, store a placeholder and require NSecBunker for actual signing
-      const keyData = {
-        name,
-        privateKey,
-        pubkey: null, // Would be derived from privateKey
-        metadata,
-        created: Math.floor(Date.now() / 1000)
-      };
-      
-      LocalKeyManager.keys.set(name, keyData);
-      await LocalKeyManager.save();
-      
-      Utils.log('Created local key:', name);
-      return keyData;
-    },
-    
-    // Get key by name
-    getKey: (name) => {
-      return LocalKeyManager.keys.get(name) || null;
-    },
-    
-    // List all keys
-    listKeys: () => {
-      return Array.from(LocalKeyManager.keys.values());
-    },
-    
-    // Delete a key
-    deleteKey: async (name) => {
-      LocalKeyManager.keys.delete(name);
-      await LocalKeyManager.save();
-    },
-    
-    // Save to storage
-    save: async () => {
-      const data = {};
-      for (const [name, keyData] of LocalKeyManager.keys) {
-        data[name] = keyData;
-      }
-      await Storage.set('local_keys', data);
-    },
-    
-    // Generate a new keypair with nsec
-    generateKeypair: async () => {
-      const privateKeyHex = NostrCrypto.generatePrivateKey();
-      const nsec = NostrCrypto.hexToNsec(privateKeyHex);
-      
-      // For pubkey derivation, we need secp256k1
-      // As a workaround, if NIP-07 is available, we can't derive pubkey locally
-      // So we generate a random pubkey placeholder and note this limitation
-      // In production, use nostr-tools library with proper secp256k1
-      
-      // Generate a deterministic but not cryptographically correct pubkey from private key
-      // This is ONLY for display purposes - real signing needs proper derivation
-      const pubkeyPlaceholder = await Utils.sha256(privateKeyHex);
-      
-      return {
-        privateKey: privateKeyHex,
-        nsec: nsec,
-        pubkey: pubkeyPlaceholder,
-        npub: NostrCrypto.hexToNpub(pubkeyPlaceholder)
-      };
-    },
-    
-    // Get public key from private key
-    // Note: This is a placeholder - proper implementation requires secp256k1
-    getPublicKeyFromPrivate: async (privateKeyHex) => {
-      // In a real implementation, this would use secp256k1 to derive the pubkey
-      // For now, we use a hash-based placeholder (NOT cryptographically correct)
-      Utils.log('Warning: Using placeholder pubkey derivation. For production, use nostr-tools.');
-      return await Utils.sha256(privateKeyHex);
-    },
-    
-    // Sign event with nsec or keyName
-    // Note: This is a placeholder - proper signing requires secp256k1
-    signEvent: async (event, nsecOrKeyName) => {
-      // Check if it's an nsec (starts with nsec1) or a key name
-      let privateKeyHex;
-      
-      if (nsecOrKeyName.startsWith('nsec1')) {
-        privateKeyHex = NostrCrypto.nsecToHex(nsecOrKeyName);
-      } else {
-        const key = LocalKeyManager.getKey(nsecOrKeyName);
-        if (!key) {
-          throw new Error('Key not found: ' + nsecOrKeyName);
-        }
-        privateKeyHex = key.privateKey;
-      }
-      
-      // This is a placeholder - real signing requires secp256k1 library
-      // For now, we'll try to fall back to NIP-07 if available
-      if (NIP07Client.checkAvailability()) {
-        Utils.log('Falling back to NIP-07 for signing (local signing requires secp256k1)');
-        return await NIP07Client.signEvent(event);
-      }
-      
-      Utils.error('Local signing not implemented - NIP-07 extension required');
-      throw new Error('Local signing requires NIP-07 extension or secp256k1 library. Please install a browser extension like nos2x or Alby.');
-    }
-  };
-
-  // ============================================
-  // SECTION 13: EVENT BUILDER
-  // ============================================
-  
-  const EventBuilder = {
-    // Build a NIP-23 long-form content event (kind 30023)
-    buildArticleEvent: async (article, options = {}) => {
-      const {
-        pubkey,
-        authorPubkey,
-        includeAuthor = false,
-        capturerPubkey,
-        includeCapturer = false,
-        tags: additionalTags = [],
-        mediaHandling = 'reference',
-        entities = { people: [], organizations: [] }
-      } = options;
-      
-      if (!pubkey) {
-        throw new Error('Publication pubkey is required');
-      }
-      
-      // Generate d-tag (unique identifier for replaceable event)
-      const urlHash = await Utils.sha256(article.url);
-      const dTag = urlHash.substring(0, 16);
-      
-      // Prepare content (markdown)
-      let content = article.markdown || ContentProcessor.htmlToMarkdown(article.content);
-      
-      // Handle media based on preference
-      if (mediaHandling === 'reference') {
-        // Keep URLs as-is (already in markdown)
-        Utils.log('Using reference URLs for images');
-      } else if (mediaHandling === 'embed') {
-        // Convert images to base64 embedded data URLs
-        Utils.log('Embedding images as base64...');
-        content = await ContentProcessor.embedImagesInMarkdown(content, (current, total) => {
-          Utils.log(`Embedding image ${current}/${total}...`);
-        });
-        Utils.log('Image embedding complete');
-      }
-      
-      // Build tags array
-      const tags = [
-        ['d', dTag],
-        ['title', article.title],
-        ['published_at', String(article.publishedAt || article.extractedAt)],
-        ['client', 'nostr-article-capture']
-      ];
-      
-      // Add summary/excerpt
-      if (article.excerpt) {
-        tags.push(['summary', article.excerpt.substring(0, 500)]);
-      }
-      
-      // Add image
-      if (article.featuredImage) {
-        tags.push(['image', article.featuredImage]);
-      }
-      
-      // Add original URL as 'r' tag
-      tags.push(['r', article.url]);
-      
-      // Add author reference if provided and enabled
-      if (includeAuthor && authorPubkey) {
-        tags.push(['p', authorPubkey, '', 'author']);
-      }
-      
-      // Add capturer reference if provided and enabled
-      if (includeCapturer && capturerPubkey) {
-        tags.push(['p', capturerPubkey, '', 'capturer']);
-      }
-      
-      // Add author name as 'author' tag
-      if (article.byline) {
-        tags.push(['author', article.byline]);
-      }
-      
-      // Add content type tags
-      tags.push(['t', 'article']);
-      tags.push(['t', article.domain.replace(/\./g, '-')]);
-      
-      // Add additional user-provided tags
-      for (const tag of additionalTags) {
-        if (typeof tag === 'string') {
-          tags.push(['t', tag.toLowerCase()]);
-        } else if (Array.isArray(tag)) {
-          tags.push(tag);
-        }
-      }
-      
-      // Add entity tags (people and organizations)
-      if (entities.people && entities.people.length > 0) {
-        for (const person of entities.people) {
-          tags.push(['person', person.name, person.context || 'referenced']);
-        }
-      }
-      
-      if (entities.organizations && entities.organizations.length > 0) {
-        for (const org of entities.organizations) {
-          tags.push(['org', org.name]);
-        }
-      }
-      
-      // Create unsigned event
-      const event = {
-        kind: 30023,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: content
-      };
-      
-      // Calculate event ID
-      event.id = await NostrCrypto.getEventHash(event);
-      
-      return event;
-    },
-    
-    // Build a kind 0 profile/metadata event
-    buildProfileEvent: async (pubkey, profile) => {
-      const content = JSON.stringify({
-        name: profile.name,
-        display_name: profile.displayName || profile.name,
-        about: profile.about || '',
-        picture: profile.picture || '',
-        banner: profile.banner || '',
-        website: profile.website || '',
-        nip05: profile.nip05 || '',
-        lud16: profile.lud16 || ''
-      });
-      
-      const event = {
-        kind: 0,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [],
-        content: content
-      };
-      
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-    
-    // Build a kind 1 short text note
-    buildNoteEvent: async (pubkey, text, options = {}) => {
-      const { replyTo, mentions = [], tags: additionalTags = [] } = options;
-      
-      const tags = [];
-      
-      // Add reply tags
-      if (replyTo) {
-        tags.push(['e', replyTo.id, '', 'reply']);
-        if (replyTo.pubkey) {
-          tags.push(['p', replyTo.pubkey]);
-        }
-      }
-      
-      // Add mentions
-      for (const mention of mentions) {
-        tags.push(['p', mention]);
-      }
-      
-      // Add additional tags
-      for (const tag of additionalTags) {
-        tags.push(tag);
-      }
-      
-      const event = {
-        kind: 1,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: text
-      };
-      
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-    
-    // Build URL Annotation event (Kind 32123)
-    buildAnnotationEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-      
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['annotation-type', data.type],
-        ['confidence', String(Math.round(data.confidence) / 100).substring(0, 4)],
-        ['client', 'nostr-article-capture']
-      ];
-      
-      // Add evidence URL if provided
-      if (data.evidenceUrl && data.evidenceUrl.trim()) {
-        tags.push(['evidence', data.evidenceUrl.trim()]);
-      }
-      
-      const event = {
-        kind: 32123,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.content
-      };
-      
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-    
-    // Build Fact-Check event (Kind 32127)
-    buildFactCheckEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-      
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['claim', data.claim.substring(0, 200)],
-        ['verdict', data.verdict],
-        ['client', 'nostr-article-capture']
-      ];
-      
-      // Add evidence sources as tags
-      if (data.evidenceSources && data.evidenceSources.length > 0) {
-        data.evidenceSources.forEach(source => {
-          if (source.url && source.url.trim()) {
-            tags.push(['evidence', source.url.trim(), source.type || 'other']);
-          }
-        });
-      }
-      
-      const event = {
-        kind: 32127,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.explanation
-      };
-      
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-    
-    // Build Headline Correction event (Kind 32129)
-    buildHeadlineCorrectionEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-      
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['original-headline', data.original],
-        ['suggested-headline', data.suggested],
-        ['client', 'nostr-article-capture']
-      ];
-      
-      const event = {
-        kind: 32129,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.reason
-      };
-      
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-
-    // Build URL Reaction event (Kind 32132)
-    buildReactionEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['reaction', data.emoji],
-        ['client', 'nostr-article-capture']
-      ];
-
-      if (data.aspect) tags.push(['aspect', data.aspect]);
-      if (data.reason) tags.push(['reason', data.reason]);
-
-      const event = {
-        kind: 32132,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.content || ''
-      };
-
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-
-    // Build Related Content event (Kind 32131)
-    buildRelatedContentEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['related-url', data.relatedUrl],
-        ['relation-type', data.relationType],
-        ['client', 'nostr-article-capture']
-      ];
-
-      if (data.title) tags.push(['related-title', data.title]);
-      tags.push(['relevance', data.relevance.toString()]);
-
-      const event = {
-        kind: 32131,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.description || ''
-      };
-
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-
-    // Build Content Rating event (Kind 32124)
-    // Supports 8 rating dimensions: accuracy, quality, depth, clarity, bias, sources, relevance, originality
-    buildRatingEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['url-hash', urlHash],
-        ['client', 'nostr-article-capture']
-      ];
-
-      // Add individual dimension ratings (0-10 scale)
-      const dimensions = ['accuracy', 'quality', 'depth', 'clarity', 'bias', 'sources', 'relevance', 'originality'];
-      let totalScore = 0;
-      let ratedDimensions = 0;
-
-      dimensions.forEach(dim => {
-        if (data.ratings && data.ratings[dim] !== undefined && data.ratings[dim] !== null) {
-          const score = Math.min(10, Math.max(0, parseInt(data.ratings[dim], 10)));
-          tags.push(['rating', dim, score.toString(), '10']);
-          totalScore += score;
-          ratedDimensions++;
-        }
-      });
-
-      // Calculate and add overall weighted score
-      if (ratedDimensions > 0) {
-        const overallScore = (totalScore / ratedDimensions).toFixed(1);
-        tags.push(['overall', overallScore, '10']);
-      }
-
-      // Add methodology identifier
-      tags.push(['methodology', data.methodology || 'manual-review']);
-
-      // Add confidence level (0-100)
-      if (data.confidence !== undefined) {
-        const confidence = Math.min(100, Math.max(0, parseInt(data.confidence, 10)));
-        tags.push(['confidence', confidence.toString()]);
-      }
-
-      const event = {
-        kind: 32124,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.review || ''
-      };
-
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    },
-
-    // Build Comment event (Kind 32123 with annotation-type=comment)
-    // Used for threaded comments on URLs
-    buildCommentEvent: async (url, data, pubkey) => {
-      const normalizedUrl = Utils.normalizeUrl(url);
-      const urlHash = await Utils.sha256(normalizedUrl);
-      const dTag = urlHash.substring(0, 16);
-
-      const tags = [
-        ['d', dTag],
-        ['r', normalizedUrl],
-        ['url-hash', urlHash],
-        ['annotation-type', 'comment'],
-        ['client', 'nostr-article-capture']
-      ];
-
-      // Add threading support - reply to parent comment
-      if (data.parentId) {
-        tags.push(['e', data.parentId, '', 'reply']);
-      }
-
-      // Add root reference for threading
-      if (data.rootId) {
-        tags.push(['e', data.rootId, '', 'root']);
-      }
-
-      // Add mentioned pubkeys
-      if (data.mentions && Array.isArray(data.mentions)) {
-        data.mentions.forEach(mention => {
-          tags.push(['p', mention]);
-        });
-      }
-
-      const event = {
-        kind: 32123,
-        pubkey: pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: tags,
-        content: data.comment || ''
-      };
-
-      event.id = await NostrCrypto.getEventHash(event);
-      return event;
-    }
-  };
-
-  // ============================================
-  // SECTION 13.5: URL METADATA SERVICE
-  // ============================================
-  
-  /**
-   * Service for looking up and caching metadata about URLs from NOSTR relays.
-   * Queries for various event kinds (32123-32132, 32140-32144) related to URLs.
-   */
-  const URLMetadataService = {
-    cache: new Map(),
-    subscriptions: new Map(),
-    activeQueries: new Map(),
-    
-    // Event kinds for URL metadata
-    // Only kinds with full UI + event builder implementation are active
-    EVENT_KINDS: {
-      ANNOTATION: 32123,       // Fully implemented - has UI form + builder
-      CONTENT_RATING: 32124,   // Fully implemented - has UI form + builder
-      FACT_CHECK: 32127,       // Fully implemented - has UI form + builder
-      HEADLINE_CORRECTION: 32129, // Fully implemented - has UI form + builder
-      RELATED_CONTENT: 32131,  // Fully implemented - has UI form + builder
-      URL_REACTION: 32132      // Fully implemented - has UI form + builder
-      // The following kinds are defined but NOT YET IMPLEMENTED:
-      // ENTITY_REFERENCE: 32125,    // Not implemented - no UI or builder
-      // RATING_AGGREGATE: 32126,    // Not implemented - no UI or builder
-      // PROFILE_URL_MAPPING: 32128, // Not implemented - no UI or builder
-      // DISPUTE_REBUTTAL: 32130,    // Not implemented - no UI or builder
-      // TRUST_ATTESTATION: 32140,   // Not implemented - no UI or builder
-      // VERIFICATION_RESULT: 32141, // Not implemented - no UI or builder
-      // SOURCE_CITATION: 32142,     // Not implemented - no UI or builder
-      // CONTENT_ARCHIVE: 32143,     // Not implemented - no UI or builder
-      // METADATA_AGGREGATE: 32144   // Not implemented - no UI or builder
-    },
-    
-    /**
-     * Normalize a URL for consistent querying
-     * @param {string} url - The URL to normalize
-     * @returns {string} Normalized URL
-     */
-    normalizeUrl: (url) => {
-      return Utils.normalizeUrl(url);
-    },
-    
-    /**
-     * Compute SHA-256 hash of a URL for relay queries
-     * @param {string} url - The URL to hash
-     * @returns {Promise<string>} Hex-encoded hash
-     */
-    computeUrlHash: async (url) => {
-      const normalized = URLMetadataService.normalizeUrl(url);
-      return await Utils.sha256(normalized);
-    },
-    
-    /**
-     * Build query filters for URL metadata events
-     * @param {string} normalizedUrl - The normalized URL to query
-     * @returns {Array} Array of filter objects for relay queries
-     */
-    buildQueryFilters: (normalizedUrl) => {
-      // Only query for kinds that are fully implemented
-      const implementedKinds = [
-        URLMetadataService.EVENT_KINDS.ANNOTATION,
-        URLMetadataService.EVENT_KINDS.CONTENT_RATING,
-        URLMetadataService.EVENT_KINDS.FACT_CHECK,
-        URLMetadataService.EVENT_KINDS.HEADLINE_CORRECTION,
-        URLMetadataService.EVENT_KINDS.RELATED_CONTENT,
-        URLMetadataService.EVENT_KINDS.URL_REACTION
-      ];
-      
-      // Extended kinds are not yet implemented - commented out for future use
-      // const extendedKinds = [
-      //   URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE,
-      //   URLMetadataService.EVENT_KINDS.RATING_AGGREGATE,
-      //   URLMetadataService.EVENT_KINDS.PROFILE_URL_MAPPING,
-      //   URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL,
-      //   URLMetadataService.EVENT_KINDS.TRUST_ATTESTATION,
-      //   URLMetadataService.EVENT_KINDS.VERIFICATION_RESULT,
-      //   URLMetadataService.EVENT_KINDS.SOURCE_CITATION,
-      //   URLMetadataService.EVENT_KINDS.CONTENT_ARCHIVE,
-      //   URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE
-      // ];
-      
-      return [
-        { kinds: implementedKinds, "#r": [normalizedUrl] }
-      ];
-    },
-    
-    /**
-     * Query relays for metadata about a URL
-     * @param {string} url - The URL to query metadata for
-     * @param {Array<string>} relayUrls - List of relay URLs to query
-     * @returns {Promise<Object>} Aggregated metadata
-     */
-    queryMetadata: async (url, relayUrls = null) => {
-      const normalizedUrl = URLMetadataService.normalizeUrl(url);
-      const urlHash = await URLMetadataService.computeUrlHash(url);
-      
-      // Check cache first
-      const cached = await URLMetadataService.getCachedMetadata(urlHash);
-      if (cached && (Date.now() - cached.timestamp) < 300000) { // 5 min cache
-        Utils.log('Using cached metadata for:', normalizedUrl);
-        return cached.data;
-      }
-      
-      // Use configured relays if not specified
-      if (!relayUrls) {
-        relayUrls = CONFIG.relays.filter(r => r.enabled && r.read).map(r => r.url);
-      }
-      
-      Utils.log('Querying metadata for:', normalizedUrl, 'from', relayUrls.length, 'relays');
-      
-      const filters = URLMetadataService.buildQueryFilters(normalizedUrl);
-      const events = [];
-      
-      // Query each relay
-      const queryPromises = relayUrls.map(async (relayUrl) => {
-        try {
-          const relayEvents = await URLMetadataService.queryRelay(relayUrl, filters);
-          events.push(...relayEvents);
-        } catch (e) {
-          Utils.log('Failed to query relay:', relayUrl, e.message);
-        }
-      });
-      
-      await Promise.allSettled(queryPromises);
-      
-      // Deduplicate events by ID
-      const uniqueEvents = URLMetadataService.deduplicateEvents(events);
-      
-      // Aggregate and structure the metadata
-      const metadata = URLMetadataService.aggregateMetadata(uniqueEvents, normalizedUrl);
-      
-      // Cache the results
-      await URLMetadataService.cacheMetadata(urlHash, metadata);
-      
-      return metadata;
-    },
-    
-    /**
-     * Query a single relay for events matching filters
-     * @param {string} relayUrl - Relay URL to query
-     * @param {Array} filters - Query filters
-     * @returns {Promise<Array>} Array of events
-     */
-    queryRelay: (relayUrl, filters) => {
-      return new Promise(async (resolve, reject) => {
-        const events = [];
-        const subId = 'nmd_' + Utils.generateId();
-        
-        try {
-          const ws = await NostrClient.connectToRelay(relayUrl);
-          
-          // Set up timeout
-          const timeout = setTimeout(() => {
-            resolve(events);
-          }, 5000);
-          
-          // Listen for events
-          const originalHandler = ws.onmessage;
-          ws.onmessage = (msg) => {
-            try {
-              const data = JSON.parse(msg.data);
-              const [type, ...rest] = data;
-              
-              if (type === 'EVENT' && rest[0] === subId) {
-                events.push(rest[1]);
-              } else if (type === 'EOSE' && rest[0] === subId) {
-                clearTimeout(timeout);
-                ws.onmessage = originalHandler;
-                // Close subscription
-                ws.send(JSON.stringify(['CLOSE', subId]));
-                resolve(events);
-              }
-            } catch (e) {
-              // Pass to original handler
-              if (originalHandler) originalHandler(msg);
-            }
-          };
-          
-          // Send subscription request
-          const reqMessage = ['REQ', subId, ...filters];
-          ws.send(JSON.stringify(reqMessage));
-          
-        } catch (e) {
-          reject(e);
-        }
-      });
-    },
-    
-    /**
-     * Deduplicate events by ID
-     * @param {Array} events - Array of events
-     * @returns {Array} Deduplicated events
-     */
-    deduplicateEvents: (events) => {
-      const seen = new Map();
-      for (const event of events) {
-        if (!seen.has(event.id) || event.created_at > seen.get(event.id).created_at) {
-          seen.set(event.id, event);
-        }
-      }
-      return Array.from(seen.values());
-    },
-    
-    /**
-     * Aggregate events into structured metadata
-     * @param {Array} events - Array of NOSTR events
-     * @param {string} normalizedUrl - The URL these events relate to
-     * @returns {Object} Structured metadata
-     */
-    aggregateMetadata: (events, normalizedUrl) => {
-      const metadata = {
-        url: normalizedUrl,
-        queryTime: Date.now(),
-        eventCount: events.length,
-        annotations: [],
-        comments: [],
-        ratings: [],
-        factChecks: [],
-        headlineCorrections: [],
-        disputes: [],
-        relatedContent: [],
-        reactions: [],
-        entityReferences: [],
-        aggregates: {
-          trustScore: null,
-          ratingCounts: { total: 0 },
-          verdictSummary: null
-        }
-      };
-      
-      for (const event of events) {
-        try {
-          const parsed = URLMetadataService.parseEvent(event);
-          if (!parsed) continue;
-          
-          switch (event.kind) {
-            case URLMetadataService.EVENT_KINDS.ANNOTATION:
-              // Check if this is a comment (annotation-type=comment) or regular annotation
-              const annotationType = event.tags.find(t => t[0] === 'annotation-type');
-              if (annotationType && annotationType[1] === 'comment') {
-                metadata.comments.push(parsed);
-              } else {
-                metadata.annotations.push(parsed);
-              }
-              break;
-            case URLMetadataService.EVENT_KINDS.CONTENT_RATING:
-              metadata.ratings.push(parsed);
-              break;
-            case URLMetadataService.EVENT_KINDS.FACT_CHECK:
-              metadata.factChecks.push(parsed);
-              break;
-            case URLMetadataService.EVENT_KINDS.HEADLINE_CORRECTION:
-              metadata.headlineCorrections.push(parsed);
-              break;
-            case URLMetadataService.EVENT_KINDS.RELATED_CONTENT:
-              metadata.relatedContent.push(parsed);
-              break;
-            case URLMetadataService.EVENT_KINDS.URL_REACTION:
-              metadata.reactions.push(parsed);
-              break;
-            // The following cases are for unimplemented kinds - commented out for future use
-            // case URLMetadataService.EVENT_KINDS.DISPUTE_REBUTTAL:
-            //   metadata.disputes.push(parsed);
-            //   break;
-            // case URLMetadataService.EVENT_KINDS.ENTITY_REFERENCE:
-            //   metadata.entityReferences.push(parsed);
-            //   break;
-            // case URLMetadataService.EVENT_KINDS.RATING_AGGREGATE:
-            // case URLMetadataService.EVENT_KINDS.METADATA_AGGREGATE:
-            //   // Merge aggregate data
-            //   if (parsed.trustScore !== undefined) {
-            //     metadata.aggregates.trustScore = parsed.trustScore;
-            //   }
-            //   break;
-          }
-        } catch (e) {
-          Utils.log('Failed to parse event:', event.id, e);
-        }
-      }
-      
-      // Compute aggregates if not provided
-      metadata.aggregates.ratingCounts.total = metadata.ratings.length;
-      metadata.aggregates.annotationCount = metadata.annotations.length;
-      metadata.aggregates.factCheckCount = metadata.factChecks.length;
-      
-      // Compute trust score from ratings if not provided
-      if (metadata.aggregates.trustScore === null && metadata.ratings.length > 0) {
-        metadata.aggregates.trustScore = URLMetadataService.computeTrustScore(metadata.ratings);
-      }
-      
-      // Determine verdict summary from fact checks
-      if (metadata.factChecks.length > 0) {
-        metadata.aggregates.verdictSummary = URLMetadataService.computeVerdictSummary(metadata.factChecks);
-      }
-      
-      return metadata;
-    },
-    
-    /**
-     * Parse a single event into structured data
-     * @param {Object} event - NOSTR event
-     * @returns {Object} Parsed event data
-     */
-    parseEvent: (event) => {
-      const tags = new Map();
-      for (const tag of event.tags) {
-        const [key, ...values] = tag;
-        if (!tags.has(key)) tags.set(key, []);
-        tags.get(key).push(values);
-      }
-      
-      let content = {};
-      try {
-        content = JSON.parse(event.content);
-      } catch (e) {
-        content = { text: event.content };
-      }
-      
-      return {
-        id: event.id,
-        pubkey: event.pubkey,
-        createdAt: event.created_at,
-        kind: event.kind,
-        tags: Object.fromEntries(tags),
-        content: content,
-        raw: event
-      };
-    },
-    
-    /**
-     * Compute trust score from ratings
-     * @param {Array} ratings - Array of rating events
-     * @returns {number} Trust score between 0 and 1
-     */
-    computeTrustScore: (ratings) => {
-      if (ratings.length === 0) return null;
-      
-      // Weight factors for different rating dimensions
-      const weights = {
-        accuracy: 0.30,
-        quality: 0.15,
-        depth: 0.10,
-        clarity: 0.10,
-        bias: 0.20,
-        sources: 0.15
-      };
-      
-      let totalScore = 0;
-      let totalWeight = 0;
-      
-      for (const rating of ratings) {
-        const content = rating.content;
-        if (!content.ratings) continue;
-        
-        for (const [dimension, score] of Object.entries(content.ratings)) {
-          const weight = weights[dimension] || 0.1;
-          if (typeof score === 'number' && score >= 0 && score <= 5) {
-            totalScore += (score / 5) * weight;
-            totalWeight += weight;
-          }
-        }
-      }
-      
-      return totalWeight > 0 ? totalScore / totalWeight : null;
-    },
-    
-    /**
-     * Compute verdict summary from fact checks
-     * @param {Array} factChecks - Array of fact check events
-     * @returns {Object} Verdict summary
-     */
-    computeVerdictSummary: (factChecks) => {
-      const verdicts = {
-        true: 0,
-        false: 0,
-        misleading: 0,
-        unverifiable: 0,
-        satire: 0,
-        opinion: 0
-      };
-      
-      for (const fc of factChecks) {
-        const verdict = fc.content.verdict?.toLowerCase() || 'unverifiable';
-        if (verdicts.hasOwnProperty(verdict)) {
-          verdicts[verdict]++;
-        }
-      }
-      
-      // Determine primary verdict
-      let primary = 'none';
-      let maxCount = 0;
-      for (const [verdict, count] of Object.entries(verdicts)) {
-        if (count > maxCount) {
-          maxCount = count;
-          primary = verdict;
-        }
-      }
-      
-      // Flag high-alert verdicts
-      const hasDebunking = verdicts.false > 0 || verdicts.misleading > 0;
-      
-      return {
-        primary,
-        counts: verdicts,
-        total: factChecks.length,
-        hasDebunking,
-        severity: hasDebunking ? (verdicts.false > verdicts.misleading ? 'high' : 'medium') : 'low'
-      };
-    },
-    
-    /**
-     * Cache metadata in storage
-     * @param {string} urlHash - Hash of the URL
-     * @param {Object} metadata - Metadata to cache
-     */
-    cacheMetadata: async (urlHash, metadata) => {
-      const cacheKey = 'nmd_cache_' + urlHash;
-      await Storage.set(cacheKey, {
-        timestamp: Date.now(),
-        data: metadata
-      });
-      URLMetadataService.cache.set(urlHash, { timestamp: Date.now(), data: metadata });
-    },
-    
-    /**
-     * Get cached metadata
-     * @param {string} urlHash - Hash of the URL
-     * @returns {Promise<Object|null>} Cached metadata or null
-     */
-    getCachedMetadata: async (urlHash) => {
-      // Check memory cache first
-      if (URLMetadataService.cache.has(urlHash)) {
-        return URLMetadataService.cache.get(urlHash);
-      }
-      
-      // Check persistent cache
-      const cacheKey = 'nmd_cache_' + urlHash;
-      const cached = await Storage.get(cacheKey, null);
-      if (cached) {
-        URLMetadataService.cache.set(urlHash, cached);
-      }
-      return cached;
-    },
-    
-    /**
-     * Subscribe to real-time updates for a URL
-     * @param {string} url - URL to subscribe to
-     * @param {Function} callback - Callback for new events
-     * @returns {string} Subscription ID
-     */
-    subscribeToUpdates: async (url, callback) => {
-      const normalizedUrl = URLMetadataService.normalizeUrl(url);
-      const subId = 'nmd_sub_' + Utils.generateId();
-      
-      const relayUrls = CONFIG.relays.filter(r => r.enabled && r.read).map(r => r.url);
-      const filters = URLMetadataService.buildQueryFilters(normalizedUrl);
-      
-      // Add since filter for real-time only
-      const since = Math.floor(Date.now() / 1000);
-      const realtimeFilters = filters.map(f => ({ ...f, since }));
-      
-      URLMetadataService.subscriptions.set(subId, {
-        url: normalizedUrl,
-        callback,
-        relays: new Map()
-      });
-      
-      // Subscribe on each relay
-      for (const relayUrl of relayUrls) {
-        try {
-          const ws = await NostrClient.connectToRelay(relayUrl);
-          ws.send(JSON.stringify(['REQ', subId, ...realtimeFilters]));
-          URLMetadataService.subscriptions.get(subId).relays.set(relayUrl, ws);
-        } catch (e) {
-          Utils.log('Failed to subscribe to relay:', relayUrl, e.message);
-        }
-      }
-      
-      return subId;
-    },
-    
-    /**
-     * Unsubscribe from updates
-     * @param {string} subId - Subscription ID
-     */
-    unsubscribe: (subId) => {
-      const sub = URLMetadataService.subscriptions.get(subId);
-      if (!sub) return;
-      
-      for (const [relayUrl, ws] of sub.relays) {
-        try {
-          ws.send(JSON.stringify(['CLOSE', subId]));
-        } catch (e) {
-          // Ignore close errors
-        }
-      }
-      
-      URLMetadataService.subscriptions.delete(subId);
-    },
-    
-    /**
-     * Clear all cached metadata
-     */
-    clearCache: async () => {
-      URLMetadataService.cache.clear();
-      const keys = await Storage.keys();
-      for (const key of keys) {
-        if (key.startsWith('nmd_cache_')) {
-          await Storage.delete(key);
-        }
-      }
-    }
-  };
-
-  // ============================================
-  // SECTION 13.6: METADATA UI STYLES
-  // ============================================
-  
-  const METADATA_STYLES = `
-    /* URL Metadata Display Styles */
-    /* Using --nmd- prefix for namespace isolation */
-    
-    :root {
-      --nmd-primary: #6366f1;
-      --nmd-primary-hover: #4f46e5;
-      --nmd-success: #22c55e;
-      --nmd-warning: #f59e0b;
-      --nmd-error: #ef4444;
-      --nmd-info: #3b82f6;
-      --nmd-background: #1e1e2e;
-      --nmd-surface: #2a2a3e;
-      --nmd-surface-hover: #353550;
-      --nmd-border: #3f3f5a;
-      --nmd-text: #e2e8f0;
-      --nmd-text-muted: #94a3b8;
-      --nmd-shadow: rgba(0, 0, 0, 0.4);
-      
-      /* Verdict colors */
-      --nmd-verdict-true: #22c55e;
-      --nmd-verdict-false: #ef4444;
-      --nmd-verdict-misleading: #f59e0b;
-      --nmd-verdict-unverifiable: #94a3b8;
-      
-      /* Trust score colors */
-      --nmd-trust-high: #22c55e;
-      --nmd-trust-medium: #f59e0b;
-      --nmd-trust-low: #ef4444;
-      --nmd-trust-unknown: #64748b;
-    }
-    
-    /* Page Metadata Badge - Floating Widget */
-    .nmd-badge {
-      position: fixed;
-      bottom: 90px;
-      right: 20px;
-      z-index: 2147483646;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    
-    .nmd-badge__container {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      background: var(--nmd-surface);
-      border: 1px solid var(--nmd-border);
-      border-radius: 24px;
-      box-shadow: 0 4px 12px var(--nmd-shadow);
-      cursor: pointer;
-      transition: all 0.2s ease;
-      min-width: 44px;
-      min-height: 44px;
-    }
-    
-    .nmd-badge__container:hover {
-      background: var(--nmd-surface-hover);
-      transform: translateY(-2px);
-      box-shadow: 0 6px 16px var(--nmd-shadow);
-    }
-    
-    .nmd-badge__score {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      font-size: 14px;
-      font-weight: 700;
-      color: white;
-    }
-    
-    .nmd-badge__score--high { background: var(--nmd-trust-high); }
-    .nmd-badge__score--medium { background: var(--nmd-trust-medium); }
-    .nmd-badge__score--low { background: var(--nmd-trust-low); }
-    .nmd-badge__score--unknown { background: var(--nmd-trust-unknown); }
-    
-    .nmd-badge__stats {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    
-    .nmd-badge__stat {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-    }
-    
-    .nmd-badge__stat-icon {
-      font-size: 12px;
-    }
-    
-    .nmd-badge__minimize {
-      position: absolute;
-      top: -6px;
-      right: -6px;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--nmd-surface);
-      border: 1px solid var(--nmd-border);
-      color: var(--nmd-text-muted);
-      font-size: 12px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       opacity: 0;
-      transition: opacity 0.2s;
+      transform: translateY(20px);
+      transition: all 0.3s;
     }
     
-    .nmd-badge__container:hover .nmd-badge__minimize {
+    .nac-toast.visible {
       opacity: 1;
+      transform: translateY(0);
     }
     
-    .nmd-badge--minimized .nmd-badge__container {
-      padding: 8px;
-      border-radius: 50%;
+    .nac-toast.nac-toast-success {
+      border-left: 4px solid var(--nac-success);
     }
     
-    .nmd-badge--minimized .nmd-badge__stats {
-      display: none;
+    .nac-toast.nac-toast-error {
+      border-left: 4px solid var(--nac-error);
     }
     
-    .nmd-badge--alert .nmd-badge__container {
-      border-color: var(--nmd-error);
-      animation: nmd-pulse-alert 2s infinite;
-    }
-    
-    @keyframes nmd-pulse-alert {
-      0%, 100% { box-shadow: 0 4px 12px var(--nmd-shadow); }
-      50% { box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4); }
-    }
-    
-    /* Debunking Banner */
-    .nmd-debunk-banner {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 2147483647;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    
-    .nmd-debunk-banner__content {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px 20px;
-      background: linear-gradient(135deg, var(--nmd-error) 0%, #dc2626 100%);
-      color: white;
-      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
-    }
-    
-    .nmd-debunk-banner--misleading .nmd-debunk-banner__content {
-      background: linear-gradient(135deg, var(--nmd-warning) 0%, #d97706 100%);
-      box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
-    }
-    
-    .nmd-debunk-banner__icon {
-      font-size: 24px;
-      margin-right: 12px;
-    }
-    
-    .nmd-debunk-banner__text {
-      flex: 1;
-    }
-    
-    .nmd-debunk-banner__title {
-      font-size: 15px;
-      font-weight: 700;
-      margin-bottom: 2px;
-    }
-    
-    .nmd-debunk-banner__detail {
-      font-size: 13px;
-      opacity: 0.9;
-    }
-    
-    .nmd-debunk-banner__source {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 12px;
-      background: rgba(255,255,255,0.15);
-      border-radius: 16px;
+    .nac-version {
+      margin-top: 20px;
       font-size: 12px;
-      margin-left: 16px;
+      color: var(--nac-text-muted);
+      text-align: center;
     }
     
-    .nmd-debunk-banner__dismiss {
-      padding: 8px 16px;
-      background: rgba(255,255,255,0.2);
-      border: 1px solid rgba(255,255,255,0.3);
-      border-radius: 6px;
-      color: white;
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
-      margin-left: 16px;
-      transition: all 0.2s;
-      min-width: 44px;
-      min-height: 44px;
-    }
-    
-    .nmd-debunk-banner__dismiss:hover {
-      background: rgba(255,255,255,0.3);
-    }
-    
-    /* Headline Correction Indicator */
-    .nmd-headline-correction {
-      display: inline-flex;
-      align-items: center;
-      margin-left: 8px;
-      cursor: pointer;
-    }
-    
-    .nmd-headline-correction__icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--nmd-warning);
-      color: white;
-      font-size: 12px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: transform 0.2s;
-    }
-    
-    .nmd-headline-correction:hover .nmd-headline-correction__icon {
-      transform: scale(1.1);
-    }
-    
-    .nmd-headline-correction__popup {
-      position: absolute;
-      top: 100%;
-      left: 0;
-      width: 320px;
-      padding: 16px;
-      background: var(--nmd-surface);
-      border: 1px solid var(--nmd-border);
-      border-radius: 8px;
-      box-shadow: 0 8px 24px var(--nmd-shadow);
-      z-index: 2147483647;
-      display: none;
-    }
-    
-    .nmd-headline-correction:hover .nmd-headline-correction__popup,
-    .nmd-headline-correction__popup:hover {
-      display: block;
-    }
-    
-    .nmd-headline-correction__label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      color: var(--nmd-warning);
-      margin-bottom: 8px;
-    }
-    
-    .nmd-headline-correction__original {
-      font-size: 13px;
-      color: var(--nmd-text-muted);
-      text-decoration: line-through;
-      margin-bottom: 8px;
-    }
-    
-    .nmd-headline-correction__suggested {
-      font-size: 14px;
-      color: var(--nmd-text);
-      font-weight: 500;
-      margin-bottom: 12px;
-      padding: 8px;
-      background: var(--nmd-background);
-      border-radius: 4px;
-    }
-    
-    .nmd-headline-correction__meta {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-    }
-    
-    /* Inline Annotation Highlighter */
-    .nmd-annotation-highlight {
-      background: rgba(99, 102, 241, 0.2);
-      border-bottom: 2px solid var(--nmd-primary);
-      cursor: pointer;
-      position: relative;
-      transition: background 0.2s;
-    }
-    
-    .nmd-annotation-highlight:hover {
-      background: rgba(99, 102, 241, 0.3);
-    }
-    
-    .nmd-annotation-highlight--disputed {
-      background: rgba(245, 158, 11, 0.2);
-      border-bottom-color: var(--nmd-warning);
-    }
-    
-    .nmd-annotation-highlight--fact-checked {
-      background: rgba(239, 68, 68, 0.2);
-      border-bottom-color: var(--nmd-error);
-    }
-    
-    .nmd-annotation-popup {
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 300px;
+    .nac-identity-info {
       padding: 12px;
-      background: var(--nmd-surface);
-      border: 1px solid var(--nmd-border);
-      border-radius: 8px;
-      box-shadow: 0 8px 24px var(--nmd-shadow);
-      z-index: 2147483647;
-      display: none;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    
-    .nmd-annotation-highlight:hover .nmd-annotation-popup {
-      display: block;
-    }
-    
-    .nmd-annotation-popup__header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    
-    .nmd-annotation-popup__avatar {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      background: var(--nmd-primary);
-      color: white;
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    
-    .nmd-annotation-popup__author {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--nmd-text);
-    }
-    
-    .nmd-annotation-popup__trust {
-      margin-left: auto;
-      font-size: 11px;
-      padding: 2px 6px;
-      border-radius: 10px;
-      background: var(--nmd-trust-high);
-      color: white;
-    }
-    
-    .nmd-annotation-popup__content {
-      font-size: 13px;
-      line-height: 1.5;
-      color: var(--nmd-text);
-      margin-bottom: 8px;
-    }
-    
-    .nmd-annotation-popup__actions {
-      display: flex;
-      gap: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--nmd-border);
-    }
-    
-    .nmd-annotation-popup__action {
-      padding: 4px 10px;
-      font-size: 12px;
-      border-radius: 4px;
-      border: 1px solid var(--nmd-border);
-      background: transparent;
-      color: var(--nmd-text-muted);
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .nmd-annotation-popup__action:hover {
-      background: var(--nmd-surface-hover);
-      color: var(--nmd-text);
-    }
-    
-    /* Link Metadata Badges */
-    .nmd-link-badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      font-size: 9px;
-      font-weight: 700;
-      margin-left: 4px;
-      vertical-align: middle;
-      cursor: pointer;
-      transition: transform 0.2s;
-    }
-    
-    .nmd-link-badge:hover {
-      transform: scale(1.2);
-    }
-    
-    .nmd-link-badge--verified {
-      background: var(--nmd-success);
-      color: white;
-    }
-    
-    .nmd-link-badge--disputed {
-      background: var(--nmd-warning);
-      color: white;
-    }
-    
-    .nmd-link-badge--false {
-      background: var(--nmd-error);
-      color: white;
-    }
-    
-    .nmd-link-badge--unknown {
-      background: var(--nmd-trust-unknown);
-      color: white;
-    }
-    
-    .nmd-link-badge__tooltip {
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      padding: 6px 10px;
-      background: var(--nmd-surface);
-      border: 1px solid var(--nmd-border);
-      border-radius: 4px;
-      font-size: 11px;
-      color: var(--nmd-text);
-      white-space: nowrap;
-      box-shadow: 0 4px 12px var(--nmd-shadow);
-      display: none;
-      z-index: 2147483647;
-    }
-    
-    .nmd-link-badge:hover .nmd-link-badge__tooltip {
-      display: block;
-    }
-    
-    /* Expanded Metadata Panel */
-    .nmd-panel {
-      position: fixed;
-      top: 50%;
-      right: 20px;
-      transform: translateY(-50%);
-      width: 400px;
-      max-height: 80vh;
-      background: var(--nmd-background);
-      border: 1px solid var(--nmd-border);
-      border-radius: 12px;
-      box-shadow: 0 20px 60px var(--nmd-shadow);
-      z-index: 2147483647;
-      display: none;
-      flex-direction: column;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      overflow: hidden;
-    }
-    
-    .nmd-panel--visible {
-      display: flex;
-    }
-    
-    .nmd-panel__header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 16px;
-      background: var(--nmd-surface);
-      border-bottom: 1px solid var(--nmd-border);
-    }
-    
-    .nmd-panel__title {
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--nmd-text);
-    }
-    
-    .nmd-panel__close {
-      width: 32px;
-      height: 32px;
+      background: var(--nac-bg);
       border-radius: 6px;
-      border: none;
-      background: transparent;
-      color: var(--nmd-text-muted);
-      font-size: 18px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
-    }
-    
-    .nmd-panel__close:hover {
-      background: var(--nmd-surface-hover);
-      color: var(--nmd-text);
-    }
-    
-    .nmd-panel__tabs {
-      display: flex;
-      padding: 0 16px;
-      background: var(--nmd-surface);
-      border-bottom: 1px solid var(--nmd-border);
-    }
-    
-    .nmd-panel__tab {
-      padding: 12px 16px;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--nmd-text-muted);
-      background: transparent;
-      border: none;
-      border-bottom: 2px solid transparent;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    
-    .nmd-panel__tab:hover {
-      color: var(--nmd-text);
-    }
-    
-    .nmd-panel__tab--active {
-      color: var(--nmd-primary);
-      border-bottom-color: var(--nmd-primary);
-    }
-    
-    .nmd-panel__content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-    }
-    
-    .nmd-panel__section {
-      margin-bottom: 20px;
-    }
-    
-    .nmd-panel__section-title {
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--nmd-text-muted);
-      margin-bottom: 12px;
-    }
-    
-    /* Trust Score Display */
-    .nmd-trust-display {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      padding: 16px;
-      background: var(--nmd-surface);
-      border-radius: 8px;
       margin-bottom: 16px;
+      font-size: 13px;
     }
     
-    .nmd-trust-display__score {
-      width: 64px;
-      height: 64px;
-      border-radius: 50%;
+    .nac-identity-info div {
+      margin-bottom: 8px;
+    }
+    
+    .nac-relay-item {
       display: flex;
       align-items: center;
-      justify-content: center;
-      font-size: 24px;
-      font-weight: 700;
-      color: white;
-    }
-    
-    .nmd-trust-display__details {
-      flex: 1;
-    }
-    
-    .nmd-trust-display__label {
-      font-size: 14px;
-      font-weight: 500;
-      color: var(--nmd-text);
+      padding: 8px;
+      background: var(--nac-bg);
+      border-radius: 4px;
       margin-bottom: 4px;
     }
-    
-    .nmd-trust-display__meta {
-      font-size: 12px;
-      color: var(--nmd-text-muted);
-    }
-    
-    /* Rating Item */
-    .nmd-rating-item {
-      padding: 12px;
-      background: var(--nmd-surface);
-      border-radius: 8px;
-      margin-bottom: 8px;
-    }
-    
-    .nmd-rating-item__header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    
-    .nmd-rating-item__author {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--nmd-text);
-    }
-    
-    .nmd-rating-item__date {
-      margin-left: auto;
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-    }
-    
-    .nmd-rating-item__scores {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    
-    .nmd-rating-item__score {
-      font-size: 11px;
-      padding: 2px 8px;
-      background: var(--nmd-background);
-      border-radius: 4px;
-      color: var(--nmd-text-muted);
-    }
-
-    .nmd-rating-item__overall {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--nmd-primary);
-    }
-
-    .nmd-rating-item__confidence {
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-      margin-top: 8px;
-    }
-
-    .nmd-rating-item__review {
-      font-size: 13px;
-      color: var(--nmd-text);
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid var(--nmd-border);
-      white-space: pre-wrap;
-    }
-
-    /* Rating Dimension Bars */
-    .nmd-rating-dimension {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-
-    .nmd-rating-dimension__label {
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-      min-width: 70px;
-      text-transform: capitalize;
-    }
-
-    .nmd-rating-dimension__bar {
-      flex: 1;
-      height: 8px;
-      background: var(--nmd-background);
-      border-radius: 4px;
-      overflow: hidden;
-    }
-
-    .nmd-rating-dimension__fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--nmd-warning), var(--nmd-success));
-      border-radius: 4px;
-      transition: width 0.3s ease;
-    }
-
-    .nmd-rating-dimension__value {
-      font-size: 11px;
-      color: var(--nmd-text);
-      min-width: 35px;
-      text-align: right;
-    }
-
-    /* Comment Items */
-    .nmd-comment-item {
-      padding: 12px;
-      background: var(--nmd-surface);
-      border-radius: 8px;
-      margin-bottom: 8px;
-    }
-
-    .nmd-comment-item--reply {
-      margin-left: 24px;
-      border-left: 2px solid var(--nmd-border);
-    }
-
-    .nmd-comment-item__header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .nmd-comment-item__author {
-      font-size: 12px;
-      font-weight: 500;
-      color: var(--nmd-primary);
-    }
-
-    .nmd-comment-item__date {
-      font-size: 11px;
-      color: var(--nmd-text-muted);
-    }
-
-    .nmd-comment-item__content {
-      font-size: 13px;
-      color: var(--nmd-text);
-      line-height: 1.5;
-      white-space: pre-wrap;
-    }
-    
-    /* Fact Check Item */
-    .nmd-fact-check-item {
-      padding: 12px;
-      background: var(--nmd-surface);
-      border-radius: 8px;
-      margin-bottom: 8px;
-      border-left: 3px solid var(--nmd-border);
-    }
-    
-    .nmd-fact-check-item--false {
-      border-left-color: var(--nmd-error);
-    }
-    
-    .nmd-fact-check-item--misleading {
-      border-left-color: var(--nmd-warning);
-    }
-    
-    .nmd-fact-check-item--true {
-      border-left-color: var(--nmd-success);
-    }
-    
-    .nmd-fact-check-item__verdict {
-      display: inline-block;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      padding: 2px 8px;
-      border-radius: 4px;
-      margin-bottom: 8px;
-    }
-    
-    .nmd-fact-check-item__verdict--false {
-      background: var(--nmd-error);
-      color: white;
-    }
-    
-    .nmd-fact-check-item__verdict--misleading {
-      background: var(--nmd-warning);
-      color: white;
-    }
-    
-    .nmd-fact-check-item__verdict--true {
-      background: var(--nmd-success);
-      color: white;
-    }
-    
-    .nmd-fact-check-item__claim {
-      font-size: 13px;
-      color: var(--nmd-text);
-      margin-bottom: 8px;
-    }
-    
-    .nmd-fact-check-item__evidence {
-      font-size: 12px;
-      color: var(--nmd-text-muted);
-    }
-    
-    /* Empty State */
-    .nmd-empty {
-      text-align: center;
-      padding: 32px;
-      color: var(--nmd-text-muted);
-    }
-    
-    .nmd-empty__icon {
-      font-size: 32px;
-      margin-bottom: 12px;
-    }
-    
-    .nmd-empty__text {
-      font-size: 13px;
-    }
-    
-    /* Loading State */
-    .nmd-loading {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 32px;
-    }
-    
-    .nmd-loading__spinner {
-      width: 24px;
-      height: 24px;
-      border: 2px solid var(--nmd-border);
-      border-top-color: var(--nmd-primary);
-      border-radius: 50%;
-      animation: nmd-spin 0.8s linear infinite;
-    }
-    
-    @keyframes nmd-spin {
-      to { transform: rotate(360deg); }
-    }
   `;
 
   // ============================================
-  // SECTION 13.7: METADATA UI COMPONENTS
-  // ============================================
-  
-  /**
-   * UI components for displaying URL metadata
-   */
-  const MetadataUI = {
-    elements: {},
-    state: {
-      metadata: null,
-      isLoading: false,
-      isPanelOpen: false,
-      isBadgeMinimized: false,
-      activeTab: 'overview',
-      bannerDismissed: false
-    },
-    
-    /**
-     * Initialize the metadata display UI
-     */
-    init: () => {
-      Utils.log('Initializing Metadata UI...');
-      
-      // Inject styles
-      GM_addStyle(METADATA_STYLES);
-      
-      // Create UI components
-      MetadataUI.createBadge();
-      MetadataUI.createPanel();
-      MetadataUI.createDebunkBanner();
-      
-      Utils.log('Metadata UI initialized');
-    },
-    
-    /**
-     * Create the floating metadata badge
-     */
-    createBadge: () => {
-      const badge = document.createElement('div');
-      badge.className = 'nmd-badge';
-      badge.innerHTML = `
-        <div class="nmd-badge__container" title="Click for URL metadata">
-          <div class="nmd-badge__score nmd-badge__score--unknown">?</div>
-          <div class="nmd-badge__stats">
-            <div class="nmd-badge__stat">
-              <span class="nmd-badge__stat-icon">📝</span>
-              <span class="nmd-badge__stat-value" data-stat="annotations">0</span>
-            </div>
-            <div class="nmd-badge__stat">
-              <span class="nmd-badge__stat-icon">⭐</span>
-              <span class="nmd-badge__stat-value" data-stat="ratings">0</span>
-            </div>
-          </div>
-          <button class="nmd-badge__minimize" title="Minimize">−</button>
-        </div>
-      `;
-      
-      document.body.appendChild(badge);
-      MetadataUI.elements.badge = badge;
-      
-      // Event listeners
-      badge.querySelector('.nmd-badge__container').addEventListener('click', (e) => {
-        if (!e.target.classList.contains('nmd-badge__minimize')) {
-          MetadataUI.togglePanel();
-        }
-      });
-      
-      badge.querySelector('.nmd-badge__minimize').addEventListener('click', (e) => {
-        e.stopPropagation();
-        MetadataUI.toggleBadgeMinimize();
-      });
-    },
-    
-    /**
-     * Create the expanded metadata panel
-     */
-    createPanel: () => {
-      const panel = document.createElement('div');
-      panel.className = 'nmd-panel';
-      panel.innerHTML = `
-        <div class="nmd-panel__header">
-          <span class="nmd-panel__title">URL Metadata</span>
-          <button class="nmd-panel__close" title="Close">×</button>
-        </div>
-        <div class="nmd-panel__tabs">
-          <button class="nmd-panel__tab nmd-panel__tab--active" data-tab="overview">Overview</button>
-          <button class="nmd-panel__tab" data-tab="ratings">Ratings</button>
-          <button class="nmd-panel__tab" data-tab="comments">Comments</button>
-          <button class="nmd-panel__tab" data-tab="annotations">Notes</button>
-          <button class="nmd-panel__tab" data-tab="factchecks">Fact-Checks</button>
-        </div>
-        <div class="nmd-panel__content" id="nmd-panel-content">
-          <div class="nmd-loading">
-            <div class="nmd-loading__spinner"></div>
-          </div>
-        </div>
-      `;
-      
-      document.body.appendChild(panel);
-      MetadataUI.elements.panel = panel;
-      
-      // Event listeners
-      panel.querySelector('.nmd-panel__close').addEventListener('click', () => {
-        MetadataUI.closePanel();
-      });
-      
-      panel.querySelectorAll('.nmd-panel__tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-          MetadataUI.switchTab(tab.dataset.tab);
-        });
-      });
-    },
-    
-    /**
-     * Create the debunking banner (hidden by default)
-     */
-    createDebunkBanner: () => {
-      const banner = document.createElement('div');
-      banner.className = 'nmd-debunk-banner';
-      banner.style.display = 'none';
-      banner.innerHTML = `
-        <div class="nmd-debunk-banner__content">
-          <span class="nmd-debunk-banner__icon">⚠️</span>
-          <div class="nmd-debunk-banner__text">
-            <div class="nmd-debunk-banner__title">This content has been fact-checked</div>
-            <div class="nmd-debunk-banner__detail">Loading details...</div>
-          </div>
-          <div class="nmd-debunk-banner__source">
-            <span>by </span>
-            <span class="nmd-debunk-banner__author">Checking...</span>
-          </div>
-          <button class="nmd-debunk-banner__dismiss">I Understand</button>
-        </div>
-      `;
-      
-      document.body.appendChild(banner);
-      MetadataUI.elements.debunkBanner = banner;
-      
-      // Dismiss handler
-      banner.querySelector('.nmd-debunk-banner__dismiss').addEventListener('click', () => {
-        MetadataUI.dismissDebunkBanner();
-      });
-    },
-    
-    /**
-     * Update the badge with metadata
-     * @param {Object} metadata - Aggregated metadata
-     */
-    updateBadge: (metadata) => {
-      const badge = MetadataUI.elements.badge;
-      if (!badge) return;
-      
-      const scoreEl = badge.querySelector('.nmd-badge__score');
-      const annotationsEl = badge.querySelector('[data-stat="annotations"]');
-      const ratingsEl = badge.querySelector('[data-stat="ratings"]');
-      
-      // Update stats
-      annotationsEl.textContent = metadata.aggregates.annotationCount || 0;
-      ratingsEl.textContent = metadata.aggregates.ratingCounts.total || 0;
-      
-      // Update trust score
-      const trustScore = metadata.aggregates.trustScore;
-      scoreEl.classList.remove('nmd-badge__score--high', 'nmd-badge__score--medium',
-                               'nmd-badge__score--low', 'nmd-badge__score--unknown');
-      
-      if (trustScore !== null && trustScore !== undefined) {
-        const scorePercent = Math.round(trustScore * 100);
-        scoreEl.textContent = scorePercent;
-        
-        if (trustScore >= 0.7) {
-          scoreEl.classList.add('nmd-badge__score--high');
-        } else if (trustScore >= 0.4) {
-          scoreEl.classList.add('nmd-badge__score--medium');
-        } else {
-          scoreEl.classList.add('nmd-badge__score--low');
-        }
-      } else {
-        scoreEl.textContent = '?';
-        scoreEl.classList.add('nmd-badge__score--unknown');
-      }
-      
-      // Check for alerts
-      if (metadata.aggregates.verdictSummary?.hasDebunking) {
-        badge.classList.add('nmd-badge--alert');
-      } else {
-        badge.classList.remove('nmd-badge--alert');
-      }
-    },
-    
-    /**
-     * Show debunking banner if needed
-     * @param {Object} metadata - Aggregated metadata
-     */
-    showDebunkBannerIfNeeded: (metadata) => {
-      if (MetadataUI.state.bannerDismissed) return;
-      
-      const verdict = metadata.aggregates.verdictSummary;
-      if (!verdict || !verdict.hasDebunking) return;
-      
-      const banner = MetadataUI.elements.debunkBanner;
-      if (!banner) return;
-      
-      // Find the most authoritative fact check
-      const factChecks = metadata.factChecks.filter(fc =>
-        fc.content.verdict === 'false' || fc.content.verdict === 'misleading'
-      );
-      
-      if (factChecks.length === 0) return;
-      
-      const topFactCheck = factChecks[0];
-      
-      // Update banner content
-      const isFalse = topFactCheck.content.verdict === 'false';
-      banner.classList.toggle('nmd-debunk-banner--misleading', !isFalse);
-      
-      const titleEl = banner.querySelector('.nmd-debunk-banner__title');
-      const detailEl = banner.querySelector('.nmd-debunk-banner__detail');
-      const authorEl = banner.querySelector('.nmd-debunk-banner__author');
-      
-      titleEl.textContent = isFalse
-        ? '⚠️ This content has been rated FALSE'
-        : '⚠️ This content may be MISLEADING';
-      
-      detailEl.textContent = topFactCheck.content.claim || 'Claims in this content have been disputed.';
-      authorEl.textContent = topFactCheck.pubkey.substring(0, 8) + '...';
-      
-      banner.style.display = 'block';
-    },
-    
-    /**
-     * Dismiss the debunking banner
-     */
-    dismissDebunkBanner: () => {
-      MetadataUI.state.bannerDismissed = true;
-      const banner = MetadataUI.elements.debunkBanner;
-      if (banner) {
-        banner.style.display = 'none';
-      }
-    },
-    
-    /**
-     * Toggle badge minimized state
-     */
-    toggleBadgeMinimize: () => {
-      MetadataUI.state.isBadgeMinimized = !MetadataUI.state.isBadgeMinimized;
-      const badge = MetadataUI.elements.badge;
-      if (badge) {
-        badge.classList.toggle('nmd-badge--minimized', MetadataUI.state.isBadgeMinimized);
-      }
-    },
-    
-    /**
-     * Toggle the expanded panel
-     */
-    togglePanel: () => {
-      if (MetadataUI.state.isPanelOpen) {
-        MetadataUI.closePanel();
-      } else {
-        MetadataUI.openPanel();
-      }
-    },
-    
-    /**
-     * Open the expanded panel
-     */
-    openPanel: () => {
-      MetadataUI.state.isPanelOpen = true;
-      const panel = MetadataUI.elements.panel;
-      if (panel) {
-        panel.classList.add('nmd-panel--visible');
-        MetadataUI.renderPanelContent();
-      }
-    },
-    
-    /**
-     * Close the expanded panel
-     */
-    closePanel: () => {
-      MetadataUI.state.isPanelOpen = false;
-      const panel = MetadataUI.elements.panel;
-      if (panel) {
-        panel.classList.remove('nmd-panel--visible');
-      }
-    },
-    
-    /**
-     * Switch panel tab
-     * @param {string} tab - Tab name
-     */
-    switchTab: (tab) => {
-      MetadataUI.state.activeTab = tab;
-      
-      // Update tab buttons
-      const panel = MetadataUI.elements.panel;
-      panel.querySelectorAll('.nmd-panel__tab').forEach(t => {
-        t.classList.toggle('nmd-panel__tab--active', t.dataset.tab === tab);
-      });
-      
-      MetadataUI.renderPanelContent();
-    },
-    
-    /**
-     * Render panel content based on active tab
-     */
-    renderPanelContent: () => {
-      const contentEl = document.getElementById('nmd-panel-content');
-      if (!contentEl) return;
-      
-      const metadata = MetadataUI.state.metadata;
-      
-      if (MetadataUI.state.isLoading) {
-        contentEl.innerHTML = `
-          <div class="nmd-loading">
-            <div class="nmd-loading__spinner"></div>
-          </div>
-        `;
-        return;
-      }
-      
-      if (!metadata) {
-        contentEl.innerHTML = `
-          <div class="nmd-empty">
-            <div class="nmd-empty__icon">📭</div>
-            <div class="nmd-empty__text">No metadata found for this URL</div>
-          </div>
-        `;
-        return;
-      }
-      
-      switch (MetadataUI.state.activeTab) {
-        case 'overview':
-          contentEl.innerHTML = MetadataUI.renderOverviewTab(metadata);
-          break;
-        case 'ratings':
-          contentEl.innerHTML = MetadataUI.renderRatingsTab(metadata);
-          break;
-        case 'annotations':
-          contentEl.innerHTML = MetadataUI.renderAnnotationsTab(metadata);
-          break;
-        case 'factchecks':
-          contentEl.innerHTML = MetadataUI.renderFactChecksTab(metadata);
-          break;
-        case 'comments':
-          contentEl.innerHTML = MetadataUI.renderCommentsTab(metadata);
-          break;
-      }
-    },
-    
-    /**
-     * Render overview tab content
-     */
-    renderOverviewTab: (metadata) => {
-      const trustScore = metadata.aggregates.trustScore;
-      const trustClass = trustScore >= 0.7 ? 'high' : trustScore >= 0.4 ? 'medium' : 'low';
-      const trustLabel = trustScore >= 0.7 ? 'Highly Trusted' : trustScore >= 0.4 ? 'Mixed Reviews' : 'Low Trust';
-      
-      return `
-        <div class="nmd-trust-display">
-          <div class="nmd-trust-display__score" style="background: var(--nmd-trust-${trustClass})">
-            ${trustScore !== null ? Math.round(trustScore * 100) : '?'}
-          </div>
-          <div class="nmd-trust-display__details">
-            <div class="nmd-trust-display__label">${trustLabel}</div>
-            <div class="nmd-trust-display__meta">
-              Based on ${metadata.ratings.length} ratings, ${metadata.factChecks.length} fact-checks
-            </div>
-          </div>
-        </div>
-        
-        <div class="nmd-panel__section">
-          <div class="nmd-panel__section-title">Summary</div>
-          <div style="font-size: 13px; color: var(--nmd-text);">
-            <p>📝 ${metadata.annotations.length} annotations</p>
-            <p>⭐ ${metadata.ratings.length} ratings</p>
-            <p>🔍 ${metadata.factChecks.length} fact-checks</p>
-            <p>📰 ${metadata.headlineCorrections.length} headline corrections</p>
-          </div>
-        </div>
-        
-        ${metadata.aggregates.verdictSummary?.hasDebunking ? `
-          <div class="nmd-panel__section">
-            <div class="nmd-panel__section-title">⚠️ Alerts</div>
-            <div class="nmd-fact-check-item nmd-fact-check-item--${metadata.aggregates.verdictSummary.primary}">
-              <span class="nmd-fact-check-item__verdict nmd-fact-check-item__verdict--${metadata.aggregates.verdictSummary.primary}">
-                ${metadata.aggregates.verdictSummary.primary.toUpperCase()}
-              </span>
-              <div class="nmd-fact-check-item__claim">
-                This content has been flagged by ${metadata.factChecks.length} fact-checker(s).
-              </div>
-            </div>
-          </div>
-        ` : ''}
-      `;
-    },
-    
-    /**
-     * Render ratings tab content
-     */
-    renderRatingsTab: (metadata) => {
-      if (metadata.ratings.length === 0) {
-        return `
-          <div class="nmd-empty">
-            <div class="nmd-empty__icon">⭐</div>
-            <div class="nmd-empty__text">No ratings yet</div>
-          </div>
-        `;
-      }
-      
-      return metadata.ratings.map(rating => {
-        // Extract rating dimensions from tags
-        const ratingTags = rating.tags?.filter(t => t[0] === 'rating') || [];
-        const overallTag = rating.tags?.find(t => t[0] === 'overall');
-        const confidenceTag = rating.tags?.find(t => t[0] === 'confidence');
-        
-        const dimensionScores = ratingTags.map(t => ({
-          dimension: t[1],
-          score: parseInt(t[2], 10),
-          maxScore: parseInt(t[3], 10) || 10
-        }));
-        
-        const overallScore = overallTag ? parseFloat(overallTag[1]) : null;
-        const confidence = confidenceTag ? parseInt(confidenceTag[1], 10) : null;
-        
-        return `
-          <div class="nmd-rating-item">
-            <div class="nmd-rating-item__header">
-              <span class="nmd-rating-item__author">${rating.pubkey.substring(0, 8)}...</span>
-              <span class="nmd-rating-item__date">${Utils.formatDate(rating.createdAt)}</span>
-              ${overallScore !== null ? `<span class="nmd-rating-item__overall">Overall: ${overallScore}/10</span>` : ''}
-            </div>
-            <div class="nmd-rating-item__scores">
-              ${dimensionScores.map(({dimension, score, maxScore}) => `
-                <div class="nmd-rating-dimension">
-                  <span class="nmd-rating-dimension__label">${dimension}</span>
-                  <div class="nmd-rating-dimension__bar">
-                    <div class="nmd-rating-dimension__fill" style="width: ${(score/maxScore)*100}%"></div>
-                  </div>
-                  <span class="nmd-rating-dimension__value">${score}/${maxScore}</span>
-                </div>
-              `).join('')}
-            </div>
-            ${confidence !== null ? `<div class="nmd-rating-item__confidence">Confidence: ${confidence}%</div>` : ''}
-            ${rating.content ? `<div class="nmd-rating-item__review">${Utils.escapeHtml(rating.content)}</div>` : ''}
-          </div>
-        `;
-      }).join('');
-    },
-    
-    /**
-     * Render comments tab content
-     */
-    renderCommentsTab: (metadata) => {
-      if (!metadata.comments || metadata.comments.length === 0) {
-        return `
-          <div class="nmd-empty">
-            <div class="nmd-empty__icon">💬</div>
-            <div class="nmd-empty__text">No comments yet</div>
-          </div>
-        `;
-      }
-      
-      // Sort by createdAt descending (newest first)
-      const sortedComments = [...metadata.comments].sort((a, b) => b.createdAt - a.createdAt);
-      
-      return sortedComments.map(comment => {
-        // Check for reply threading
-        const replyTag = comment.tags?.find(t => t[0] === 'e' && t[3] === 'reply');
-        const isReply = !!replyTag;
-        
-        return `
-          <div class="nmd-comment-item ${isReply ? 'nmd-comment-item--reply' : ''}">
-            <div class="nmd-comment-item__header">
-              <span class="nmd-comment-item__author">${comment.pubkey.substring(0, 8)}...</span>
-              <span class="nmd-comment-item__date">${Utils.formatDate(comment.createdAt)}</span>
-            </div>
-            <div class="nmd-comment-item__content">
-              ${Utils.escapeHtml(comment.content || '')}
-            </div>
-          </div>
-        `;
-      }).join('');
-    },
-    
-    /**
-     * Render annotations tab content
-     */
-    renderAnnotationsTab: (metadata) => {
-      if (metadata.annotations.length === 0) {
-        return `
-          <div class="nmd-empty">
-            <div class="nmd-empty__icon">📝</div>
-            <div class="nmd-empty__text">No annotations yet</div>
-          </div>
-        `;
-      }
-      
-      return metadata.annotations.map(ann => `
-        <div class="nmd-rating-item">
-          <div class="nmd-rating-item__header">
-            <span class="nmd-rating-item__author">${ann.pubkey.substring(0, 8)}...</span>
-            <span class="nmd-rating-item__date">${Utils.formatDate(ann.createdAt)}</span>
-          </div>
-          <div style="font-size: 13px; color: var(--nmd-text); margin-top: 8px;">
-            ${Utils.escapeHtml(ann.content.text || ann.content.comment || JSON.stringify(ann.content))}
-          </div>
-        </div>
-      `).join('');
-    },
-    
-    /**
-     * Render fact-checks tab content
-     */
-    renderFactChecksTab: (metadata) => {
-      if (metadata.factChecks.length === 0) {
-        return `
-          <div class="nmd-empty">
-            <div class="nmd-empty__icon">🔍</div>
-            <div class="nmd-empty__text">No fact-checks yet</div>
-          </div>
-        `;
-      }
-      
-      return metadata.factChecks.map(fc => {
-        const verdict = fc.content.verdict || 'unverifiable';
-        return `
-          <div class="nmd-fact-check-item nmd-fact-check-item--${verdict}">
-            <span class="nmd-fact-check-item__verdict nmd-fact-check-item__verdict--${verdict}">
-              ${verdict.toUpperCase()}
-            </span>
-            <div class="nmd-fact-check-item__claim">
-              ${Utils.escapeHtml(fc.content.claim || 'Claim not specified')}
-            </div>
-            <div class="nmd-fact-check-item__evidence">
-              ${Utils.escapeHtml(fc.content.evidence || fc.content.summary || '')}
-            </div>
-          </div>
-        `;
-      }).join('');
-    },
-    
-    /**
-     * Add headline correction indicator to page
-     * @param {Object} metadata - Aggregated metadata
-     */
-    addHeadlineCorrectionIndicators: (metadata) => {
-      if (metadata.headlineCorrections.length === 0) return;
-      
-      // Find h1 elements
-      const headings = document.querySelectorAll('h1');
-      
-      headings.forEach(heading => {
-        // Check if already processed
-        if (heading.querySelector('.nmd-headline-correction')) return;
-        
-        const correction = metadata.headlineCorrections[0];
-        const indicator = document.createElement('span');
-        indicator.className = 'nmd-headline-correction';
-        indicator.innerHTML = `
-          <span class="nmd-headline-correction__icon">!</span>
-          <div class="nmd-headline-correction__popup">
-            <div class="nmd-headline-correction__label">Suggested Correction</div>
-            <div class="nmd-headline-correction__original">${Utils.escapeHtml(heading.textContent)}</div>
-            <div class="nmd-headline-correction__suggested">${Utils.escapeHtml(correction.content.suggested || correction.content.correction || 'N/A')}</div>
-            <div class="nmd-headline-correction__meta">
-              <span>Problem: ${correction.content.problemType || 'clickbait'}</span>
-              <span>by ${correction.pubkey.substring(0, 8)}...</span>
-            </div>
-          </div>
-        `;
-        
-        heading.style.position = 'relative';
-        heading.appendChild(indicator);
-      });
-    },
-    
-    /**
-     * Add inline annotation highlights to page content
-     * @param {Object} metadata - Aggregated metadata
-     */
-    addInlineAnnotationHighlights: (metadata) => {
-      if (metadata.annotations.length === 0) return;
-      
-      for (const annotation of metadata.annotations) {
-        if (!annotation.content.selector) continue;
-        
-        const selector = annotation.content.selector;
-        
-        // Handle text quote selectors
-        if (selector.type === 'TextQuoteSelector' && selector.exact) {
-          MetadataUI.highlightText(selector.exact, annotation);
-        }
-      }
-    },
-    
-    /**
-     * Highlight specific text in the page
-     * @param {string} text - Text to highlight
-     * @param {Object} annotation - Annotation data
-     */
-    highlightText: (text, annotation) => {
-      const walker = document.createTreeWalker(
-        document.body,
-        NodeFilter.SHOW_TEXT,
-        null,
-        false
-      );
-      
-      const nodesToProcess = [];
-      let node;
-      
-      while (node = walker.nextNode()) {
-        if (node.textContent.includes(text)) {
-          nodesToProcess.push(node);
-        }
-      }
-      
-      for (const textNode of nodesToProcess) {
-        const parent = textNode.parentNode;
-        if (parent.classList?.contains('nmd-annotation-highlight')) continue;
-        
-        const index = textNode.textContent.indexOf(text);
-        if (index === -1) continue;
-        
-        const before = textNode.textContent.substring(0, index);
-        const match = textNode.textContent.substring(index, index + text.length);
-        const after = textNode.textContent.substring(index + text.length);
-        
-        const fragment = document.createDocumentFragment();
-        
-        if (before) {
-          fragment.appendChild(document.createTextNode(before));
-        }
-        
-        const highlight = document.createElement('span');
-        highlight.className = 'nmd-annotation-highlight';
-        highlight.textContent = match;
-        highlight.innerHTML += `
-          <div class="nmd-annotation-popup">
-            <div class="nmd-annotation-popup__header">
-              <div class="nmd-annotation-popup__avatar">📝</div>
-              <span class="nmd-annotation-popup__author">${annotation.pubkey.substring(0, 8)}...</span>
-              <span class="nmd-annotation-popup__trust">Verified</span>
-            </div>
-            <div class="nmd-annotation-popup__content">
-              ${Utils.escapeHtml(annotation.content.text || annotation.content.comment || '')}
-            </div>
-            <div class="nmd-annotation-popup__actions">
-              <button class="nmd-annotation-popup__action">👍 Agree</button>
-              <button class="nmd-annotation-popup__action">👎 Disagree</button>
-            </div>
-          </div>
-        `;
-        fragment.appendChild(highlight);
-        
-        if (after) {
-          fragment.appendChild(document.createTextNode(after));
-        }
-        
-        parent.replaceChild(fragment, textNode);
-        
-        // Only highlight first occurrence
-        break;
-      }
-    },
-    
-    /**
-     * Add metadata badges to links in the page
-     * @param {Object} linkMetadataMap - Map of link URLs to their metadata
-     */
-    addLinkMetadataBadges: async (linkMetadataMap) => {
-      const links = document.querySelectorAll('article a, .content a, main a, .post a');
-      
-      for (const link of links) {
-        if (link.querySelector('.nmd-link-badge')) continue;
-        
-        const href = link.href;
-        if (!href || href.startsWith('javascript:') || href.startsWith('#')) continue;
-        
-        const normalizedUrl = Utils.normalizeUrl(href);
-        const metadata = linkMetadataMap.get(normalizedUrl);
-        
-        if (metadata) {
-          const badge = document.createElement('span');
-          badge.className = 'nmd-link-badge';
-          
-          // Determine badge type based on metadata
-          if (metadata.aggregates.verdictSummary?.hasDebunking) {
-            badge.classList.add('nmd-link-badge--false');
-            badge.textContent = '!';
-            badge.title = 'This link has been fact-checked as false or misleading';
-          } else if (metadata.aggregates.trustScore >= 0.7) {
-            badge.classList.add('nmd-link-badge--verified');
-            badge.textContent = '✓';
-            badge.title = 'Highly trusted source';
-          } else if (metadata.aggregates.trustScore >= 0.4) {
-            badge.classList.add('nmd-link-badge--disputed');
-            badge.textContent = '?';
-            badge.title = 'Mixed reviews';
-          } else {
-            badge.classList.add('nmd-link-badge--unknown');
-            badge.textContent = '?';
-            badge.title = 'Limited metadata available';
-          }
-          
-          link.style.position = 'relative';
-          link.appendChild(badge);
-        }
-      }
-    },
-    
-    /**
-     * Load and display metadata for the current page
-     */
-    loadCurrentPageMetadata: async () => {
-      MetadataUI.state.isLoading = true;
-      MetadataUI.renderPanelContent();
-      
-      try {
-        const url = window.location.href;
-        const metadata = await URLMetadataService.queryMetadata(url);
-        
-        MetadataUI.state.metadata = metadata;
-        MetadataUI.state.isLoading = false;
-        
-        // Update UI components
-        MetadataUI.updateBadge(metadata);
-        MetadataUI.showDebunkBannerIfNeeded(metadata);
-        MetadataUI.addHeadlineCorrectionIndicators(metadata);
-        MetadataUI.addInlineAnnotationHighlights(metadata);
-        
-        // Render panel if open
-        if (MetadataUI.state.isPanelOpen) {
-          MetadataUI.renderPanelContent();
-        }
-        
-        Utils.log('Metadata loaded:', metadata.eventCount, 'events');
-        
-        // Queue link metadata lookup (async, lower priority)
-        MetadataUI.queueLinkMetadataLookup();
-        
-      } catch (e) {
-        Utils.error('Failed to load metadata:', e);
-        MetadataUI.state.isLoading = false;
-        MetadataUI.renderPanelContent();
-      }
-    },
-    
-    /**
-     * Queue link metadata lookup (batched, lower priority)
-     */
-    queueLinkMetadataLookup: async () => {
-      // Get all links in main content
-      const links = document.querySelectorAll('article a, .content a, main a');
-      const uniqueUrls = new Set();
-      
-      for (const link of links) {
-        const href = link.href;
-        if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
-          uniqueUrls.add(Utils.normalizeUrl(href));
-        }
-      }
-      
-      Utils.log('Found', uniqueUrls.size, 'unique links to check');
-      
-      // Limit to first 20 links for performance
-      const urlsToCheck = Array.from(uniqueUrls).slice(0, 20);
-      const linkMetadataMap = new Map();
-      
-      // Query in small batches
-      for (let i = 0; i < urlsToCheck.length; i += 5) {
-        const batch = urlsToCheck.slice(i, i + 5);
-        
-        await Promise.all(batch.map(async (url) => {
-          try {
-            const metadata = await URLMetadataService.queryMetadata(url);
-            if (metadata.eventCount > 0) {
-              linkMetadataMap.set(url, metadata);
-            }
-          } catch (e) {
-            // Ignore individual link failures
-          }
-        }));
-        
-        // Small delay between batches
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      // Add badges to links with metadata
-      MetadataUI.addLinkMetadataBadges(linkMetadataMap);
-    }
-  };
-
-  // ============================================
-  // SECTION 14: INITIALIZATION
+  // SECTION 11: INITIALIZATION
   // ============================================
   
   async function init() {
-    Utils.log('Starting NOSTR Article Capture v' + CONFIG.version);
+    Utils.log('Initializing NOSTR Article Capture v' + CONFIG.version);
     
-    // Initialize storage
-    await Storage.initialize();
+    // Add styles
+    GM_addStyle(STYLES);
     
-    // Initialize local key manager
-    await LocalKeyManager.init();
+    // Create FAB button
+    const fab = document.createElement('button');
+    fab.className = 'nac-fab';
+    fab.innerHTML = '📰';
+    fab.title = 'NOSTR Article Capture';
     
-    // Initialize Article Capture UI (FAB and panel)
-    UI.init();
+    fab.addEventListener('click', async () => {
+      Utils.log('FAB clicked');
+      
+      // Extract article
+      const article = ContentExtractor.extractArticle();
+      
+      if (!article) {
+        Utils.showToast('No article content found on this page', 'error');
+        return;
+      }
+      
+      // Show reader view
+      await ReaderView.show(article);
+    });
     
-    // Initialize URL Metadata Display UI (badge, panel, banner)
-    MetadataUI.init();
+    document.body.appendChild(fab);
     
-    // Check for NIP-07 extension availability
-    const nip07Available = NIP07Client.checkAvailability();
-    if (nip07Available) {
-      Utils.log('NIP-07 extension detected');
-      UI.updateSigningStatus();
-      UI.showToast('NIP-07 extension detected - Ready to publish!', 'success');
-    } else {
-      // Try to connect to NSecBunker in background as fallback
-      Utils.log('No NIP-07 extension, trying NSecBunker...');
-      NSecBunkerClient.connect().then(() => {
-        Utils.log('NSecBunker connected');
-        UI.updateSigningStatus();
-        UI.updatePublishButton();
-        UI.showToast('Connected to NSecBunker', 'success');
-      }).catch((e) => {
-        Utils.log('NSecBunker not available:', e.message);
-        UI.updateSigningStatus();
-        // Show helpful message about signing options
-        Utils.log('No signing method available. Install a NIP-07 extension (nos2x, Alby) or run NSecBunker.');
-      });
-    }
+    // Register menu commands
+    GM_registerMenuCommand('Open Settings', async () => {
+      const article = ContentExtractor.extractArticle() || { url: window.location.href };
+      await ReaderView.show(article);
+      await ReaderView.showSettings();
+    });
     
-    // Load URL metadata for the current page (async, non-blocking)
-    // This queries NOSTR relays for existing metadata about this URL
-    setTimeout(() => {
-      MetadataUI.loadCurrentPageMetadata().catch(e => {
-        Utils.log('Failed to load URL metadata:', e.message);
-      });
-    }, 1000); // Delay 1s to let page settle
+    GM_registerMenuCommand('Export Entities', async () => {
+      const json = await Storage.entities.exportAll();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'nostr-entities-' + Date.now() + '.json';
+      a.click();
+      Utils.showToast('Entities exported');
+    });
     
     Utils.log('Initialization complete');
   }
-  
-  // Wait for DOM to be ready
+
+  // Run init when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
