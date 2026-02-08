@@ -624,7 +624,39 @@
   };
 
   // ============================================
-  // SECTION 5: READER VIEW - Full-page takeover
+  // SECTION 5: UTILITIES
+  // ============================================
+  
+  const Utils = {
+    // Show toast notification
+    showToast: (message, type = 'info') => {
+      const toast = document.createElement('div');
+      toast.className = 'nac-toast nac-toast-' + type;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => toast.classList.add('visible'), 100);
+      setTimeout(() => {
+        toast.classList.remove('visible');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    },
+
+    // Log with prefix
+    log: (...args) => {
+      if (CONFIG.debug) {
+        console.log('[NAC]', ...args);
+      }
+    },
+
+    // Error log
+    error: (...args) => {
+      console.error('[NAC]', ...args);
+    }
+  };
+
+  // ============================================
+  // SECTION 6: READER VIEW - Full-page takeover
   // ============================================
   
   const ReaderView = {
@@ -1041,7 +1073,7 @@
   };
 
   // ============================================
-  // SECTION 6: ENTITY TAGGER - Text selection popover
+  // SECTION 7: ENTITY TAGGER - Text selection popover
   // ============================================
   
   const EntityTagger = {
@@ -1248,7 +1280,7 @@
   };
 
   // ============================================
-  // SECTION 7: NOSTR RELAY CLIENT
+  // SECTION 8: NOSTR RELAY CLIENT
   // ============================================
   
   const RelayClient = {
@@ -1355,7 +1387,7 @@
   };
 
   // ============================================
-  // SECTION 8: EVENT BUILDER
+  // SECTION 9: EVENT BUILDER
   // ============================================
   
   const EventBuilder = {
@@ -1438,38 +1470,6 @@
           nip05: entity.nip05 || undefined
         })
       };
-    }
-  };
-
-  // ============================================
-  // SECTION 9: UTILITIES
-  // ============================================
-  
-  const Utils = {
-    // Show toast notification
-    showToast: (message, type = 'info') => {
-      const toast = document.createElement('div');
-      toast.className = 'nac-toast nac-toast-' + type;
-      toast.textContent = message;
-      document.body.appendChild(toast);
-      
-      setTimeout(() => toast.classList.add('visible'), 100);
-      setTimeout(() => {
-        toast.classList.remove('visible');
-        setTimeout(() => toast.remove(), 300);
-      }, 3000);
-    },
-
-    // Log with prefix
-    log: (...args) => {
-      if (CONFIG.debug) {
-        console.log('[NAC]', ...args);
-      }
-    },
-
-    // Error log
-    error: (...args) => {
-      console.error('[NAC]', ...args);
     }
   };
 
