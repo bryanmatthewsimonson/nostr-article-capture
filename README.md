@@ -22,6 +22,22 @@ A powerful Tampermonkey userscript that captures web articles and publishes them
 
 ---
 
+## 🐛 Recent Bug Fixes (2025-02)
+
+### ✅ "Tag Entity" Button Now Functional
+- **Problem:** The "+ Tag Entity" button in the Reader View did nothing when clicked — no click event listener was attached to `#nac-add-entity-btn`.
+- **Fix:** Added a click event listener that prompts the user for an entity name and opens the EntityTagger type-selection popover when a valid name is entered.
+- **How it works:** User clicks "+ Tag Entity" → enters a name via `prompt()` → if valid (meets minimum length), the EntityTagger popover opens at the button's position for type selection.
+
+### ✅ Auto-Detection of Author and Publication Entities
+- **Problem:** When capturing an article, the author (from byline) and publication (from site name) were displayed as plain text but never automatically tagged as entities in the entity system.
+- **Fix:** Added auto-detection logic at the end of `ReaderView.show()` that processes both author and publication:
+  - **Author:** Checks `article.byline`, searches for existing person entities. If found, links with context `"author"`. If not found, creates a new person entity with a generated keypair. Displays as a chip in the entity bar.
+  - **Publication:** Checks `article.siteName` or `article.domain`, searches for existing organization entities. If found, links with context `"publication"`. If not found, creates a new organization entity with a generated keypair. Displays as a chip in the entity bar.
+  - Both operations are wrapped in `try/catch` for error resilience — a failure in one does not block the other.
+
+---
+
 ## 🆕 What's New in v2.0.1
 
 ### 🔄 Entity Sync via NOSTR
@@ -56,7 +72,7 @@ See [Entity Sync Design](docs/entity-sync-design.md) for full technical details.
 
 | Version | Changes |
 |---------|---------|
-| **v2.0.1** | Entity sync via NOSTR (NIP-78 encrypted), nsec import/export, entity file import, expanded relay list |
+| **v2.0.1** | Entity sync via NOSTR (NIP-78 encrypted), nsec import/export, entity file import, expanded relay list. **Bug fixes:** "+ Tag Entity" button now functional; auto-detection of author and publication entities on article capture |
 | **v1.16.0** | Fullscreen immersive reader UI with inline reactions/comments |
 | **v1.15.0** | Redesigned keypair architecture (user identity vs publication signing) |
 | **v1.14.0** | Removed incomplete metadata features, cleaned up code |

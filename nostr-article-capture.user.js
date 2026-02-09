@@ -1847,12 +1847,133 @@
         Utils.showToast('URL copied to clipboard');
       });
       
+      // Tag Entity button handler
+      document.getElementById('nac-add-entity-btn').addEventListener('click', (e) => {
+        const name = prompt('Enter entity name to tag:');
+        if (name && name.trim().length >= CONFIG.tagging.min_selection_length) {
+          const rect = e.target.getBoundingClientRect();
+          EntityTagger.show(name.trim(), rect.left + window.scrollX, rect.top + window.scrollY);
+        }
+      });
+      
       // Enable text selection for entity tagging
       const contentEl = document.getElementById('nac-content');
       contentEl.addEventListener('mouseup', ReaderView.handleTextSelection);
       
       // Keyboard shortcuts
       document.addEventListener('keydown', ReaderView.handleKeyboard);
+      
+      // Auto-detect author entity from byline
+      if (article.byline && article.byline.trim().length >= CONFIG.tagging.min_selection_length) {
+        try {
+          const authorName = article.byline.trim();
+          const authorResults = await Storage.entities.search(authorName, 'person');
+          
+          if (authorResults.length > 0) {
+            // Link existing author entity
+            const entity = authorResults[0];
+            if (!entity.articles) entity.articles = [];
+            entity.articles.push({
+              url: article.url,
+              title: article.title,
+              context: 'author',
+              tagged_at: Math.floor(Date.now() / 1000)
+            });
+            await Storage.entities.save(entity.id, entity);
+            ReaderView.entities.push({ entity_id: entity.id, context: 'author' });
+            EntityTagger.addChip(entity);
+          } else {
+            // Create new person entity for author
+            const privkey = Crypto.generatePrivateKey();
+            const pubkey = Crypto.getPublicKey(privkey);
+            const entityId = 'entity_' + await Crypto.sha256('person' + authorName);
+            const userIdentity = await Storage.identity.get();
+            
+            const entity = await Storage.entities.save(entityId, {
+              id: entityId,
+              type: 'person',
+              name: authorName,
+              aliases: [],
+              keypair: {
+                pubkey,
+                privkey,
+                npub: Crypto.hexToNpub(pubkey),
+                nsec: Crypto.hexToNsec(privkey)
+              },
+              created_by: userIdentity?.pubkey || 'unknown',
+              created_at: Math.floor(Date.now() / 1000),
+              articles: [{
+                url: article.url,
+                title: article.title,
+                context: 'author',
+                tagged_at: Math.floor(Date.now() / 1000)
+              }],
+              metadata: {}
+            });
+            
+            ReaderView.entities.push({ entity_id: entityId, context: 'author' });
+            EntityTagger.addChip(entity);
+          }
+        } catch (e) {
+          Utils.error('Failed to auto-tag author:', e);
+        }
+      }
+      
+      // Auto-detect publication entity from siteName/domain
+      const publicationName = (article.siteName || article.domain || '').trim();
+      if (publicationName.length >= CONFIG.tagging.min_selection_length) {
+        try {
+          const pubResults = await Storage.entities.search(publicationName, 'organization');
+          
+          if (pubResults.length > 0) {
+            // Link existing publication entity
+            const entity = pubResults[0];
+            if (!entity.articles) entity.articles = [];
+            entity.articles.push({
+              url: article.url,
+              title: article.title,
+              context: 'publication',
+              tagged_at: Math.floor(Date.now() / 1000)
+            });
+            await Storage.entities.save(entity.id, entity);
+            ReaderView.entities.push({ entity_id: entity.id, context: 'publication' });
+            EntityTagger.addChip(entity);
+          } else {
+            // Create new organization entity for publication
+            const privkey = Crypto.generatePrivateKey();
+            const pubkey = Crypto.getPublicKey(privkey);
+            const entityId = 'entity_' + await Crypto.sha256('organization' + publicationName);
+            const userIdentity = await Storage.identity.get();
+            
+            const entity = await Storage.entities.save(entityId, {
+              id: entityId,
+              type: 'organization',
+              name: publicationName,
+              aliases: [],
+              keypair: {
+                pubkey,
+                privkey,
+                npub: Crypto.hexToNpub(pubkey),
+                nsec: Crypto.hexToNsec(privkey)
+              },
+              created_by: userIdentity?.pubkey || 'unknown',
+              created_at: Math.floor(Date.now() / 1000),
+              articles: [{
+                url: article.url,
+                title: article.title,
+                context: 'publication',
+                tagged_at: Math.floor(Date.now() / 1000)
+              }],
+              metadata: {}
+            });
+            
+            ReaderView.entities.push({ entity_id: entityId, context: 'publication' });
+            EntityTagger.addChip(entity);
+          }
+        } catch (e) {
+          Utils.error('Failed to auto-tag publication:', e);
+        }
+      }
     },
 
     // Hide reader view and restore original page
