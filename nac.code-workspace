@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"name": "working",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"files.autoSaveWhenNoErrors": true,
+		"files.autoSaveWorkspaceFilesOnly": true
+	}
+}
