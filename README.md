@@ -1,6 +1,6 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-1.16.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A powerful Tampermonkey userscript that captures web articles and publishes them
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-1.16.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.0.1-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
   </a>
 </p>
 
@@ -22,18 +22,33 @@ A powerful Tampermonkey userscript that captures web articles and publishes them
 
 ---
 
-## 🆕 What's New in v1.16.0
+## 🆕 What's New in v2.0.1
 
-### ✨ Fullscreen Immersive Reader Mode
+### 🔄 Entity Sync via NOSTR
 
-Experience articles the way they were meant to be read:
+Sync your entity registry (persons, organizations, places) across browsers using encrypted NOSTR events:
 
-- **🖥️ Fullscreen Mode** - Clean, distraction-free reading experience
-- **📖 Optimal Reading Width** - Content centered with comfortable line length
-- **😊 Quick Reaction Bar** - Express reactions with emoji (👍 👎 ❤️ 😂 😮 😢 😡)
-- **🔘 Floating Action Button** - Easy access to all tools without clutter
-- **💬 Inline Comments & Reactions** - View community engagement directly in the reader
-- **📂 Collapsible Sidebar Panels** - Editing, metadata, and publishing slide out when needed
+- **🔒 Encrypted Private Sync** - Uses NIP-78 (kind 30078) parameterized replaceable events with NIP-04 encrypt-to-self
+- **⬆️ Push to NOSTR** - Encrypts and publishes all entities to your configured relays
+- **⬇️ Pull from NOSTR** - Fetches, decrypts, validates, and merges remote entities with local storage
+- **🔀 Smart Merge** - Last-write-wins on `updated` timestamp; article arrays merged by URL union
+- **🌐 Cross-Browser Workflow** - Generate/import nsec on Browser A → Push → Import same nsec on Browser B → Pull
+- **👤 Optional Public Identity** - Publish kind 0 profiles to give entities a public NOSTR identity
+
+### 🔑 nsec Import/Export
+
+- **Import existing nsec** for cross-browser identity setup
+- **Show nsec** and **Copy nsec** buttons in settings when a private key is available
+
+### 📂 Import Entities from File
+
+- Import entity registry JSON files exported from another browser via the Settings panel
+
+### 📡 Expanded Default Relay List
+
+- Increased to 10 reliable public relays for better connectivity and redundancy
+
+See [Entity Sync Design](docs/entity-sync-design.md) for full technical details.
 
 ---
 
@@ -41,6 +56,7 @@ Experience articles the way they were meant to be read:
 
 | Version | Changes |
 |---------|---------|
+| **v2.0.1** | Entity sync via NOSTR (NIP-78 encrypted), nsec import/export, entity file import, expanded relay list |
 | **v1.16.0** | Fullscreen immersive reader UI with inline reactions/comments |
 | **v1.15.0** | Redesigned keypair architecture (user identity vs publication signing) |
 | **v1.14.0** | Removed incomplete metadata features, cleaned up code |
@@ -100,6 +116,13 @@ Experience articles the way they were meant to be read:
 - **Organization extraction** from article content
 - **Entity review UI** - Add, remove, verify entities
 - **NOSTR tags** - Entities as `person` and `org` tags
+
+### 🔄 Entity Sync & Cross-Browser Identity
+- **Encrypted NOSTR sync** - Push/pull entities via NIP-78 events with NIP-04 encryption
+- **nsec import/export** - Share your identity across browsers securely
+- **Entity file import** - Import entity registry JSON files from another browser
+- **Smart merge** - Last-write-wins timestamps with article array union
+- **Optional kind 0 profiles** - Give entities a public NOSTR identity
 
 ### 🔄 Auto-Updates
 - Automatic update checks from GitHub
@@ -161,6 +184,7 @@ Works on **any article page**. Special date detection for:
 | Kind | Name | Description |
 |------|------|-------------|
 | **30023** | Long-form Article | NIP-23 articles (Markdown) |
+| **30078** | Entity Sync (Private) | NIP-78 encrypted entity data (parameterized replaceable) |
 | **32123** | Annotation/Comment | Context or corrections for URLs |
 | **32124** | Content Rating | Multi-dimensional quality ratings |
 | **32127** | Fact Check | Fact-check verdicts with evidence |
@@ -182,12 +206,17 @@ Works on **any article page**. Special date detection for:
 
 ## 🌐 Default Relays
 
-Pre-configured relays:
-- ✅ `wss://relay.damus.io`
+Pre-configured with 10 reliable public relays:
 - ✅ `wss://nos.lol`
-- ✅ `wss://relay.nostr.band`
-- ⬜ `wss://relay.snort.social` (disabled by default)
-- ⬜ `wss://nostr.wine` (disabled by default)
+- ✅ `wss://relay.primal.net`
+- ✅ `wss://relay.nostr.net`
+- ✅ `wss://nostr.mom`
+- ✅ `wss://relay.nostr.bg`
+- ✅ `wss://nostr.oxtr.dev`
+- ✅ `wss://relay.snort.social`
+- ✅ `wss://offchain.pub`
+- ✅ `wss://nostr-pub.wellorder.net`
+- ✅ `wss://nostr.fmt.wiz.biz`
 
 ---
 
@@ -204,6 +233,7 @@ Detailed documentation in the [`docs/`](docs/) folder:
 | [NIP URL Metadata](docs/NIP-URL-METADATA.md) | URL metadata protocol |
 | [UI Metadata Posting](docs/ui-metadata-posting-design.md) | UI/UX design docs |
 | [Development Roadmap](docs/development-roadmap.md) | Feature roadmap |
+| [Entity Sync Design](docs/entity-sync-design.md) | Entity sync via NOSTR technical design |
 
 Additional planning documents in [`plans/`](plans/).
 

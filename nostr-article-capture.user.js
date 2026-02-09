@@ -34,9 +34,16 @@
     version: '2.0.0',
     debug: false,
     relays_default: [
-      { url: 'wss://relay.damus.io', read: true, write: true, enabled: true },
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
-      { url: 'wss://relay.nostr.band', read: true, write: true, enabled: true }
+      { url: 'wss://relay.primal.net', read: true, write: true, enabled: true },
+      { url: 'wss://relay.nostr.net', read: true, write: true, enabled: true },
+      { url: 'wss://nostr.mom', read: true, write: true, enabled: true },
+      { url: 'wss://relay.nostr.bg', read: true, write: true, enabled: true },
+      { url: 'wss://nostr.oxtr.dev', read: true, write: true, enabled: true },
+      { url: 'wss://relay.snort.social', read: true, write: true, enabled: true },
+      { url: 'wss://offchain.pub', read: true, write: true, enabled: true },
+      { url: 'wss://nostr-pub.wellorder.net', read: true, write: true, enabled: true },
+      { url: 'wss://nostr.fmt.wiz.biz', read: true, write: true, enabled: true }
     ],
     reader: {
       max_width: '680px',
@@ -413,6 +420,56 @@
       const msgBuffer = new TextEncoder().encode(message);
       const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
       return Crypto.bytesToHex(new Uint8Array(hashBuffer));
+    },
+
+    // Recover full (x, y) point from x-only pubkey (even y)
+    liftX: (pubkeyHex) => {
+      const p = _SECP256K1.P;
+      const x = BigInt('0x' + pubkeyHex);
+      const c = _mod((_mod(x * x) * x + 7n), p);
+      const y = _modPow(c, (p + 1n) / 4n, p);
+      // Return even-y point
+      return [x, _mod(y) % 2n === 0n ? y : p - y];
+    },
+
+    // ECDH shared secret: multiply privkey scalar by pubkey point, return x-coordinate
+    getSharedSecret: async (privkeyHex, pubkeyHex) => {
+      const point = Crypto.liftX(pubkeyHex);
+      const privkey = BigInt('0x' + privkeyHex);
+      const result = _pointMultiply(privkey, point);
+      // Return x-coordinate as 32-byte hex
+      return result[0].toString(16).padStart(64, '0');
+    },
+
+    // NIP-04 AES-256-CBC encrypt
+    nip04Encrypt: async (plaintext, sharedSecretHex) => {
+      const key = await crypto.subtle.importKey(
+        'raw',
+        Crypto.hexToBytes(sharedSecretHex),
+        { name: 'AES-CBC' },
+        false,
+        ['encrypt']
+      );
+      const iv = crypto.getRandomValues(new Uint8Array(16));
+      const encoded = new TextEncoder().encode(plaintext);
+      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, key, encoded);
+      return btoa(String.fromCharCode(...new Uint8Array(ciphertext))) + '?iv=' + btoa(String.fromCharCode(...iv));
+    },
+
+    // NIP-04 AES-256-CBC decrypt
+    nip04Decrypt: async (payload, sharedSecretHex) => {
+      const [ciphertextB64, ivB64] = payload.split('?iv=');
+      const ciphertext = Uint8Array.from(atob(ciphertextB64), c => c.charCodeAt(0));
+      const iv = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+      const key = await crypto.subtle.importKey(
+        'raw',
+        Crypto.hexToBytes(sharedSecretHex),
+        { name: 'AES-CBC' },
+        false,
+        ['decrypt']
+      );
+      const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, ciphertext);
+      return new TextDecoder().decode(decrypted);
     }
   };
 
@@ -559,6 +616,15 @@
           console.error('[NAC Storage] Import error:', e);
           return 0;
         }
+      },
+
+      getLastSyncTime: async () => {
+        const val = GM_getValue('entity_last_sync', '0');
+        return parseInt(val, 10) || 0;
+      },
+
+      setLastSyncTime: async (timestamp) => {
+        GM_setValue('entity_last_sync', String(timestamp));
       }
     },
 
@@ -1345,6 +1411,50 @@
     isConnected: (url) => {
       const ws = RelayClient.connections.get(url);
       return ws && ws.readyState === WebSocket.OPEN;
+    },
+
+    // Subscribe to relay events (REQ/EOSE pattern)
+    subscribe: async (filter, relayUrls, options = {}) => {
+      const timeout = options.timeout || 15000;
+      const idleTimeout = options.idleTimeout || 10000;
+      const events = [];
+      const subId = Crypto.bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+
+      for (const url of relayUrls) {
+        try {
+          const ws = await RelayClient.connect(url);
+          ws.send(JSON.stringify(['REQ', subId, filter]));
+
+          await new Promise((resolve) => {
+            let idleTimer = setTimeout(resolve, idleTimeout);
+            const totalTimer = setTimeout(resolve, timeout);
+
+            const handler = (e) => {
+              try {
+                const data = JSON.parse(e.data);
+                if (data[0] === 'EVENT' && data[1] === subId) {
+                  events.push(data[2]);
+                  clearTimeout(idleTimer);
+                  idleTimer = setTimeout(resolve, idleTimeout);
+                } else if (data[0] === 'EOSE' && data[1] === subId) {
+                  clearTimeout(idleTimer);
+                  clearTimeout(totalTimer);
+                  ws.removeEventListener('message', handler);
+                  resolve();
+                }
+              } catch (parseErr) {
+                console.error('[NAC RelayClient] Parse error:', parseErr);
+              }
+            };
+            ws.addEventListener('message', handler);
+          });
+
+          try { ws.send(JSON.stringify(['CLOSE', subId])); } catch(e) {}
+        } catch (e) {
+          console.error('[NAC RelayClient] Subscribe error:', url, e);
+        }
+      }
+      return events;
     }
   };
 
@@ -1442,6 +1552,207 @@
           nip05: entity.nip05 || undefined
         })
       };
+    },
+
+    // Build kind 30078 entity sync event (NIP-78 application-specific data)
+    buildEntitySyncEvent: (entityId, encryptedContent, entityType, userPubkey) => {
+      return {
+        kind: 30078,
+        pubkey: userPubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', entityId],
+          ['client', 'nostr-article-capture'],
+          ['entity-type', entityType],
+          ['L', 'nac/entity-sync'],
+          ['l', 'v1', 'nac/entity-sync']
+        ],
+        content: encryptedContent
+      };
+    }
+  };
+
+  // ============================================================
+  // SECTION 8.5: ENTITY SYNC
+  // ============================================================
+
+  const EntitySync = {
+    validateEntity(entity) {
+      return entity
+        && typeof entity.id === 'string'
+        && typeof entity.name === 'string'
+        && ['person', 'organization', 'place'].includes(entity.type)
+        && entity.keypair
+        && typeof entity.keypair.pubkey === 'string'
+        && entity.keypair.pubkey.length === 64
+        && typeof entity.updated === 'number';
+    },
+
+    mergeArticles(localArticles = [], remoteArticles = []) {
+      const byUrl = new Map();
+      for (const a of [...localArticles, ...remoteArticles]) {
+        const existing = byUrl.get(a.url);
+        if (!existing || a.tagged_at > existing.tagged_at) {
+          byUrl.set(a.url, a);
+        }
+      }
+      return Array.from(byUrl.values());
+    },
+
+    mergeEntities(localRegistry, remoteEntities) {
+      const merged = { ...localRegistry };
+      let stats = { imported: 0, updated: 0, unchanged: 0, keptLocal: 0 };
+
+      for (const remote of remoteEntities) {
+        const local = merged[remote.id];
+        if (!local) {
+          merged[remote.id] = remote;
+          stats.imported++;
+        } else if (remote.updated > local.updated) {
+          merged[remote.id] = {
+            ...remote,
+            articles: EntitySync.mergeArticles(local.articles, remote.articles)
+          };
+          stats.updated++;
+        } else if (remote.updated < local.updated) {
+          merged[remote.id] = {
+            ...local,
+            articles: EntitySync.mergeArticles(local.articles, remote.articles)
+          };
+          stats.keptLocal++;
+        } else {
+          merged[remote.id] = {
+            ...local,
+            articles: EntitySync.mergeArticles(local.articles, remote.articles)
+          };
+          stats.unchanged++;
+        }
+      }
+      return { merged, stats };
+    },
+
+    async push(options = {}) {
+      const { publishProfiles = false, onProgress = () => {} } = options;
+
+      const identity = await Storage.identity.get();
+      if (!identity?.privkey) throw new Error('Entity sync requires a local private key');
+
+      const registry = await Storage.entities.getAll();
+      const entities = Object.values(registry);
+      if (entities.length === 0) throw new Error('No entities to sync');
+
+      onProgress({ phase: 'encrypting', total: entities.length });
+
+      const sharedSecret = await Crypto.getSharedSecret(identity.privkey, identity.pubkey);
+
+      const relayConfig = await Storage.relays.get();
+      const writeRelays = relayConfig.relays.filter(r => r.enabled && r.write).map(r => r.url);
+      if (writeRelays.length === 0) throw new Error('No write-enabled relays configured');
+
+      const results = [];
+      for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        onProgress({ phase: 'publishing', current: i + 1, total: entities.length, name: entity.name });
+
+        try {
+          const plaintext = JSON.stringify(entity);
+          const encrypted = await Crypto.nip04Encrypt(plaintext, sharedSecret);
+          const event = EventBuilder.buildEntitySyncEvent(entity.id, encrypted, entity.type, identity.pubkey);
+          const signed = await Crypto.signEvent(event, identity.privkey);
+          const relayResults = await RelayClient.publish(signed, writeRelays);
+          results.push({ entity: entity.name, id: entity.id, relayResults, success: true });
+        } catch (e) {
+          console.error('[NAC EntitySync] Push error for', entity.id, e);
+          results.push({ entity: entity.name, id: entity.id, error: e.message, success: false });
+        }
+      }
+
+      if (publishProfiles) {
+        onProgress({ phase: 'profiles', total: entities.length });
+        for (const entity of entities) {
+          try {
+            if (entity.keypair?.privkey) {
+              const profileEvent = EventBuilder.buildProfileEvent(entity);
+              const signed = await Crypto.signEvent(profileEvent, entity.keypair.privkey);
+              await RelayClient.publish(signed, writeRelays);
+            }
+          } catch (e) {
+            console.error('[NAC EntitySync] Profile publish error:', entity.id, e);
+          }
+        }
+      }
+
+      await Storage.entities.setLastSyncTime(Math.floor(Date.now() / 1000));
+      onProgress({ phase: 'complete', results });
+      return results;
+    },
+
+    async pull(options = {}) {
+      const { onProgress = () => {} } = options;
+
+      const identity = await Storage.identity.get();
+      if (!identity?.privkey) throw new Error('Entity sync requires a local private key');
+
+      onProgress({ phase: 'fetching' });
+
+      const relayConfig = await Storage.relays.get();
+      const readRelays = relayConfig.relays.filter(r => r.enabled && r.read).map(r => r.url);
+      if (readRelays.length === 0) throw new Error('No read-enabled relays configured');
+
+      const filter = {
+        kinds: [30078],
+        authors: [identity.pubkey],
+        '#L': ['nac/entity-sync']
+      };
+
+      const rawEvents = await RelayClient.subscribe(filter, readRelays, { timeout: 15000, idleTimeout: 10000 });
+
+      if (rawEvents.length === 0) {
+        onProgress({ phase: 'complete', stats: { imported: 0, updated: 0, unchanged: 0, keptLocal: 0, total: 0 } });
+        return { stats: { imported: 0, updated: 0, unchanged: 0, keptLocal: 0, total: 0 }, merged: {} };
+      }
+
+      const byDTag = new Map();
+      for (const evt of rawEvents) {
+        const dTag = evt.tags?.find(t => t[0] === 'd')?.[1];
+        if (!dTag) continue;
+        const existing = byDTag.get(dTag);
+        if (!existing || evt.created_at > existing.created_at) {
+          byDTag.set(dTag, evt);
+        }
+      }
+
+      const uniqueEvents = Array.from(byDTag.values());
+      onProgress({ phase: 'decrypting', total: uniqueEvents.length });
+
+      const sharedSecret = await Crypto.getSharedSecret(identity.privkey, identity.pubkey);
+
+      const remoteEntities = [];
+      for (const evt of uniqueEvents) {
+        try {
+          const decrypted = await Crypto.nip04Decrypt(evt.content, sharedSecret);
+          const entity = JSON.parse(decrypted);
+          if (EntitySync.validateEntity(entity)) {
+            remoteEntities.push(entity);
+          } else {
+            console.warn('[NAC EntitySync] Invalid entity structure, skipping:', entity?.id);
+          }
+        } catch (e) {
+          console.error('[NAC EntitySync] Decrypt/parse error:', e);
+        }
+      }
+
+      onProgress({ phase: 'merging', remote: remoteEntities.length });
+
+      const localRegistry = await Storage.entities.getAll();
+      const { merged, stats } = EntitySync.mergeEntities(localRegistry, remoteEntities);
+
+      GM_setValue('entity_registry', JSON.stringify(merged));
+
+      await Storage.entities.setLastSyncTime(Math.floor(Date.now() / 1000));
+      stats.total = remoteEntities.length;
+      onProgress({ phase: 'complete', stats });
+      return { stats, merged };
     }
   };
 
@@ -1759,6 +2070,9 @@
 
     // Show settings panel
     showSettings: async () => {
+      // Remove existing settings panel if present (for refresh)
+      document.getElementById('nac-settings-panel')?.remove();
+
       const identity = await Storage.identity.get();
       const relayConfig = await Storage.relays.get();
       
@@ -1779,11 +2093,26 @@
               <div><strong>Public Key:</strong> ${identity.npub || identity.pubkey}</div>
               <div><strong>Signer:</strong> ${identity.signer_type}</div>
               <button class="nac-btn" id="nac-clear-identity">Clear Identity</button>
+              ${identity.privkey ? `
+              <div style="margin-top: 8px;">
+                <button id="nac-show-nsec" style="padding: 4px 8px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 11px; margin-right: 4px;">👁 Show nsec</button>
+                <button id="nac-copy-nsec" style="padding: 4px 8px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 11px;">📋 Copy nsec</button>
+                <div id="nac-nsec-display" style="display: none; margin-top: 6px; padding: 6px; background: #1a1a2e; border: 1px solid #444; border-radius: 4px; font-family: monospace; font-size: 10px; word-break: break-all; color: #ff6b6b;"></div>
+                <div style="font-size: 10px; color: #888; margin-top: 4px;">⚠ Copy your nsec to import on another browser for entity sync.</div>
+              </div>
+              ` : ''}
             </div>
           ` : `
             <div>
               <button class="nac-btn" id="nac-connect-nip07">Connect NIP-07</button>
               <button class="nac-btn" id="nac-generate-keypair">Generate New Keypair</button>
+              <div style="margin-top: 12px; border-top: 1px solid #444; padding-top: 12px;">
+                <div style="font-size: 11px; color: #aaa; margin-bottom: 8px;">── or import existing ──</div>
+                <input type="text" id="nac-nsec-input" placeholder="nsec1..."
+                  style="width: 100%; padding: 6px 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 8px; box-sizing: border-box;">
+                <button id="nac-import-nsec" style="width: 100%; padding: 8px; background: #2d5a27; color: white; border: none; border-radius: 4px; cursor: pointer;">🔑 Import Private Key</button>
+                <div style="font-size: 10px; color: #888; margin-top: 6px;">⚠ Your nsec is stored locally in Tampermonkey storage. It never leaves your browser unencrypted.</div>
+              </div>
             </div>
           `}
           
@@ -1804,6 +2133,20 @@
           <button class="nac-btn" id="nac-export-entities">Export Entities</button>
           <button class="nac-btn" id="nac-import-entities">Import Entities</button>
           
+          <div style="margin-top: 16px; border-top: 1px solid #444; padding-top: 12px;">
+            <div style="font-weight: bold; margin-bottom: 8px;">🔄 Entity Sync</div>
+            <div style="font-size: 11px; color: #aaa; margin-bottom: 8px;">Sync entities across browsers via encrypted NOSTR events.</div>
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 10px; cursor: pointer;">
+              <input type="checkbox" id="nac-publish-profiles" style="accent-color: #4a9eff;">
+              Also publish entity profiles (kind 0 — public name only)
+            </label>
+            <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+              <button id="nac-push-entities" style="flex: 1; padding: 8px; background: #1a3a5c; color: white; border: none; border-radius: 4px; cursor: pointer;">⬆ Push to NOSTR</button>
+              <button id="nac-pull-entities" style="flex: 1; padding: 8px; background: #1a3a5c; color: white; border: none; border-radius: 4px; cursor: pointer;">⬇ Pull from NOSTR</button>
+            </div>
+            <div id="nac-sync-status" style="font-size: 11px; color: #aaa; padding: 8px; background: #1a1a2e; border-radius: 4px; min-height: 20px; display: none;"></div>
+          </div>
+          
           <div class="nac-version">Version ${CONFIG.version}</div>
         </div>
       `;
@@ -1819,6 +2162,31 @@
           panel.remove();
           Utils.showToast('Identity cleared');
         });
+
+        // nsec show/copy handlers (only when identity has privkey)
+        if (identity.privkey) {
+          document.getElementById('nac-show-nsec')?.addEventListener('click', () => {
+            const display = document.getElementById('nac-nsec-display');
+            if (display.style.display === 'none') {
+              display.textContent = identity.nsec || Crypto.hexToNsec(identity.privkey) || 'nsec not available';
+              display.style.display = 'block';
+              document.getElementById('nac-show-nsec').textContent = '🙈 Hide nsec';
+            } else {
+              display.style.display = 'none';
+              display.textContent = '';
+              document.getElementById('nac-show-nsec').textContent = '👁 Show nsec';
+            }
+          });
+          document.getElementById('nac-copy-nsec')?.addEventListener('click', async () => {
+            const nsec = identity.nsec || Crypto.hexToNsec(identity.privkey) || '';
+            if (nsec) {
+              await navigator.clipboard.writeText(nsec);
+              const btn = document.getElementById('nac-copy-nsec');
+              btn.textContent = '✓ Copied!';
+              setTimeout(() => btn.textContent = '📋 Copy nsec', 2000);
+            }
+          });
+        }
       } else {
         document.getElementById('nac-connect-nip07')?.addEventListener('click', async () => {
           if (unsafeWindow.nostr) {
@@ -1850,6 +2218,31 @@
           panel.remove();
           Utils.showToast('New keypair generated');
         });
+
+        // Import nsec handler
+        document.getElementById('nac-import-nsec')?.addEventListener('click', async () => {
+          const nsecInput = document.getElementById('nac-nsec-input')?.value?.trim();
+          if (!nsecInput || !nsecInput.startsWith('nsec1')) {
+            alert('Invalid nsec format. Must start with nsec1...');
+            return;
+          }
+          try {
+            const privkeyHex = Crypto.nsecToHex(nsecInput);
+            if (!privkeyHex || privkeyHex.length !== 64) throw new Error('Invalid nsec');
+            const pubkey = Crypto.getPublicKey(privkeyHex);
+            await Storage.identity.set({
+              pubkey,
+              privkey: privkeyHex,
+              npub: Crypto.hexToNpub(pubkey),
+              nsec: nsecInput,
+              signer_type: 'local',
+              created_at: Math.floor(Date.now() / 1000)
+            });
+            ReaderView.showSettings(); // Refresh
+          } catch (e) {
+            alert('Failed to import nsec: ' + e.message);
+          }
+        });
       }
       
       // Relay checkboxes
@@ -1861,6 +2254,7 @@
         });
       });
       
+      // Export entities handler
       document.getElementById('nac-export-entities')?.addEventListener('click', async () => {
         const json = await Storage.entities.exportAll();
         const blob = new Blob([json], { type: 'application/json' });
@@ -1871,6 +2265,108 @@
         a.click();
         Utils.showToast('Entities exported');
       });
+
+      // Import entities file picker
+      const importBtn = document.getElementById('nac-import-entities');
+      importBtn?.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = async (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const text = await file.text();
+          try {
+            const count = await Storage.entities.importAll(text);
+            alert(`Imported ${count} entities successfully.`);
+            ReaderView.showSettings(); // Refresh
+          } catch (err) {
+            alert('Import failed: ' + err.message);
+          }
+        };
+        input.click();
+      });
+
+      // Push entities handler
+      document.getElementById('nac-push-entities')?.addEventListener('click', async () => {
+        const statusEl = document.getElementById('nac-sync-status');
+        statusEl.style.display = 'block';
+        const pushBtn = document.getElementById('nac-push-entities');
+        const pullBtn = document.getElementById('nac-pull-entities');
+        pushBtn.disabled = true;
+        pullBtn.disabled = true;
+
+        try {
+          const publishProfiles = document.getElementById('nac-publish-profiles')?.checked || false;
+          await EntitySync.push({
+            publishProfiles,
+            onProgress: (p) => {
+              if (p.phase === 'encrypting') statusEl.textContent = `⏳ Encrypting ${p.total} entities...`;
+              else if (p.phase === 'publishing') statusEl.textContent = `⏳ Publishing entity ${p.current}/${p.total}: ${p.name}...`;
+              else if (p.phase === 'profiles') statusEl.textContent = `⏳ Publishing ${p.total} entity profiles...`;
+              else if (p.phase === 'complete') {
+                const succeeded = p.results.filter(r => r.success).length;
+                const failed = p.results.filter(r => !r.success).length;
+                statusEl.innerHTML = `✅ Push complete: ${succeeded} entities published` + (failed > 0 ? `, <span style="color: #ff6b6b;">${failed} failed</span>` : '');
+              }
+            }
+          });
+        } catch (e) {
+          statusEl.innerHTML = `<span style="color: #ff6b6b;">❌ ${e.message}</span>`;
+        } finally {
+          pushBtn.disabled = false;
+          pullBtn.disabled = false;
+        }
+      });
+
+      // Pull entities handler
+      document.getElementById('nac-pull-entities')?.addEventListener('click', async () => {
+        const statusEl = document.getElementById('nac-sync-status');
+        statusEl.style.display = 'block';
+        const pushBtn = document.getElementById('nac-push-entities');
+        const pullBtn = document.getElementById('nac-pull-entities');
+        pushBtn.disabled = true;
+        pullBtn.disabled = true;
+
+        try {
+          await EntitySync.pull({
+            onProgress: (p) => {
+              if (p.phase === 'fetching') statusEl.textContent = '⏳ Fetching from relays...';
+              else if (p.phase === 'decrypting') statusEl.textContent = `⏳ Received ${p.total} events, decrypting...`;
+              else if (p.phase === 'merging') statusEl.textContent = `⏳ Merging ${p.remote} entities...`;
+              else if (p.phase === 'complete') {
+                if (p.stats.total === 0) {
+                  statusEl.textContent = 'ℹ️ No entity sync events found on relays for this identity.';
+                } else {
+                  statusEl.innerHTML = `✅ Sync complete:<br>` +
+                    `&nbsp;&nbsp;${p.stats.imported} new entities imported<br>` +
+                    `&nbsp;&nbsp;${p.stats.updated} entities updated (newer remote)<br>` +
+                    `&nbsp;&nbsp;${p.stats.unchanged} entities unchanged<br>` +
+                    `&nbsp;&nbsp;${p.stats.keptLocal} entities kept (newer local)`;
+                }
+              }
+            }
+          });
+        } catch (e) {
+          statusEl.innerHTML = `<span style="color: #ff6b6b;">❌ ${e.message}</span>`;
+        } finally {
+          pushBtn.disabled = false;
+          pullBtn.disabled = false;
+        }
+      });
+
+      // Disable sync buttons if no private key
+      if (!identity?.privkey) {
+        const pushEl = document.getElementById('nac-push-entities');
+        const pullEl = document.getElementById('nac-pull-entities');
+        if (pushEl) pushEl.disabled = true;
+        if (pullEl) pullEl.disabled = true;
+        const statusEl = document.getElementById('nac-sync-status');
+        if (statusEl) {
+          statusEl.style.display = 'block';
+          statusEl.innerHTML = '⚠️ Entity sync requires a local private key. Import your nsec or generate a new keypair.';
+        }
+      }
     }
   };
 
