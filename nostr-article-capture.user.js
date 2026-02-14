@@ -320,11 +320,8 @@
     // Sign event with BIP-340 Schnorr signature
     signEvent: async (event, privkeyHex) => {
       try {
-        // Try NIP-07 extension first
-        if (unsafeWindow.nostr && unsafeWindow.nostr.signEvent) {
-          const signed = await unsafeWindow.nostr.signEvent(event);
-          return signed;
-        }
+        // BIP-340 Schnorr signing with provided private key
+        // NIP-07 signing is handled by the caller (publishArticle)
 
         // Compute event id (hash)
         const hash = await Crypto.getEventHash(event);
@@ -1016,6 +1013,98 @@
       return md;
     },
 
+    // Convert Markdown to HTML (lightweight renderer)
+    // Handles the subset of markdown that htmlToMarkdown() produces
+    markdownToHtml: (markdown) => {
+      if (!markdown) return '';
+      let html = markdown;
+
+      // Escape HTML entities in the source (but preserve existing HTML-like structures minimally)
+      html = html.replace(/&/g, '&amp;');
+      html = html.replace(/</g, '&lt;');
+      html = html.replace(/>/g, '&gt;');
+
+      // Code blocks (fenced) — must be done before other block-level processing
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
+        return `\n<pre><code>${code.trimEnd()}</code></pre>\n`;
+      });
+
+      // Code blocks (indented, 4 spaces) — collect consecutive indented lines
+      html = html.replace(/(?:^|\n)((?:    .+\n?)+)/g, (m, block) => {
+        const code = block.replace(/^    /gm, '');
+        return `\n<pre><code>${code.trimEnd()}</code></pre>\n`;
+      });
+
+      // Inline code (must be before other inline processing)
+      html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+      // Horizontal rules
+      html = html.replace(/^---+$/gm, '<hr>');
+
+      // Headings (atx style)
+      html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
+      html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
+      html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // Images (must be before links)
+      html = html.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (m, alt, src, title) => {
+        const titleAttr = title ? ` title="${title}"` : '';
+        return `<img src="${src}" alt="${alt}"${titleAttr}>`;
+      });
+
+      // Links
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+      // Bold and italic (bold first to handle ***)
+      html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+
+      // Blockquotes — collect consecutive > lines into one blockquote
+      html = html.replace(/(?:^&gt; .+$\n?)+/gm, (block) => {
+        const inner = block.replace(/^&gt; ?/gm, '').trim();
+        return `<blockquote><p>${inner}</p></blockquote>\n`;
+      });
+
+      // Unordered lists — collect consecutive - or * list items
+      html = html.replace(/(?:^[\-\*] .+$\n?)+/gm, (block) => {
+        const items = block.trim().split('\n').map(line => {
+          const text = line.replace(/^[\-\*] /, '');
+          return `<li>${text}</li>`;
+        }).join('\n');
+        return `<ul>\n${items}\n</ul>\n`;
+      });
+
+      // Ordered lists — collect consecutive numbered items
+      html = html.replace(/(?:^\d+\. .+$\n?)+/gm, (block) => {
+        const items = block.trim().split('\n').map(line => {
+          const text = line.replace(/^\d+\. /, '');
+          return `<li>${text}</li>`;
+        }).join('\n');
+        return `<ol>\n${items}\n</ol>\n`;
+      });
+
+      // Line breaks (two trailing spaces)
+      html = html.replace(/ {2}\n/g, '<br>\n');
+
+      // Paragraphs — split by double newlines, wrap non-block content in <p>
+      const blocks = html.split(/\n{2,}/);
+      html = blocks.map(block => {
+        block = block.trim();
+        if (!block) return '';
+        // Don't wrap block-level elements
+        if (/^<(?:h[1-6]|p|ul|ol|li|blockquote|pre|hr|img|div)/i.test(block)) {
+          return block;
+        }
+        return `<p>${block}</p>`;
+      }).filter(Boolean).join('\n\n');
+
+      return html;
+    },
+
     // Convert image URL to base64
     imageToBase64: async (imageUrl) => {
       return new Promise((resolve) => {
@@ -1127,6 +1216,7 @@
           <button class="nac-btn-entity-type" data-type="person">👤 Person</button>
           <button class="nac-btn-entity-type" data-type="organization">🏢 Org</button>
           <button class="nac-btn-entity-type" data-type="place">📍 Place</button>
+          <button class="nac-btn-entity-type" data-type="thing">🔷 Thing</button>
         </div>
         <div id="nac-entity-search-results"></div>
       `;
@@ -1293,7 +1383,7 @@
       const chip = document.createElement('div');
       chip.className = 'nac-entity-chip nac-entity-' + entity.type;
       chip.innerHTML = `
-        <span class="nac-chip-icon">${entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : '📍'}</span>
+        <span class="nac-chip-icon">${entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : entity.type === 'thing' ? '🔷' : '📍'}</span>
         <span class="nac-chip-name">${entity.name}</span>
         <button class="nac-chip-remove" data-id="${entity.id}">×</button>
       `;
@@ -1510,7 +1600,7 @@
           tags.push(['p', entity.keypair.pubkey, '', entityRef.context]);
           
           // Add name tag for clients that don't resolve pubkeys
-          const tagType = entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'org' : 'place';
+          const tagType = entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'org' : entity.type === 'thing' ? 'thing' : 'place';
           tags.push([tagType, entity.name, entityRef.context]);
         }
       }
@@ -1581,7 +1671,7 @@
       return entity
         && typeof entity.id === 'string'
         && typeof entity.name === 'string'
-        && ['person', 'organization', 'place'].includes(entity.type)
+        && ['person', 'organization', 'place', 'thing'].includes(entity.type)
         && entity.keypair
         && typeof entity.keypair.pubkey === 'string'
         && entity.keypair.pubkey.length === 64
@@ -1765,6 +1855,9 @@
     article: null,
     entities: [],
     editMode: false,
+    markdownMode: false,
+    previewMode: false,
+    _originalContentHtml: null,
     _hiddenElements: [],
 
     // Create and show reader view
@@ -1793,7 +1886,9 @@
           <button class="nac-btn-back" id="nac-back-btn">← Back to Page</button>
           <div class="nac-toolbar-title">${article.domain || 'Article'}</div>
           <div class="nac-toolbar-actions">
+            <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published">👁 Preview</button>
             <button class="nac-btn-toolbar" id="nac-edit-btn">Edit</button>
+            <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing">📝 Markdown</button>
             <button class="nac-btn-toolbar nac-btn-primary" id="nac-publish-btn">Publish</button>
             <button class="nac-btn-toolbar" id="nac-settings-btn">⚙</button>
           </div>
@@ -1840,6 +1935,8 @@
       // Attach event listeners
       document.getElementById('nac-back-btn').addEventListener('click', ReaderView.hide);
       document.getElementById('nac-edit-btn').addEventListener('click', ReaderView.toggleEditMode);
+      document.getElementById('nac-md-toggle-btn').addEventListener('click', ReaderView.toggleMarkdownMode);
+      document.getElementById('nac-preview-btn').addEventListener('click', ReaderView.togglePreviewMode);
       document.getElementById('nac-publish-btn').addEventListener('click', ReaderView.showPublishPanel);
       document.getElementById('nac-settings-btn').addEventListener('click', ReaderView.showSettings);
       document.getElementById('nac-copy-url').addEventListener('click', () => {
@@ -1978,6 +2075,11 @@
 
     // Hide reader view and restore original page
     hide: () => {
+      // Reset markdown/preview state
+      ReaderView.markdownMode = false;
+      ReaderView.previewMode = false;
+      ReaderView._originalContentHtml = null;
+
       if (ReaderView.container) {
         ReaderView.container.remove();
         ReaderView.container = null;
@@ -1992,25 +2094,150 @@
 
     // Toggle edit mode
     toggleEditMode: () => {
+      // If in preview mode, exit it first
+      if (ReaderView.previewMode) {
+        ReaderView.togglePreviewMode();
+      }
+
+      // If currently in markdown mode, convert back to HTML before exiting edit mode
+      if (ReaderView.editMode && ReaderView.markdownMode) {
+        ReaderView._exitMarkdownMode();
+      }
+
       ReaderView.editMode = !ReaderView.editMode;
       const titleEl = document.getElementById('nac-title');
       const contentEl = document.getElementById('nac-content');
       const editBtn = document.getElementById('nac-edit-btn');
+      const mdToggleBtn = document.getElementById('nac-md-toggle-btn');
+      const previewBtn = document.getElementById('nac-preview-btn');
       
       if (ReaderView.editMode) {
         titleEl.contentEditable = 'true';
         contentEl.contentEditable = 'true';
         editBtn.textContent = 'Done';
         editBtn.classList.add('active');
+        mdToggleBtn.style.display = '';
+        previewBtn.style.display = 'none';
       } else {
         titleEl.contentEditable = 'false';
         contentEl.contentEditable = 'false';
         editBtn.textContent = 'Edit';
         editBtn.classList.remove('active');
+        mdToggleBtn.style.display = 'none';
+        previewBtn.style.display = '';
+        
+        // Reset markdown mode state
+        ReaderView.markdownMode = false;
+        mdToggleBtn.textContent = '📝 Markdown';
+        mdToggleBtn.title = 'Switch to Markdown editing';
         
         // Save changes
         ReaderView.article.title = titleEl.textContent;
         ReaderView.article.content = contentEl.innerHTML;
+      }
+    },
+
+    // Toggle between visual and markdown editing modes
+    toggleMarkdownMode: () => {
+      if (!ReaderView.editMode) return;
+
+      const contentEl = document.getElementById('nac-content');
+      const mdToggleBtn = document.getElementById('nac-md-toggle-btn');
+
+      if (!ReaderView.markdownMode) {
+        // Switch TO markdown mode
+        ReaderView.markdownMode = true;
+        mdToggleBtn.textContent = '👁 Visual';
+        mdToggleBtn.title = 'Switch to Visual editing';
+        mdToggleBtn.classList.add('active');
+
+        // Convert current HTML to markdown
+        const markdown = ContentExtractor.htmlToMarkdown(contentEl.innerHTML);
+
+        // Hide the contentEditable div, show a textarea
+        contentEl.contentEditable = 'false';
+        contentEl.style.display = 'none';
+
+        const textarea = document.createElement('textarea');
+        textarea.id = 'nac-md-textarea';
+        textarea.className = 'nac-md-textarea';
+        textarea.value = markdown;
+        textarea.spellcheck = false;
+
+        // Auto-resize on input
+        const autoResize = () => {
+          textarea.style.height = 'auto';
+          textarea.style.height = textarea.scrollHeight + 'px';
+        };
+        textarea.addEventListener('input', autoResize);
+
+        contentEl.parentNode.insertBefore(textarea, contentEl.nextSibling);
+
+        // Trigger initial resize
+        requestAnimationFrame(autoResize);
+      } else {
+        // Switch BACK to visual mode
+        ReaderView._exitMarkdownMode();
+      }
+    },
+
+    // Internal: exit markdown mode and restore visual editing
+    _exitMarkdownMode: () => {
+      const contentEl = document.getElementById('nac-content');
+      const textarea = document.getElementById('nac-md-textarea');
+      const mdToggleBtn = document.getElementById('nac-md-toggle-btn');
+
+      if (textarea) {
+        // Convert markdown back to HTML
+        const html = ContentExtractor.markdownToHtml(textarea.value);
+        contentEl.innerHTML = html;
+        textarea.remove();
+      }
+
+      contentEl.style.display = '';
+      if (ReaderView.editMode) {
+        contentEl.contentEditable = 'true';
+      }
+
+      ReaderView.markdownMode = false;
+      if (mdToggleBtn) {
+        mdToggleBtn.textContent = '📝 Markdown';
+        mdToggleBtn.title = 'Switch to Markdown editing';
+        mdToggleBtn.classList.remove('active');
+      }
+    },
+
+    // Toggle "Preview as Published" mode (available outside edit mode)
+    togglePreviewMode: () => {
+      // Don't allow preview while in edit mode
+      if (ReaderView.editMode) return;
+
+      const contentEl = document.getElementById('nac-content');
+      const previewBtn = document.getElementById('nac-preview-btn');
+
+      if (!ReaderView.previewMode) {
+        // Enter preview mode
+        ReaderView.previewMode = true;
+        ReaderView._originalContentHtml = contentEl.innerHTML;
+
+        // Convert HTML → markdown → HTML to show exactly what will be published
+        const markdown = ContentExtractor.htmlToMarkdown(contentEl.innerHTML);
+        const renderedHtml = ContentExtractor.markdownToHtml(markdown);
+        contentEl.innerHTML = renderedHtml;
+
+        previewBtn.textContent = '↩ Original';
+        previewBtn.title = 'Back to Original view';
+        previewBtn.classList.add('active');
+        Utils.showToast('Showing preview as published markdown', 'success');
+      } else {
+        // Exit preview mode — restore original HTML
+        ReaderView.previewMode = false;
+        contentEl.innerHTML = ReaderView._originalContentHtml;
+        ReaderView._originalContentHtml = null;
+
+        previewBtn.textContent = '👁 Preview';
+        previewBtn.title = 'Preview as Published';
+        previewBtn.classList.remove('active');
       }
     },
 
@@ -2046,6 +2273,21 @@
 
     // Show publish panel
     showPublishPanel: async () => {
+      // If in markdown mode, sync the textarea content back to article
+      if (ReaderView.markdownMode) {
+        const textarea = document.getElementById('nac-md-textarea');
+        if (textarea) {
+          const html = ContentExtractor.markdownToHtml(textarea.value);
+          ReaderView.article.content = html;
+        }
+      } else if (ReaderView.editMode) {
+        // In visual edit mode, sync from contentEditable
+        const contentEl = document.getElementById('nac-content');
+        if (contentEl) {
+          ReaderView.article.content = contentEl.innerHTML;
+        }
+      }
+
       const panel = document.createElement('div');
       panel.id = 'nac-publish-panel';
       panel.className = 'nac-publish-panel';
@@ -2148,6 +2390,11 @@
             throw new Error('No private key available');
           }
           signedEvent = await Crypto.signEvent(event, identity.privkey);
+        }
+        
+        // Validate signed event
+        if (!signedEvent) {
+          throw new Error('Event signing failed — no signed event returned. Check your private key or NIP-07 extension.');
         }
         
         // Get selected relays
@@ -2510,6 +2757,7 @@
       --nac-entity-person: #8b5cf6;
       --nac-entity-org: #0891b2;
       --nac-entity-place: #16a34a;
+      --nac-entity-thing: #4a9eff;
     }
     
     @media (prefers-color-scheme: dark) {
@@ -2782,6 +3030,11 @@
     .nac-entity-chip.nac-entity-place {
       border-color: var(--nac-entity-place);
       background: rgba(22, 163, 74, 0.1);
+    }
+    
+    .nac-entity-chip.nac-entity-thing {
+      border-color: var(--nac-entity-thing);
+      background: rgba(74, 158, 255, 0.1);
     }
     
     .nac-chip-remove {
@@ -3094,6 +3347,42 @@
       background: var(--nac-bg);
       border-radius: 4px;
       margin-bottom: 4px;
+    }
+    
+    /* Markdown Textarea */
+    .nac-md-textarea {
+      width: 100%;
+      min-height: 400px;
+      padding: 16px;
+      border: 2px dashed var(--nac-primary);
+      border-radius: 4px;
+      background: var(--nac-bg);
+      color: var(--nac-text);
+      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', 'Monaco', 'Andale Mono', monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      resize: vertical;
+      outline: none;
+      box-sizing: border-box;
+      tab-size: 4;
+      white-space: pre-wrap;
+      overflow: hidden;
+    }
+    
+    .nac-md-textarea:focus {
+      border-color: var(--nac-primary);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+    }
+    
+    /* Markdown toggle button */
+    .nac-btn-toolbar.nac-btn-md-toggle {
+      font-size: 13px;
+    }
+    
+    .nac-btn-toolbar.nac-btn-md-toggle.active {
+      background: var(--nac-primary);
+      color: white;
+      border-color: var(--nac-primary);
     }
   `;
 
