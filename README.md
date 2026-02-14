@@ -54,6 +54,9 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Auto-detection** — author (Person) and publication (Organization) are automatically tagged on capture
 - **Keypair per entity** — each entity gets its own secp256k1 keypair (npub/nsec) for future NOSTR identity
 - **Entity aliases** — add multiple aliases for each entity
+- **Auto-suggestion** — automatically detects known entities from your registry in article text (name + alias matching)
+- **Entity discovery** — heuristic-based detection of proper nouns, organization names, places, and other entities using capitalized phrase analysis
+- **Suggestion bar** — accept or dismiss entity suggestions with one click; known entities link directly, new entities are created with guessed type
 
 ### 📋 Entity Management (Settings)
 
@@ -147,7 +150,7 @@ All cryptographic operations are implemented in pure JavaScript — no external 
 
 ## 🏗️ Architecture
 
-The userscript is a single self-contained file (~4,930 lines) organized into 13 sections:
+The userscript is a single self-contained file (~5,590 lines) organized into 14 sections:
 
 | # | Section | Lines | Description |
 |---|---------|-------|-------------|
@@ -157,6 +160,7 @@ The userscript is a single self-contained file (~4,930 lines) organized into 13 
 | 4 | **Content Extraction** | ~500 | Readability integration, smart date detection, Turndown markdown conversion, markdown-to-HTML rendering |
 | 5 | **Utilities** | ~50 | Formatting helpers, HTML sanitization, `makeKeyboardAccessible()` |
 | 6 | **Entity Tagger** | ~215 | Text selection popover, entity type picker, chip rendering, auto-detection |
+| 6B | **EntityAutoSuggest** | ~250 | Known entity matching (name + alias, word-boundary regex), new entity discovery (capitalized phrases, quoted names, type heuristics), suggestion bar UI |
 | 7 | **Relay Client** | ~180 | WebSocket connections with retry/backoff, NIP-01 message handling, parallel publish, subscribe |
 | 8 | **Event Builder** | ~115 | Kind 0 (profile), kind 30023 (article), kind 30078 (entity sync) construction & signing |
 | 8.5 | **Entity Sync** | ~195 | NIP-44 encrypted push/pull, NIP-04 fallback decryption, last-write-wins merge |
@@ -219,12 +223,13 @@ node tests/nip44-test.js
 
 ```
 nostr-article-capture/
-├── nostr-article-capture.user.js   # Main userscript (~4,930 lines)
+├── nostr-article-capture.user.js   # Main userscript (~5,590 lines)
 ├── README.md
 ├── docs/
 │   ├── article-complete-inventory.md
 │   ├── article-data-collection.md
 │   ├── data-model.md
+│   ├── entity-auto-suggestion-design.md
 │   ├── entity-sync-design.md
 │   ├── nostr-nips-analysis.md
 │   └── tampermonkey-article-capture-plan.md
@@ -242,6 +247,7 @@ nostr-article-capture/
 | Document | Description |
 |----------|-------------|
 | [Data Model](docs/data-model.md) | Entity and article data structures |
+| [Entity Auto-Suggestion Design](docs/entity-auto-suggestion-design.md) | Auto-suggestion architecture (known matching, discovery, suggestion bar) |
 | [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol (NIP-44 + NIP-04 fallback) |
 | [NOSTR NIPs Analysis](docs/nostr-nips-analysis.md) | NIP usage and rationale |
 | [Article Data Collection](docs/article-data-collection.md) | Article capture field reference |

@@ -1611,6 +1611,7 @@
         EntityTagger.hide();
         
         Utils.showToast(`Linked entity: ${entity.name}`, 'success');
+        EntityAutoSuggest.removeSuggestionByEntityId(entityId);
       } catch (e) {
         console.error('[NAC] Failed to link entity:', e);
         Utils.showToast('Failed to link entity', 'error');
@@ -1636,6 +1637,501 @@
         chip.remove();
         ReaderView.entities = ReaderView.entities.filter(e => e.entity_id !== entity.id);
       });
+    }
+  };
+
+  // ============================================
+  // SECTION 6B: ENTITY AUTO-SUGGESTION
+  // ============================================
+
+  const STOP_PHRASES = new Set([
+    'the', 'this', 'that', 'these', 'those', 'here', 'there', 'where', 'when',
+    'what', 'which', 'who', 'whom', 'how', 'why', 'has', 'have', 'had',
+    'but', 'and', 'for', 'not', 'you', 'all', 'can', 'her', 'was', 'one',
+    'our', 'out', 'are', 'also', 'been', 'from', 'had', 'has', 'his', 'its',
+    'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'get', 'let',
+    'say', 'she', 'too', 'use', 'will', 'with', 'would', 'could', 'should',
+    'about', 'after', 'again', 'being', 'below', 'between', 'both', 'during',
+    'each', 'every', 'first', 'further', 'however', 'just', 'last', 'least',
+    'like', 'long', 'many', 'more', 'most', 'much', 'must', 'next', 'only',
+    'other', 'over', 'same', 'some', 'still', 'such', 'than', 'them', 'then',
+    'they', 'very', 'well', 'were', 'while', 'your', 'according', 'although',
+    'another', 'because', 'before', 'between', 'beyond', 'despite', 'either',
+    'enough', 'instead', 'itself', 'neither', 'nothing', 'perhaps', 'several',
+    'since', 'something', 'sometimes', 'still', 'though', 'through', 'together',
+    'under', 'unless', 'until', 'upon', 'whether', 'within', 'without',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+    'read more', 'click here', 'sign up', 'log in', 'subscribe',
+    'skip advertisement', 'advertisement', 'sponsored content',
+    'share this', 'related articles', 'top stories'
+  ]);
+
+  const ORG_KEYWORDS = ['inc', 'corp', 'llc', 'ltd', 'co', 'company', 'corporation',
+    'university', 'college', 'institute', 'school', 'academy',
+    'bank', 'fund', 'trust', 'group', 'association', 'foundation',
+    'department', 'ministry', 'bureau', 'agency', 'commission',
+    'hospital', 'clinic', 'church', 'mosque', 'temple'];
+
+  const PLACE_KEYWORDS = ['city', 'county', 'state', 'province', 'district', 'region',
+    'street', 'avenue', 'boulevard', 'road', 'park', 'lake', 'river',
+    'mountain', 'island', 'ocean', 'sea', 'bay', 'peninsula'];
+
+  const EntityAutoSuggest = {
+    suggestions: [],
+    dismissedIds: new Set(),
+    maxVisible: 6,
+    expanded: false,
+
+    // Build a word-boundary regex that handles special characters
+    buildWordBoundaryRegex: (term) => {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // If term contains non-word chars (dots, hyphens), use lookaround
+      if (/[^\w\s]/.test(term)) {
+        return new RegExp('(?<=^|[\\s,;:!?\\.])' + escaped + '(?=$|[\\s,;:!?\\.])', 'i');
+      }
+      return new RegExp('\\b' + escaped + '\\b', 'i');
+    },
+
+    // Main entry point — scan article for entity suggestions
+    scan: async (article) => {
+      try {
+        if (!article || !article.textContent) return;
+
+        const registry = await Storage.entities.getAll();
+        const existingEntities = ReaderView.entities.map(e => e.entity_id);
+        const alreadyTaggedIds = new Set(existingEntities);
+        const searchText = article.title + ' \n ' + article.textContent;
+
+        // Phase 1: Known entity matching
+        const knownMatches = EntityAutoSuggest.matchKnownEntities(searchText, article.title, alreadyTaggedIds, registry);
+
+        // Phase 2: New entity discovery
+        const discovered = EntityAutoSuggest.discoverEntities(searchText, knownMatches, registry);
+
+        // Phase 3: Merge — known first, then discovered
+        const suggestions = [...knownMatches, ...discovered];
+
+        // Store suggestions
+        EntityAutoSuggest.suggestions = suggestions;
+        EntityAutoSuggest.expanded = false;
+        EntityAutoSuggest.dismissedIds = new Set();
+
+        // Render UI
+        if (suggestions.length > 0) {
+          const container = document.getElementById('nac-suggestion-bar');
+          if (container) {
+            EntityAutoSuggest.render(container, suggestions);
+          }
+        }
+      } catch (e) {
+        Utils.error('Entity auto-suggestion scan failed:', e);
+      }
+    },
+
+    // Find known entities whose name or alias appears in the article
+    matchKnownEntities: (text, title, alreadyTaggedIds, registry) => {
+      const results = [];
+      const entities = Object.values(registry);
+      const lowerText = text.toLowerCase();
+
+      for (const entity of entities) {
+        if (alreadyTaggedIds.has(entity.id)) continue;
+
+        const searchTerms = [entity.name, ...(entity.aliases || [])];
+
+        for (const term of searchTerms) {
+          if (!term || term.length < CONFIG.tagging.min_selection_length) continue;
+
+          // Fast indexOf pre-filter before regex
+          if (lowerText.indexOf(term.toLowerCase()) === -1) continue;
+
+          // Confirm with word-boundary regex
+          const regex = EntityAutoSuggest.buildWordBoundaryRegex(term);
+          if (regex.test(text)) {
+            results.push({
+              type: 'known',
+              entity: entity,
+              entityId: entity.id,
+              name: entity.name,
+              matchedOn: term,
+              occurrences: (text.match(new RegExp(regex.source, 'gi')) || []).length,
+              position: text.search(regex)
+            });
+            break; // one match per entity is enough
+          }
+        }
+      }
+
+      // Sort by first appearance in text
+      results.sort((a, b) => a.position - b.position);
+      return results;
+    },
+
+    // Discover potential new entities from capitalized phrases
+    discoverEntities: (text, knownMatches, registry) => {
+      const candidates = new Map(); // name -> candidate object
+
+      // Build set of known entity names/aliases for deduplication
+      const knownNames = new Set();
+      const knownMatchedNames = new Set();
+      const entities = Object.values(registry);
+      for (const entity of entities) {
+        knownNames.add(entity.name.toLowerCase());
+        (entity.aliases || []).forEach(a => knownNames.add(a.toLowerCase()));
+      }
+      for (const m of knownMatches) {
+        knownMatchedNames.add(m.name.toLowerCase());
+      }
+
+      // Pass 1: Extract capitalized multi-word phrases (2-5 words)
+      const CAPS_PHRASE = /\b([A-Z][a-z]+(?:\s+(?:of|the|and|for|in|on|at|de|la|van|von)\s+)?(?:[A-Z][a-z]+\s*){1,4})\b/g;
+      let capMatch;
+      while ((capMatch = CAPS_PHRASE.exec(text)) !== null) {
+        const phrase = capMatch[1].trim();
+        const words = phrase.split(/\s+/);
+
+        // Skip single words
+        if (words.length < 2) continue;
+
+        // Pass 2: Filter sentence-start false positives
+        const pos = capMatch.index;
+        if (pos > 0) {
+          const preceding = text.substring(Math.max(0, pos - 3), pos).trim();
+          const endsWithPunctuation = /[.!?]$/.test(preceding);
+          if (endsWithPunctuation && words.length <= 2) continue;
+        } else if (words.length <= 2) {
+          continue; // start of text, only 2 words — likely sentence start
+        }
+
+        const lowerPhrase = phrase.toLowerCase();
+        const firstWordLower = words[0].toLowerCase();
+
+        // Stop phrase filter
+        if (STOP_PHRASES.has(lowerPhrase)) continue;
+        if (STOP_PHRASES.has(firstWordLower)) continue;
+
+        // Skip if matches known entity
+        if (knownNames.has(lowerPhrase)) continue;
+        if (knownMatchedNames.has(lowerPhrase)) continue;
+
+        // Check if candidate is a substring of a known entity name
+        let isSubstring = false;
+        for (const name of knownNames) {
+          if (name.includes(lowerPhrase)) { isSubstring = true; break; }
+        }
+        if (isSubstring) continue;
+
+        // Deduplicate — keep first occurrence, count occurrences
+        if (candidates.has(lowerPhrase)) {
+          candidates.get(lowerPhrase).occurrences++;
+        } else {
+          candidates.set(lowerPhrase, {
+            type: 'discovered',
+            name: phrase,
+            guessedType: EntityAutoSuggest.guessType(phrase),
+            occurrences: 1,
+            position: pos
+          });
+        }
+      }
+
+      // Pass 3: Quoted name/title detection
+      const QUOTED = /["\u201C]([A-Z][^"\u201D]{2,60})["\u201D]/g;
+      let qMatch;
+      while ((qMatch = QUOTED.exec(text)) !== null) {
+        const quoted = qMatch[1].trim();
+        const words = quoted.split(/\s+/);
+
+        // Keep only short quoted strings (< 8 words, not full sentences)
+        if (words.length >= 8) continue;
+        if (words.length < 2) continue;
+
+        const lowerQuoted = quoted.toLowerCase();
+
+        // Skip if already captured or matches known
+        if (candidates.has(lowerQuoted)) continue;
+        if (knownNames.has(lowerQuoted)) continue;
+        if (knownMatchedNames.has(lowerQuoted)) continue;
+        if (STOP_PHRASES.has(words[0].toLowerCase())) continue;
+
+        candidates.set(lowerQuoted, {
+          type: 'discovered',
+          name: quoted,
+          guessedType: EntityAutoSuggest.guessType(quoted),
+          occurrences: 1,
+          position: qMatch.index
+        });
+      }
+
+      // Convert to array, cap at 20, prefer those with multiple occurrences
+      let result = Array.from(candidates.values());
+      if (result.length > 20) {
+        const multi = result.filter(c => c.occurrences >= 2);
+        const single = result.filter(c => c.occurrences < 2);
+        multi.sort((a, b) => a.position - b.position);
+        single.sort((a, b) => a.position - b.position);
+        result = [...multi, ...single].slice(0, 20);
+      } else {
+        result.sort((a, b) => a.position - b.position);
+      }
+
+      return result;
+    },
+
+    // Guess entity type from phrase patterns
+    guessType: (phrase) => {
+      const lowerPhrase = phrase.toLowerCase();
+      const words = phrase.split(/\s+/);
+
+      // Check for organization keywords
+      for (const kw of ORG_KEYWORDS) {
+        if (lowerPhrase.includes(kw)) return 'organization';
+      }
+
+      // Check for place keywords
+      for (const kw of PLACE_KEYWORDS) {
+        if (lowerPhrase.includes(kw)) return 'place';
+      }
+
+      // 2-word capitalized phrase — likely a person name
+      if (words.length === 2 && /^[A-Z]/.test(words[0]) && /^[A-Z]/.test(words[1])) {
+        return 'person';
+      }
+
+      // 3+ words with articles/prepositions — likely organization or thing
+      if (words.length >= 3) return 'thing';
+
+      return 'unknown';
+    },
+
+    // Get emoji for entity type
+    _typeEmoji: (type) => {
+      const map = { person: '\u{1F464}', organization: '\u{1F3E2}', place: '\u{1F4CD}', thing: '\u{1F537}', unknown: '\u2753' };
+      return map[type] || '\u2753';
+    },
+
+    // Render the suggestion bar UI
+    render: (container, suggestions) => {
+      container.style.display = 'block';
+      const count = suggestions.length;
+      const visibleCount = EntityAutoSuggest.expanded ? count : Math.min(count, EntityAutoSuggest.maxVisible);
+      const hiddenCount = count - EntityAutoSuggest.maxVisible;
+
+      container.innerHTML = `
+        <div class="nac-suggestion-bar-header">
+          <span class="nac-suggestion-bar-title">\u2728 Suggested Entities (${count})</span>
+          <button class="nac-suggestion-dismiss-all" aria-label="Dismiss all suggestions">Dismiss All</button>
+        </div>
+        <div class="nac-suggestion-chips">
+          ${suggestions.slice(0, visibleCount).map((s, i) => EntityAutoSuggest._renderChip(s, i)).join('')}
+        </div>
+        ${!EntityAutoSuggest.expanded && hiddenCount > 0 ? `<button class="nac-suggestion-show-more" aria-label="Show ${hiddenCount} more suggestions">Show ${hiddenCount} more</button>` : ''}
+      `;
+
+      // Attach event listeners
+      container.querySelector('.nac-suggestion-dismiss-all').addEventListener('click', EntityAutoSuggest.dismissAll);
+
+      container.querySelectorAll('.nac-suggestion-accept').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const idx = parseInt(btn.closest('.nac-suggestion-chip').dataset.index, 10);
+          EntityAutoSuggest.acceptSuggestion(idx);
+        });
+      });
+
+      container.querySelectorAll('.nac-suggestion-dismiss').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const idx = parseInt(btn.closest('.nac-suggestion-chip').dataset.index, 10);
+          EntityAutoSuggest.dismissSuggestion(idx);
+        });
+      });
+
+      const showMoreBtn = container.querySelector('.nac-suggestion-show-more');
+      if (showMoreBtn) {
+        showMoreBtn.addEventListener('click', EntityAutoSuggest.toggleShowMore);
+      }
+    },
+
+    // Render a single suggestion chip HTML
+    _renderChip: (suggestion, index) => {
+      const isKnown = suggestion.type === 'known';
+      const typeClass = isKnown ? 'nac-suggestion-known' : 'nac-suggestion-discovered';
+      const entityType = isKnown ? suggestion.entity.type : suggestion.guessedType;
+      const emoji = EntityAutoSuggest._typeEmoji(entityType);
+      const badge = isKnown ? 'known' : (entityType !== 'unknown' ? 'new \u00B7 ' + entityType : 'new');
+      const actionLabel = isKnown ? 'Link' : 'Add';
+      const name = Utils.escapeHtml(suggestion.name);
+      const entityId = isKnown ? ` data-entity-id="${suggestion.entityId}"` : '';
+
+      return `<div class="nac-suggestion-chip ${typeClass}" data-index="${index}"${entityId}>
+        <span class="nac-suggestion-icon">${emoji}</span>
+        <span class="nac-suggestion-name">${name}</span>
+        <span class="nac-suggestion-badge">${badge}</span>
+        <div class="nac-suggestion-actions">
+          <button class="nac-suggestion-accept" aria-label="Accept: ${name}">\u2713 ${actionLabel}</button>
+          <button class="nac-suggestion-dismiss" aria-label="Dismiss: ${name}">\u2715</button>
+        </div>
+      </div>`;
+    },
+
+    // Accept a known entity suggestion — link it
+    acceptKnown: async (entity) => {
+      try {
+        if (!entity.articles) entity.articles = [];
+        const articleEntry = {
+          url: ReaderView.article.url,
+          title: ReaderView.article.title,
+          context: 'mentioned',
+          tagged_at: Math.floor(Date.now() / 1000)
+        };
+        const existingIdx = entity.articles.findIndex(a => a.url === articleEntry.url);
+        if (existingIdx >= 0) {
+          entity.articles[existingIdx].tagged_at = articleEntry.tagged_at;
+        } else {
+          entity.articles.push(articleEntry);
+        }
+
+        await Storage.entities.save(entity.id, entity);
+        ReaderView.entities.push({ entity_id: entity.id, context: 'mentioned' });
+        EntityTagger.addChip(entity);
+        Utils.showToast(`Linked entity: ${entity.name}`, 'success');
+      } catch (e) {
+        Utils.error('Failed to accept known entity suggestion:', e);
+        Utils.showToast('Failed to link entity', 'error');
+      }
+    },
+
+    // Accept a discovered entity suggestion — create and link it
+    acceptDiscovered: async (name, guessedType) => {
+      try {
+        const type = (guessedType && guessedType !== 'unknown') ? guessedType : null;
+
+        if (type) {
+          // Create entity directly with guessed type
+          const privkey = Crypto.generatePrivateKey();
+          const pubkey = Crypto.getPublicKey(privkey);
+          const entityId = 'entity_' + await Crypto.sha256(type + name);
+          const userIdentity = await Storage.identity.get();
+
+          const entity = await Storage.entities.save(entityId, {
+            id: entityId,
+            type,
+            name,
+            aliases: [],
+            keypair: {
+              pubkey,
+              privkey,
+              npub: Crypto.hexToNpub(pubkey),
+              nsec: Crypto.hexToNsec(privkey)
+            },
+            created_by: userIdentity?.pubkey || 'unknown',
+            created_at: Math.floor(Date.now() / 1000),
+            articles: [{
+              url: ReaderView.article.url,
+              title: ReaderView.article.title,
+              context: 'mentioned',
+              tagged_at: Math.floor(Date.now() / 1000)
+            }],
+            metadata: {}
+          });
+
+          ReaderView.entities.push({ entity_id: entityId, context: 'mentioned' });
+          EntityTagger.addChip(entity);
+          Utils.showToast(`Created ${type}: ${name}`, 'success');
+        } else {
+          // No guessed type — show the popover for user to choose type
+          EntityTagger.selectedText = name;
+          const bar = document.getElementById('nac-suggestion-bar');
+          const rect = bar ? bar.getBoundingClientRect() : { left: 100, top: 200 };
+          EntityTagger.show(name, rect.left + window.scrollX, rect.top + window.scrollY);
+        }
+      } catch (e) {
+        Utils.error('Failed to accept discovered entity suggestion:', e);
+        Utils.showToast('Failed to create entity', 'error');
+      }
+    },
+
+    // Accept a suggestion by index
+    acceptSuggestion: async (index) => {
+      const suggestion = EntityAutoSuggest.suggestions[index];
+      if (!suggestion) return;
+
+      if (suggestion.type === 'known') {
+        await EntityAutoSuggest.acceptKnown(suggestion.entity);
+      } else {
+        await EntityAutoSuggest.acceptDiscovered(suggestion.name, suggestion.guessedType);
+      }
+
+      // Remove from suggestions
+      EntityAutoSuggest.suggestions.splice(index, 1);
+      EntityAutoSuggest._refreshUI();
+    },
+
+    // Dismiss a single suggestion
+    dismissSuggestion: (index) => {
+      const suggestion = EntityAutoSuggest.suggestions[index];
+      if (suggestion) {
+        EntityAutoSuggest.dismissedIds.add(suggestion.entityId || suggestion.name);
+      }
+      EntityAutoSuggest.suggestions.splice(index, 1);
+      EntityAutoSuggest._refreshUI();
+    },
+
+    // Dismiss all suggestions
+    dismissAll: () => {
+      EntityAutoSuggest.suggestions = [];
+      EntityAutoSuggest.dismissedIds = new Set();
+      const container = document.getElementById('nac-suggestion-bar');
+      if (container) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+      }
+    },
+
+    // Toggle show more / collapse
+    toggleShowMore: () => {
+      EntityAutoSuggest.expanded = !EntityAutoSuggest.expanded;
+      EntityAutoSuggest._refreshUI();
+    },
+
+    // Refresh the suggestion bar UI
+    _refreshUI: () => {
+      const container = document.getElementById('nac-suggestion-bar');
+      if (!container) return;
+
+      if (EntityAutoSuggest.suggestions.length === 0) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+      }
+
+      EntityAutoSuggest.render(container, EntityAutoSuggest.suggestions);
+    },
+
+    // Remove a suggestion by entity ID (called when entity is manually tagged)
+    removeSuggestionByEntityId: (entityId) => {
+      const idx = EntityAutoSuggest.suggestions.findIndex(
+        s => (s.type === 'known' && s.entityId === entityId)
+      );
+      if (idx >= 0) {
+        EntityAutoSuggest.suggestions.splice(idx, 1);
+        EntityAutoSuggest._refreshUI();
+      }
+    },
+
+    // Clean up suggestion state
+    destroy: () => {
+      EntityAutoSuggest.suggestions = [];
+      EntityAutoSuggest.dismissedIds = new Set();
+      EntityAutoSuggest.expanded = false;
+      const container = document.getElementById('nac-suggestion-bar');
+      if (container) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+      }
     }
   };
 
@@ -2199,6 +2695,9 @@
             </div>
           </div>
           
+          <!-- Suggestion bar will be injected here by EntityAutoSuggest -->
+          <div id="nac-suggestion-bar" class="nac-suggestion-bar" style="display: none;"></div>
+          
           <div class="nac-entity-bar">
             <div class="nac-entity-bar-title">Tagged Entities</div>
             <div class="nac-entity-chips" id="nac-entity-chips" role="list" aria-label="Tagged entities">
@@ -2380,7 +2879,14 @@
           Utils.error('Failed to auto-tag publication:', e);
         }
       }
-    },
+     
+     // Auto-suggest entities (async, non-blocking)
+     if (typeof requestIdleCallback === 'function') {
+       requestIdleCallback(() => EntityAutoSuggest.scan(article), { timeout: 2000 });
+     } else {
+       setTimeout(() => EntityAutoSuggest.scan(article), 500);
+     }
+   },
 
     // Format a Unix timestamp as a readable date string
     _formatDate: (timestamp) => {
@@ -2489,6 +2995,7 @@
       });
       ReaderView._hiddenElements = [];
       document.removeEventListener('keydown', ReaderView.handleKeyboard);
+      EntityAutoSuggest.destroy();
       RelayClient.disconnectAll();
 
       // Return focus to the FAB button
@@ -4092,6 +4599,149 @@
       font-size: 13px;
       color: var(--nac-text-muted);
       margin-bottom: 12px;
+    }
+    
+    /* Suggestion Bar */
+    .nac-suggestion-bar {
+      max-width: var(--reader-max-width, 680px);
+      margin: 24px auto 0;
+      padding: 16px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+    }
+    
+    .nac-suggestion-bar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    
+    .nac-suggestion-bar-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+    }
+    
+    .nac-suggestion-dismiss-all {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      text-decoration: underline;
+      padding: 0;
+    }
+    
+    .nac-suggestion-dismiss-all:hover {
+      color: var(--nac-error);
+    }
+    
+    .nac-suggestion-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    
+    .nac-suggestion-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      background: var(--nac-surface);
+      border: 1px dashed var(--nac-border);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    
+    .nac-suggestion-chip.nac-suggestion-known {
+      border-color: var(--nac-primary);
+      background: rgba(99, 102, 241, 0.06);
+    }
+    
+    .nac-suggestion-chip.nac-suggestion-discovered {
+      border-color: var(--nac-success);
+      background: rgba(34, 197, 94, 0.06);
+    }
+    
+    .nac-suggestion-icon {
+      font-size: 14px;
+    }
+    
+    .nac-suggestion-name {
+      font-weight: 500;
+      color: var(--nac-text);
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    
+    .nac-suggestion-badge {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 10px;
+      color: var(--nac-text-muted);
+      background: var(--nac-bg);
+      white-space: nowrap;
+    }
+    
+    .nac-suggestion-actions {
+      display: inline-flex;
+      gap: 4px;
+      margin-left: 4px;
+    }
+    
+    .nac-suggestion-accept {
+      background: none;
+      border: 1px solid var(--nac-success);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--nac-success);
+      padding: 2px 6px;
+      white-space: nowrap;
+    }
+    
+    .nac-suggestion-accept:hover {
+      background: var(--nac-success);
+      color: white;
+    }
+    
+    .nac-suggestion-dismiss {
+      background: none;
+      border: 1px solid var(--nac-border);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--nac-text-muted);
+      padding: 2px 6px;
+    }
+    
+    .nac-suggestion-dismiss:hover {
+      border-color: var(--nac-error);
+      color: var(--nac-error);
+    }
+    
+    .nac-suggestion-show-more {
+      display: block;
+      width: 100%;
+      padding: 6px;
+      background: none;
+      border: 1px dashed var(--nac-border);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      text-align: center;
+    }
+    
+    .nac-suggestion-show-more:hover {
+      background: var(--nac-bg);
+      color: var(--nac-text);
     }
     
     /* Publish Panel */

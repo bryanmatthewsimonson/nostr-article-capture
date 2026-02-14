@@ -8,7 +8,7 @@ The v1 NOSTR Article Capture userscript had grown to 11,398 lines in a single fi
 
 The redesign replaced the modal/panel/sidebar approach with a full-page reader view that takes over the browser tab (like Firefox Reader View), providing a distraction-free reading experience with inline metadata tagging and one-click NOSTR archival.
 
-**v2 is now fully implemented** at ~4,930 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
+**v2 is now fully implemented** at ~5,590 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -42,7 +42,7 @@ The redesign replaced the modal/panel/sidebar approach with a full-page reader v
 - Simplified embedded Readability → full library via `@require`
 - Simplified embedded Turndown → full library via `@require` (with GFM plugin)
 - Dual identity model → unified model: one user identity that owns entity keypairs
-- Monolithic 11K-line file → well-organized modular sections (~4,930 lines)
+- Monolithic 11K-line file → well-organized modular sections (~5,590 lines)
 
 ### Kept (good foundations built upon)
 - Tampermonkey userscript format
@@ -686,7 +686,11 @@ const Utils = {
 
 Text selection popover, entity type selection (Person/Org/Place/Thing), entity search/match/create/link, entity bar chips with auto-detection of author and publication entities.
 
-### Section 7: Relay Client (~lines 1640-1820)
+### Section 6B: EntityAutoSuggest (~lines 1643-2138)
+
+Automatic entity detection module (~250 lines). Scans article text for known entities from the registry (name + alias matching via word-boundary regex) and discovers new entity candidates using heuristic analysis of capitalized phrases, quoted names, and type guessing. Non-blocking scan via `requestIdleCallback`. Renders a suggestion bar UI with accept/dismiss/show-more controls.
+
+### Section 7: Relay Client (~lines 2138-2320)
 
 ```javascript
 const RelayClient = {
@@ -752,7 +756,7 @@ async function init() {
 The project is a single userscript file plus supporting documentation and tests:
 
 ```
-nostr-article-capture.user.js    (~4,930 lines — main userscript)
+nostr-article-capture.user.js    (~5,590 lines — main userscript)
 tests/crypto-tests.js            (65 tests — BIP-340 + crypto validation)
 tests/nip44-test.js              (21 tests — NIP-44 v2 padding, ChaCha20, HKDF, encrypt/decrypt)
 plans/v2-redesign-plan.md        (this file)
@@ -760,6 +764,7 @@ docs/                            (reference documentation)
   ├── article-complete-inventory.md
   ├── article-data-collection.md
   ├── data-model.md
+  ├── entity-auto-suggestion-design.md
   ├── entity-sync-design.md
   ├── nostr-nips-analysis.md
   └── tampermonkey-article-capture-plan.md
@@ -830,7 +835,7 @@ docs/                            (reference documentation)
 | User can publish to NOSTR relays from reader view | ✅ With per-relay status |
 | Published events contain correct NIP-23 structure with entity references | ✅ kind 30023 with p-tags |
 | All crypto produces valid, interoperable NOSTR keys and signatures | ✅ Validated by 65 tests + BIP-340 vectors |
-| Script size significantly reduced from 11,398 lines | ✅ ~4,930 lines (57% reduction) |
+| Script size significantly reduced from 11,398 lines | ✅ ~5,590 lines (51% reduction) |
 | Reader view feels like a premium reading experience | ✅ Full typography system, dark mode, clean layout |
 
 ### Bonus achievements beyond original plan:
@@ -849,3 +854,4 @@ docs/                            (reference documentation)
 - Comprehensive keyboard accessibility (ARIA, focus trap, panel stack)
 - Graceful error handling on storage failures
 - NIP-44 test suite (21 tests)
+- Entity auto-suggestion (known entity matching + new entity discovery + suggestion bar UI)
