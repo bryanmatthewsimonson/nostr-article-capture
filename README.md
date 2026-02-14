@@ -4,11 +4,11 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
-A powerful Tampermonkey userscript that captures web articles and publishes them to the NOSTR network. Features an **immersive fullscreen reader** with inline reactions, comments, and distraction-free reading. Part of the **Decentralized News Verification Network**.
+A Tampermonkey userscript that captures web articles into a clean reader view, supports entity tagging and editing, and publishes long-form content to the NOSTR network as kind 30023 events.
 
 ---
 
-## 📥 One-Click Install
+## 📥 Install
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
@@ -16,266 +16,135 @@ A powerful Tampermonkey userscript that captures web articles and publishes them
   </a>
 </p>
 
-**[➡️ Install NOSTR Article Capture](https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js)**
+**Prerequisites:** [Tampermonkey](https://www.tampermonkey.net/) browser extension.
 
-*Tampermonkey will automatically detect the userscript and prompt you to install it.*
+The script bundles three `@require` dependencies automatically:
 
----
-
-## 🐛 Recent Bug Fixes (2025-02)
-
-### ✅ "Tag Entity" Button Now Functional
-- **Problem:** The "+ Tag Entity" button in the Reader View did nothing when clicked — no click event listener was attached to `#nac-add-entity-btn`.
-- **Fix:** Added a click event listener that prompts the user for an entity name and opens the EntityTagger type-selection popover when a valid name is entered.
-- **How it works:** User clicks "+ Tag Entity" → enters a name via `prompt()` → if valid (meets minimum length), the EntityTagger popover opens at the button's position for type selection.
-
-### ✅ Auto-Detection of Author and Publication Entities
-- **Problem:** When capturing an article, the author (from byline) and publication (from site name) were displayed as plain text but never automatically tagged as entities in the entity system.
-- **Fix:** Added auto-detection logic at the end of `ReaderView.show()` that processes both author and publication:
-  - **Author:** Checks `article.byline`, searches for existing person entities. If found, links with context `"author"`. If not found, creates a new person entity with a generated keypair. Displays as a chip in the entity bar.
-  - **Publication:** Checks `article.siteName` or `article.domain`, searches for existing organization entities. If found, links with context `"publication"`. If not found, creates a new organization entity with a generated keypair. Displays as a chip in the entity bar.
-  - Both operations are wrapped in `try/catch` for error resilience — a failure in one does not block the other.
+| Dependency | Purpose |
+|-----------|---------|
+| [@mozilla/readability](https://github.com/mozilla/readability) 0.5.0 | Article content extraction |
+| [Turndown](https://github.com/mixmark-io/turndown) 7.2.0 | HTML → Markdown conversion |
+| [turndown-plugin-gfm](https://github.com/mixmark-io/turndown#gfm) 1.0.2 | GitHub-Flavored Markdown tables & strikethrough |
 
 ---
 
-## 🆕 What's New in v2.0.1
-
-### 🔄 Entity Sync via NOSTR
-
-Sync your entity registry (persons, organizations, places) across browsers using encrypted NOSTR events:
-
-- **🔒 Encrypted Private Sync** - Uses NIP-78 (kind 30078) parameterized replaceable events with NIP-04 encrypt-to-self
-- **⬆️ Push to NOSTR** - Encrypts and publishes all entities to your configured relays
-- **⬇️ Pull from NOSTR** - Fetches, decrypts, validates, and merges remote entities with local storage
-- **🔀 Smart Merge** - Last-write-wins on `updated` timestamp; article arrays merged by URL union
-- **🌐 Cross-Browser Workflow** - Generate/import nsec on Browser A → Push → Import same nsec on Browser B → Pull
-- **👤 Optional Public Identity** - Publish kind 0 profiles to give entities a public NOSTR identity
-
-### 🔑 nsec Import/Export
-
-- **Import existing nsec** for cross-browser identity setup
-- **Show nsec** and **Copy nsec** buttons in settings when a private key is available
-
-### 📂 Import Entities from File
-
-- Import entity registry JSON files exported from another browser via the Settings panel
-
-### 📡 Expanded Default Relay List
-
-- Increased to 10 reliable public relays for better connectivity and redundancy
-
-See [Entity Sync Design](docs/entity-sync-design.md) for full technical details.
-
----
-
-## 📋 Version History
-
-| Version | Changes |
-|---------|---------|
-| **v2.0.1** | Entity sync via NOSTR (NIP-78 encrypted), nsec import/export, entity file import, expanded relay list. **Bug fixes:** "+ Tag Entity" button now functional; auto-detection of author and publication entities on article capture |
-| **v1.16.0** | Fullscreen immersive reader UI with inline reactions/comments |
-| **v1.15.0** | Redesigned keypair architecture (user identity vs publication signing) |
-| **v1.14.0** | Removed incomplete metadata features, cleaned up code |
-| **v1.13.0** | Enhanced date detection (JSON-LD, Substack support) + date editing |
-| **v1.12.0** | Initial features: URL capture, content editing, entity extraction |
-
----
-
-## ✨ Features Overview
-
-### 📖 Immersive Reader Mode
-- **Fullscreen experience** with minimal UI distractions
-- **Optimal reading width** for comfortable reading
-- **Quick reaction bar** for instant emoji reactions
-- **Floating action button** for tools access
-- **Inline comments and reactions** display from NOSTR network
+## ✨ Features
 
 ### 📰 Article Capture
-- **Smart extraction** of title, author, date, and content
-- **Readability mode** - Clean article text from any webpage
-- **Markdown conversion** - Automatic HTML to Markdown
-- **Image embedding** - Base64 data URLs for self-contained articles
+- **Mozilla Readability** extracts title, author, date, and body from any webpage
+- **Smart date detection** — JSON-LD, meta tags (`article:published_time`, `datePublished`), platform-specific selectors (Substack, Medium, WordPress)
+- **Markdown conversion** — HTML content automatically converted via Turndown
 
-### 📅 Smart Date Detection
-- **JSON-LD structured data** parsing
-- **Meta tags** (article:published_time, datePublished)
-- **Platform-specific selectors** for Substack, Medium, WordPress
-- **Manual date editing** with calendar picker
+### 📖 Reader View
+- **Full-page takeover** with clean typography and optimal reading width
+- **Dark mode** support
+- **Metadata display** — title, author, publication, date, word count
 
-### ✏️ Content Editing
-- **Edit mode toggle** - Modify content before publishing
-- **Editable fields** - Title, date, excerpt, body
-- **Quick clean tools** - Remove ads, clean whitespace, remove related articles
-- **Revert functionality** - Restore original content anytime
+### ✏️ Editing
+- **Visual (WYSIWYG)** — `contentEditable` rich-text editing directly in the reader view
+- **Raw Markdown** — toggle to edit the underlying Markdown source
+- **Editable fields** — title, date, excerpt, and body
+- **Preview as Published** — renders the final Markdown to see what the NOSTR article will look like
 
-### 👤 User Identity (Personal NOSTR Keys)
-- Used for **URL metadata** - annotations, ratings, reactions
-- Your personal identity for engaging with content
-- Supports **NIP-07 extensions** (nos2x, Alby)
+### 🏷️ Entity Tagging
+- **Four entity types**: Person 👤, Organization 🏢, Place 📍, Thing 🔷
+- **Text selection tagging** — select text in the article, choose entity type from a popover
+- **Manual tagging** — add entities by name via the "+ Tag Entity" button
+- **Auto-detection** — author (person) and publication (organization) are automatically tagged on capture
+- **Keypair per entity** — each entity gets its own secp256k1 keypair for future NOSTR identity
 
-### 📝 Publication Signing (Organization Keys)
-- Used for **publishing articles** to NOSTR
-- Represents publications/organizations
-- **Local keypair generation** and management
-- **Keypair registry** with export/backup
+### 📤 NOSTR Publishing
+- Publishes articles as **kind 30023** (NIP-23 long-form content) with Markdown body
+- Entity tags included in the published event
+- Configurable relay list (10 default public relays)
 
-### 🏷️ URL Metadata
-- **Annotations & Comments** - Add context to any URL
-- **Content Ratings** - Multi-dimensional quality ratings
-- **Fact-Checks** - Verdicts with evidence
-- **Headline Corrections** - Fix misleading titles
-- **Quick Reactions** - Emoji reactions with reasoning
-- **Related Content** - Link related URLs
+### 🔑 Signing Methods
 
-### 👥 People & Organizations
-- **Automatic detection** of quoted people
-- **Organization extraction** from article content
-- **Entity review UI** - Add, remove, verify entities
-- **NOSTR tags** - Entities as `person` and `org` tags
+| Method | Description |
+|--------|-------------|
+| **NIP-07 Extension** | Browser extensions like nos2x or Alby — keys never leave the extension |
+| **Local Keypair** | BIP-340 Schnorr signing with a locally generated or imported key |
 
-### 🔄 Entity Sync & Cross-Browser Identity
-- **Encrypted NOSTR sync** - Push/pull entities via NIP-78 events with NIP-04 encryption
-- **nsec import/export** - Share your identity across browsers securely
-- **Entity file import** - Import entity registry JSON files from another browser
-- **Smart merge** - Last-write-wins timestamps with article array union
-- **Optional kind 0 profiles** - Give entities a public NOSTR identity
+### 🔄 Entity Sync
+- **Push/Pull** entities across browsers via encrypted **NIP-78** (kind 30078) events
+- **NIP-04 encrypt-to-self** — entity data is encrypted with your own key
+- **Smart merge** — last-write-wins on `updated` timestamp; article arrays merged by URL union
+- **nsec import/export** — share your identity across browsers
 
-### 🔄 Auto-Updates
-- Automatic update checks from GitHub
-- Tampermonkey notification when updates available
-- One-click update installation
+### ⚙️ Settings
+- **Identity management** — generate a new keypair, import an existing nsec, or connect via NIP-07
+- **Relay configuration** — add, remove, enable/disable relays
+- **Entity export/import** — JSON file backup and restore of the entity registry
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Usage
 
-1. **📥 Install** - Click the one-click install link above
-2. **🌐 Navigate** - Go to any article page
-3. **📰 Click** - Press the floating **📰** button (bottom-right)
-4. **📖 Read** - Enjoy the immersive fullscreen reader
-5. **😊 React** - Use the reaction bar for quick emoji reactions
-6. **🔧 Tools** - Click the floating action button for:
-   - ✏️ Edit article content
-   - 🏷️ Add URL metadata
-   - 📤 Publish to NOSTR
+1. **Navigate** to any article page
+2. **Click** the floating **📰** button (bottom-right corner)
+3. **Read** the article in the clean reader view
+4. **Edit** — toggle visual or Markdown editing; modify title, date, body
+5. **Tag entities** — select text to tag people, orgs, places, or things; or use "+ Tag Entity"
+6. **Preview** — check the final published format with "Preview as Published"
+7. **Publish** — sign and send to NOSTR relays
 
 ---
 
-## 🔑 User Identity vs Publication
+## 🏗️ Architecture
 
-### User Identity (Your Personal Keys)
-Used when posting **URL metadata**:
-- Annotations and comments
-- Content ratings
-- Fact-checks
-- Reactions
+The userscript is a single self-contained file (~3,450 lines) organized into 11 sections:
 
-**Setup:** Connect via NIP-07 extension (nos2x, Alby) or generate local keys.
-
-### Publication Identity (Organization Keys)
-Used when **publishing articles**:
-- Long-form content (kind 30023)
-- Articles are signed by the publication
-
-**Setup:** Create or import publication keypairs in the Publishing panel.
-
----
-
-## 🌐 Supported Platforms
-
-Works on **any article page**. Special date detection for:
-
-| Platform | Detection Method |
-|----------|-----------------|
-| **Substack** | Custom selectors, JSON-LD |
-| **Medium** | JSON-LD, meta tags |
-| **WordPress** | Multiple meta formats |
-| **News Sites** | article:published_time, Schema.org |
-| **Generic** | Fallback meta detection |
+| # | Section | Description |
+|---|---------|-------------|
+| 1 | **Configuration** | Default relays, reader settings, extraction limits, tagging config |
+| 2 | **Crypto** | secp256k1 curve primitives, BIP-340 Schnorr signing, SHA-256, HMAC |
+| 3 | **Storage** | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD |
+| 4 | **Content Extraction** | Readability integration, date detection, Turndown Markdown conversion |
+| 5 | **Utilities** | Formatting helpers, debounce, sanitization |
+| 6 | **Entity Tagger** | Text selection popover, entity type picker, auto-detection |
+| 7 | **Relay Client** | WebSocket connections, NIP-01 message handling, publish/subscribe |
+| 8 | **Event Builder** | kind 0 (profile), kind 30023 (article), kind 30078 (entity sync) construction & signing |
+| 9 | **Reader View** | Full-page takeover UI, edit modes, preview, dark mode, entity bar |
+| 10 | **Styles** | All CSS injected via `GM_addStyle` |
+| 11 | **Initialization** | FAB creation, menu commands, startup |
 
 ---
 
 ## 📋 NOSTR Event Kinds
 
-| Kind | Name | Description |
-|------|------|-------------|
-| **30023** | Long-form Article | NIP-23 articles (Markdown) |
-| **30078** | Entity Sync (Private) | NIP-78 encrypted entity data (parameterized replaceable) |
-| **32123** | Annotation/Comment | Context or corrections for URLs |
-| **32124** | Content Rating | Multi-dimensional quality ratings |
-| **32127** | Fact Check | Fact-check verdicts with evidence |
-| **32129** | Headline Correction | Corrections for misleading headlines |
-| **32131** | Related Content | Links to related URLs |
-| **32132** | Reaction | Emoji reactions with reasoning |
-
----
-
-## 🔑 Signing Methods
-
-| Method | Description | Security |
-|--------|-------------|----------|
-| **NIP-07 Extension** | nos2x, Alby, other browser extensions | ⭐⭐⭐ Keys never leave extension |
-| **NSecBunker** | Remote signing service | ⭐⭐⭐ Enterprise-ready |
-| **Local Keys** | Generated/stored in Tampermonkey | ⭐⭐ Convenient |
+| Kind | Name | Usage |
+|------|------|-------|
+| **0** | Profile (NIP-01) | Optional public identity for entities |
+| **30023** | Long-form Article (NIP-23) | Published article content in Markdown |
+| **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-04 encrypt-to-self) |
 
 ---
 
 ## 🌐 Default Relays
 
-Pre-configured with 10 reliable public relays:
-- ✅ `wss://nos.lol`
-- ✅ `wss://relay.primal.net`
-- ✅ `wss://relay.nostr.net`
-- ✅ `wss://nostr.mom`
-- ✅ `wss://relay.nostr.bg`
-- ✅ `wss://nostr.oxtr.dev`
-- ✅ `wss://relay.snort.social`
-- ✅ `wss://offchain.pub`
-- ✅ `wss://nostr-pub.wellorder.net`
-- ✅ `wss://nostr.fmt.wiz.biz`
+Pre-configured with 10 public relays:
+
+`wss://nos.lol` · `wss://relay.primal.net` · `wss://relay.nostr.net` · `wss://nostr.mom` · `wss://relay.nostr.bg` · `wss://nostr.oxtr.dev` · `wss://relay.snort.social` · `wss://offchain.pub` · `wss://nostr-pub.wellorder.net` · `wss://nostr.fmt.wiz.biz`
 
 ---
 
 ## 📚 Documentation
 
-Detailed documentation in the [`docs/`](docs/) folder:
-
 | Document | Description |
 |----------|-------------|
-| [Project Summary](docs/project-summary.md) | Overview of project goals |
-| [System Architecture](docs/system-architecture.md) | Technical architecture |
-| [Data Model](docs/data-model.md) | Entity relationships |
-| [NOSTR Event Schemas](docs/nostr-event-schemas.md) | Event kind definitions |
-| [NIP URL Metadata](docs/NIP-URL-METADATA.md) | URL metadata protocol |
-| [UI Metadata Posting](docs/ui-metadata-posting-design.md) | UI/UX design docs |
-| [Development Roadmap](docs/development-roadmap.md) | Feature roadmap |
-| [Entity Sync Design](docs/entity-sync-design.md) | Entity sync via NOSTR technical design |
-
-Additional planning documents in [`plans/`](plans/).
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
----
-
-## 📄 License
-
-MIT License - Feel free to modify and distribute.
+| [Data Model](docs/data-model.md) | Entity and article data structures |
+| [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol |
+| [NOSTR NIPs Analysis](docs/nostr-nips-analysis.md) | NIP usage and rationale |
 
 ---
 
 ## 🔗 Related Projects
 
-- [NSecBunker](https://github.com/kind-0/nsecbunker) - Secure NOSTR key management
-- [Readability](https://github.com/mozilla/readability) - Article extraction
-- [Turndown](https://github.com/mixmark-io/turndown) - HTML to Markdown
-- [nostr-tools](https://github.com/nbd-wtf/nostr-tools) - NOSTR utilities
+- [Readability](https://github.com/mozilla/readability) — Article content extraction
+- [Turndown](https://github.com/mixmark-io/turndown) — HTML to Markdown conversion
 
 ---
 
-<p align="center">
-  Built for the <strong>Decentralized News Verification Network</strong> project.
-</p>
+## 📄 License
+
+MIT License

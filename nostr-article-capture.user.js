@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.0.0',
+    version: '2.0.1',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -616,12 +616,11 @@
       },
 
       getLastSyncTime: async () => {
-        const val = GM_getValue('entity_last_sync', '0');
-        return parseInt(val, 10) || 0;
+        return await Storage.get('entity_last_sync', 0);
       },
 
       setLastSyncTime: async (timestamp) => {
-        GM_setValue('entity_last_sync', String(timestamp));
+        await Storage.set('entity_last_sync', timestamp);
       }
     },
 
@@ -1162,6 +1161,13 @@
   // ============================================
   
   const Utils = {
+    // HTML escape to prevent XSS when inserting user text into innerHTML
+    escapeHtml: (str) => {
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(str));
+      return div.innerHTML;
+    },
+
     // Show toast notification
     showToast: (message, type = 'info') => {
       const toast = document.createElement('div');
@@ -1211,7 +1217,7 @@
       EntityTagger.popover.style.top = (y - 120) + 'px';
       
       EntityTagger.popover.innerHTML = `
-        <div class="nac-popover-title">Tag "${text}"</div>
+        <div class="nac-popover-title">Tag "${Utils.escapeHtml(text)}"</div>
         <div class="nac-entity-type-buttons">
           <button class="nac-btn-entity-type" data-type="person">👤 Person</button>
           <button class="nac-btn-entity-type" data-type="organization">🏢 Org</button>
@@ -1264,7 +1270,7 @@
             <div class="nac-results-header">Existing matches:</div>
             ${results.map(entity => `
               <button class="nac-btn-link-entity" data-id="${entity.id}">
-                ${entity.name} (${entity.type})
+                ${Utils.escapeHtml(entity.name)} (${entity.type})
               </button>
             `).join('')}
           </div>
@@ -1351,12 +1357,18 @@
         
         // Add current article to entity's articles list
         if (!entity.articles) entity.articles = [];
-        entity.articles.push({
+        const articleEntry = {
           url: ReaderView.article.url,
           title: ReaderView.article.title,
           context: 'mentioned',
           tagged_at: Math.floor(Date.now() / 1000)
-        });
+        };
+        const existingIdx = entity.articles.findIndex(a => a.url === articleEntry.url);
+        if (existingIdx >= 0) {
+          entity.articles[existingIdx].tagged_at = articleEntry.tagged_at;
+        } else {
+          entity.articles.push(articleEntry);
+        }
         
         await Storage.entities.save(entityId, entity);
         
@@ -1384,7 +1396,7 @@
       chip.className = 'nac-entity-chip nac-entity-' + entity.type;
       chip.innerHTML = `
         <span class="nac-chip-icon">${entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : entity.type === 'thing' ? '🔷' : '📍'}</span>
-        <span class="nac-chip-name">${entity.name}</span>
+        <span class="nac-chip-name">${Utils.escapeHtml(entity.name)}</span>
         <button class="nac-chip-remove" data-id="${entity.id}">×</button>
       `;
       
@@ -1899,11 +1911,11 @@
             <div class="nac-article-header">
               <h1 class="nac-article-title" contenteditable="false" id="nac-title">${article.title || 'Untitled'}</h1>
               <div class="nac-article-meta">
-                <span class="nac-meta-author" id="nac-author">${article.byline || 'Unknown Author'}</span>
+                <span class="nac-meta-author nac-editable-field" id="nac-author" data-field="byline" title="Click to edit author">${Utils.escapeHtml(article.byline || 'Unknown Author')}</span>
                 <span class="nac-meta-separator">•</span>
-                <span class="nac-meta-publication" id="nac-publication">${article.siteName || article.domain}</span>
+                <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication">${Utils.escapeHtml(article.siteName || article.domain || '')}</span>
                 <span class="nac-meta-separator">•</span>
-                <span class="nac-meta-date" id="nac-date">${article.publishedAt ? new Date(article.publishedAt * 1000).toLocaleDateString() : 'Unknown Date'}</span>
+                <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
               </div>
               <div class="nac-article-source">
                 <span class="nac-source-label">Source:</span>
@@ -1953,6 +1965,14 @@
         }
       });
       
+      // Attach inline edit handlers for metadata fields
+      document.querySelectorAll('#nac-reader-view .nac-editable-field').forEach(el => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          ReaderView._startInlineEdit(el, el.dataset.field);
+        });
+      });
+      
       // Enable text selection for entity tagging
       const contentEl = document.getElementById('nac-content');
       contentEl.addEventListener('mouseup', ReaderView.handleTextSelection);
@@ -1970,12 +1990,18 @@
             // Link existing author entity
             const entity = authorResults[0];
             if (!entity.articles) entity.articles = [];
-            entity.articles.push({
+            const authorArticleEntry = {
               url: article.url,
               title: article.title,
               context: 'author',
               tagged_at: Math.floor(Date.now() / 1000)
-            });
+            };
+            const existingAuthorIdx = entity.articles.findIndex(a => a.url === authorArticleEntry.url);
+            if (existingAuthorIdx >= 0) {
+              entity.articles[existingAuthorIdx].tagged_at = authorArticleEntry.tagged_at;
+            } else {
+              entity.articles.push(authorArticleEntry);
+            }
             await Storage.entities.save(entity.id, entity);
             ReaderView.entities.push({ entity_id: entity.id, context: 'author' });
             EntityTagger.addChip(entity);
@@ -2026,12 +2052,18 @@
             // Link existing publication entity
             const entity = pubResults[0];
             if (!entity.articles) entity.articles = [];
-            entity.articles.push({
+            const pubArticleEntry = {
               url: article.url,
               title: article.title,
               context: 'publication',
               tagged_at: Math.floor(Date.now() / 1000)
-            });
+            };
+            const existingPubIdx = entity.articles.findIndex(a => a.url === pubArticleEntry.url);
+            if (existingPubIdx >= 0) {
+              entity.articles[existingPubIdx].tagged_at = pubArticleEntry.tagged_at;
+            } else {
+              entity.articles.push(pubArticleEntry);
+            }
             await Storage.entities.save(entity.id, entity);
             ReaderView.entities.push({ entity_id: entity.id, context: 'publication' });
             EntityTagger.addChip(entity);
@@ -2071,6 +2103,96 @@
           Utils.error('Failed to auto-tag publication:', e);
         }
       }
+    },
+
+    // Format a Unix timestamp as a readable date string
+    _formatDate: (timestamp) => {
+      const date = new Date(timestamp * 1000);
+      return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    },
+
+    // Start inline editing of a metadata field
+    _startInlineEdit: (element, fieldKey) => {
+      // Guard: already editing
+      if (element.querySelector('input')) return;
+
+      const originalText = element.textContent.trim();
+      const isDate = fieldKey === 'publishedAt';
+
+      // Create the appropriate input
+      const input = document.createElement('input');
+      input.className = 'nac-inline-edit-input';
+
+      if (isDate) {
+        input.type = 'date';
+        const ts = ReaderView.article.publishedAt;
+        if (ts) {
+          const d = new Date(ts * 1000);
+          // Format as YYYY-MM-DD for the date input value
+          input.value = d.toISOString().split('T')[0];
+        }
+      } else {
+        input.type = 'text';
+        input.value = fieldKey === 'byline'
+          ? (ReaderView.article.byline || '')
+          : (ReaderView.article.siteName || ReaderView.article.domain || '');
+      }
+
+      // Replace text with input
+      element.textContent = '';
+      element.appendChild(input);
+      input.focus();
+      if (input.type === 'text') input.select();
+
+      let saved = false;
+
+      const cleanup = () => {
+        input.removeEventListener('blur', onBlur);
+        input.removeEventListener('keydown', onKeydown);
+        if (isDate) input.removeEventListener('change', onChange);
+      };
+
+      const save = () => {
+        if (saved) return;
+        saved = true;
+        const newValue = input.value.trim();
+        cleanup();
+
+        if (isDate) {
+          if (newValue) {
+            const newTs = Math.floor(new Date(newValue + 'T12:00:00').getTime() / 1000);
+            ReaderView.article.publishedAt = newTs;
+            element.textContent = ReaderView._formatDate(newTs);
+          } else {
+            element.textContent = originalText;
+          }
+        } else {
+          if (newValue) {
+            ReaderView.article[fieldKey] = newValue;
+            element.textContent = newValue;
+          } else {
+            element.textContent = originalText;
+          }
+        }
+      };
+
+      const cancel = () => {
+        if (saved) return;
+        saved = true;
+        cleanup();
+        element.textContent = originalText;
+      };
+
+      const onBlur = () => save();
+      const onKeydown = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+      };
+      const onChange = () => { if (isDate) input.blur(); };
+
+      input.addEventListener('blur', onBlur);
+      input.addEventListener('keydown', onKeydown);
+      if (isDate) input.addEventListener('change', onChange);
     },
 
     // Hide reader view and restore original page
@@ -2487,33 +2609,19 @@
           <h4>Relays</h4>
           <div class="nac-relay-list">
             ${relayConfig.relays.map((r, i) => `
-              <div class="nac-relay-item">
-                <label class="nac-checkbox">
+              <div class="nac-relay-item${r.enabled ? '' : ' nac-relay-disabled'}" data-relay-index="${i}">
+                <label class="nac-checkbox" style="flex: 1; min-width: 0;">
                   <input type="checkbox" ${r.enabled ? 'checked' : ''} data-index="${i}">
-                  <span>${r.url}</span>
+                  <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${Utils.escapeHtml(r.url)}</span>
                 </label>
+                <button class="nac-relay-remove" data-relay-url="${Utils.escapeHtml(r.url)}" title="Remove relay">✕</button>
               </div>
             `).join('')}
           </div>
           <button class="nac-btn" id="nac-add-relay">Add Relay</button>
           
           <h4>Entity Registry</h4>
-          <button class="nac-btn" id="nac-export-entities">Export Entities</button>
-          <button class="nac-btn" id="nac-import-entities">Import Entities</button>
-          
-          <div style="margin-top: 16px; border-top: 1px solid #444; padding-top: 12px;">
-            <div style="font-weight: bold; margin-bottom: 8px;">🔄 Entity Sync</div>
-            <div style="font-size: 11px; color: #aaa; margin-bottom: 8px;">Sync entities across browsers via encrypted NOSTR events.</div>
-            <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 10px; cursor: pointer;">
-              <input type="checkbox" id="nac-publish-profiles" style="accent-color: #4a9eff;">
-              Also publish entity profiles (kind 0 — public name only)
-            </label>
-            <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-              <button id="nac-push-entities" style="flex: 1; padding: 8px; background: #1a3a5c; color: white; border: none; border-radius: 4px; cursor: pointer;">⬆ Push to NOSTR</button>
-              <button id="nac-pull-entities" style="flex: 1; padding: 8px; background: #1a3a5c; color: white; border: none; border-radius: 4px; cursor: pointer;">⬇ Pull from NOSTR</button>
-            </div>
-            <div id="nac-sync-status" style="font-size: 11px; color: #aaa; padding: 8px; background: #1a1a2e; border-radius: 4px; min-height: 20px; display: none;"></div>
-          </div>
+          <div id="nac-entity-browser"></div>
           
           <div class="nac-version">Version ${CONFIG.version}</div>
         </div>
@@ -2613,17 +2721,188 @@
         });
       }
       
-      // Relay checkboxes
+      // Relay checkboxes (enable/disable toggle with visual feedback)
       document.querySelectorAll('.nac-relay-item input[type="checkbox"]').forEach(cb => {
         cb.addEventListener('change', async (e) => {
           const index = parseInt(e.target.dataset.index);
           relayConfig.relays[index].enabled = e.target.checked;
           await Storage.relays.set(relayConfig);
+          const item = e.target.closest('.nac-relay-item');
+          if (item) {
+            item.classList.toggle('nac-relay-disabled', !e.target.checked);
+          }
+        });
+      });
+
+      // Add Relay button
+      document.getElementById('nac-add-relay')?.addEventListener('click', async () => {
+        const url = prompt('Enter relay WebSocket URL (e.g., wss://relay.damus.io):');
+        if (!url) return;
+        const trimmed = url.trim();
+        if (!trimmed.startsWith('wss://') && !trimmed.startsWith('ws://')) {
+          Utils.showToast('Invalid URL — must start with wss:// or ws://', 'error');
+          return;
+        }
+        const currentConfig = await Storage.relays.get();
+        if (currentConfig.relays.find(r => r.url === trimmed)) {
+          Utils.showToast('Relay already in the list', 'error');
+          return;
+        }
+        await Storage.relays.addRelay(trimmed);
+        Utils.showToast('Relay added: ' + trimmed, 'success');
+        ReaderView.showSettings(); // Refresh settings panel
+      });
+
+      // Relay remove buttons
+      document.querySelectorAll('.nac-relay-remove').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const url = e.target.dataset.relayUrl;
+          if (!url) return;
+          await Storage.relays.removeRelay(url);
+          Utils.showToast('Relay removed: ' + url, 'success');
+          ReaderView.showSettings(); // Refresh settings panel
         });
       });
       
-      // Export entities handler
-      document.getElementById('nac-export-entities')?.addEventListener('click', async () => {
+      // Initialize entity browser UI
+      await EntityBrowser.init(panel, identity);
+    }
+  };
+
+  // ============================================
+  // SECTION 9B: ENTITY BROWSER - Browse/detail UI in settings
+  // ============================================
+
+  const EntityBrowser = {
+    TYPE_EMOJI: { person: '👤', organization: '🏢', place: '📍', thing: '🔷' },
+    TYPE_LABELS: { person: 'Person', organization: 'Org', place: 'Place', thing: 'Thing' },
+
+    init: async (panel, identity) => {
+      const container = panel.querySelector('#nac-entity-browser');
+      if (!container) return;
+
+      const registry = await Storage.entities.getAll();
+      const entities = Object.values(registry);
+
+      container.innerHTML = EntityBrowser.renderListView(entities);
+      EntityBrowser.bindListEvents(container, panel, identity);
+    },
+
+    renderListView: (entities) => {
+      const count = entities.length;
+      return `
+        <div class="nac-eb-list-view">
+          <div class="nac-eb-search-bar">
+            <input type="text" class="nac-eb-search" placeholder="Search entities…" id="nac-eb-search">
+          </div>
+          <div class="nac-eb-type-filters">
+            <button class="nac-eb-type-btn active" data-filter="all">All (${count})</button>
+            <button class="nac-eb-type-btn" data-filter="person">👤</button>
+            <button class="nac-eb-type-btn" data-filter="organization">🏢</button>
+            <button class="nac-eb-type-btn" data-filter="place">📍</button>
+            <button class="nac-eb-type-btn" data-filter="thing">🔷</button>
+          </div>
+          <div class="nac-eb-entity-list" id="nac-eb-entity-list">
+            ${EntityBrowser.renderEntityCards(entities)}
+          </div>
+          ${count === 0 ? '<div class="nac-eb-empty">No entities yet. Tag text in articles to create entities.</div>' : ''}
+          <div class="nac-eb-actions">
+            <button class="nac-btn" id="nac-eb-export">📤 Export</button>
+            <button class="nac-btn" id="nac-eb-import">📥 Import</button>
+          </div>
+          <div class="nac-eb-sync-section">
+            <div class="nac-eb-sync-title">🔄 Entity Sync</div>
+            <div class="nac-eb-sync-desc">Sync entities across browsers via encrypted NOSTR events.</div>
+            <label class="nac-eb-sync-label">
+              <input type="checkbox" id="nac-publish-profiles" style="accent-color: var(--nac-primary);">
+              Also publish entity profiles (kind 0 — public name only)
+            </label>
+            <div class="nac-eb-sync-buttons">
+              <button id="nac-push-entities" class="nac-eb-sync-btn">⬆ Push to NOSTR</button>
+              <button id="nac-pull-entities" class="nac-eb-sync-btn">⬇ Pull from NOSTR</button>
+            </div>
+            <div id="nac-sync-status" class="nac-eb-sync-status" style="display: none;"></div>
+          </div>
+        </div>
+      `;
+    },
+
+    renderEntityCards: (entities) => {
+      if (!entities.length) return '';
+      const sorted = [...entities].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      return sorted.map(e => {
+        const emoji = EntityBrowser.TYPE_EMOJI[e.type] || '🔷';
+        const articleCount = (e.articles || []).length;
+        const created = e.created_at ? new Date(e.created_at * 1000).toLocaleDateString() : 'Unknown';
+        return `
+          <div class="nac-eb-card nac-eb-card-${e.type}" data-entity-id="${Utils.escapeHtml(e.id)}">
+            <div class="nac-eb-card-main">
+              <span class="nac-eb-card-emoji">${emoji}</span>
+              <div class="nac-eb-card-info">
+                <div class="nac-eb-card-name">${Utils.escapeHtml(e.name)}</div>
+                <div class="nac-eb-card-meta">${articleCount} article${articleCount !== 1 ? 's' : ''} · ${created}</div>
+              </div>
+              <span class="nac-eb-card-arrow">›</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    },
+
+    bindListEvents: (container, panel, identity) => {
+      // Search filter
+      const searchInput = container.querySelector('#nac-eb-search');
+      const typeButtons = container.querySelectorAll('.nac-eb-type-btn');
+      let activeFilter = 'all';
+
+      const filterEntities = async () => {
+        const query = (searchInput?.value || '').toLowerCase();
+        const registry = await Storage.entities.getAll();
+        let entities = Object.values(registry);
+
+        if (activeFilter !== 'all') {
+          entities = entities.filter(e => e.type === activeFilter);
+        }
+        if (query) {
+          entities = entities.filter(e =>
+            e.name.toLowerCase().includes(query) ||
+            (e.aliases || []).some(a => a.toLowerCase().includes(query))
+          );
+        }
+
+        const listEl = container.querySelector('#nac-eb-entity-list');
+        if (listEl) listEl.innerHTML = EntityBrowser.renderEntityCards(entities);
+
+        // Re-bind card click events
+        container.querySelectorAll('.nac-eb-card').forEach(card => {
+          card.addEventListener('click', () => {
+            const entityId = card.dataset.entityId;
+            EntityBrowser.showDetail(container, entityId, panel, identity);
+          });
+        });
+      };
+
+      searchInput?.addEventListener('input', filterEntities);
+
+      typeButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          typeButtons.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          activeFilter = btn.dataset.filter;
+          filterEntities();
+        });
+      });
+
+      // Card clicks
+      container.querySelectorAll('.nac-eb-card').forEach(card => {
+        card.addEventListener('click', () => {
+          const entityId = card.dataset.entityId;
+          EntityBrowser.showDetail(container, entityId, panel, identity);
+        });
+      });
+
+      // Export handler
+      container.querySelector('#nac-eb-export')?.addEventListener('click', async () => {
         const json = await Storage.entities.exportAll();
         const blob = new Blob([json], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -2631,41 +2910,39 @@
         a.href = url;
         a.download = 'nostr-entities-' + Date.now() + '.json';
         a.click();
-        Utils.showToast('Entities exported');
+        Utils.showToast('Entities exported', 'success');
       });
 
-      // Import entities file picker
-      const importBtn = document.getElementById('nac-import-entities');
-      importBtn?.addEventListener('click', () => {
+      // Import handler
+      container.querySelector('#nac-eb-import')?.addEventListener('click', () => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json';
-        input.onchange = async (e) => {
-          const file = e.target.files[0];
+        input.onchange = async (ev) => {
+          const file = ev.target.files[0];
           if (!file) return;
           const text = await file.text();
           try {
             const count = await Storage.entities.importAll(text);
-            alert(`Imported ${count} entities successfully.`);
-            ReaderView.showSettings(); // Refresh
+            Utils.showToast(`Imported ${count} entities`, 'success');
+            await EntityBrowser.init(panel, identity);
           } catch (err) {
-            alert('Import failed: ' + err.message);
+            Utils.showToast('Import failed: ' + err.message, 'error');
           }
         };
         input.click();
       });
 
-      // Push entities handler
-      document.getElementById('nac-push-entities')?.addEventListener('click', async () => {
-        const statusEl = document.getElementById('nac-sync-status');
+      // Sync: Push
+      container.querySelector('#nac-push-entities')?.addEventListener('click', async () => {
+        const statusEl = container.querySelector('#nac-sync-status');
         statusEl.style.display = 'block';
-        const pushBtn = document.getElementById('nac-push-entities');
-        const pullBtn = document.getElementById('nac-pull-entities');
+        const pushBtn = container.querySelector('#nac-push-entities');
+        const pullBtn = container.querySelector('#nac-pull-entities');
         pushBtn.disabled = true;
         pullBtn.disabled = true;
-
         try {
-          const publishProfiles = document.getElementById('nac-publish-profiles')?.checked || false;
+          const publishProfiles = container.querySelector('#nac-publish-profiles')?.checked || false;
           await EntitySync.push({
             publishProfiles,
             onProgress: (p) => {
@@ -2675,27 +2952,26 @@
               else if (p.phase === 'complete') {
                 const succeeded = p.results.filter(r => r.success).length;
                 const failed = p.results.filter(r => !r.success).length;
-                statusEl.innerHTML = `✅ Push complete: ${succeeded} entities published` + (failed > 0 ? `, <span style="color: #ff6b6b;">${failed} failed</span>` : '');
+                statusEl.innerHTML = `✅ Push complete: ${succeeded} entities published` + (failed > 0 ? `, <span style="color: var(--nac-error);">${failed} failed</span>` : '');
               }
             }
           });
         } catch (e) {
-          statusEl.innerHTML = `<span style="color: #ff6b6b;">❌ ${e.message}</span>`;
+          statusEl.innerHTML = `<span style="color: var(--nac-error);">❌ ${Utils.escapeHtml(e.message)}</span>`;
         } finally {
           pushBtn.disabled = false;
           pullBtn.disabled = false;
         }
       });
 
-      // Pull entities handler
-      document.getElementById('nac-pull-entities')?.addEventListener('click', async () => {
-        const statusEl = document.getElementById('nac-sync-status');
+      // Sync: Pull
+      container.querySelector('#nac-pull-entities')?.addEventListener('click', async () => {
+        const statusEl = container.querySelector('#nac-sync-status');
         statusEl.style.display = 'block';
-        const pushBtn = document.getElementById('nac-push-entities');
-        const pullBtn = document.getElementById('nac-pull-entities');
+        const pushBtn = container.querySelector('#nac-push-entities');
+        const pullBtn = container.querySelector('#nac-pull-entities');
         pushBtn.disabled = true;
         pullBtn.disabled = true;
-
         try {
           await EntitySync.pull({
             onProgress: (p) => {
@@ -2715,26 +2991,236 @@
               }
             }
           });
+          await EntityBrowser.init(panel, identity); // Refresh after pull
         } catch (e) {
-          statusEl.innerHTML = `<span style="color: #ff6b6b;">❌ ${e.message}</span>`;
+          statusEl.innerHTML = `<span style="color: var(--nac-error);">❌ ${Utils.escapeHtml(e.message)}</span>`;
         } finally {
           pushBtn.disabled = false;
           pullBtn.disabled = false;
         }
       });
 
-      // Disable sync buttons if no private key
+      // Disable sync if no privkey
       if (!identity?.privkey) {
-        const pushEl = document.getElementById('nac-push-entities');
-        const pullEl = document.getElementById('nac-pull-entities');
+        const pushEl = container.querySelector('#nac-push-entities');
+        const pullEl = container.querySelector('#nac-pull-entities');
         if (pushEl) pushEl.disabled = true;
         if (pullEl) pullEl.disabled = true;
-        const statusEl = document.getElementById('nac-sync-status');
+        const statusEl = container.querySelector('#nac-sync-status');
         if (statusEl) {
           statusEl.style.display = 'block';
           statusEl.innerHTML = '⚠️ Entity sync requires a local private key. Import your nsec or generate a new keypair.';
         }
       }
+    },
+
+    showDetail: async (container, entityId, panel, identity) => {
+      const entity = await Storage.entities.get(entityId);
+      if (!entity) {
+        Utils.showToast('Entity not found', 'error');
+        return;
+      }
+
+      const emoji = EntityBrowser.TYPE_EMOJI[entity.type] || '🔷';
+      const typeLabel = EntityBrowser.TYPE_LABELS[entity.type] || entity.type;
+      const articles = entity.articles || [];
+      const aliases = entity.aliases || [];
+      const created = entity.created_at ? new Date(entity.created_at * 1000).toLocaleString() : 'Unknown';
+
+      container.innerHTML = `
+        <div class="nac-eb-detail">
+          <button class="nac-eb-back" id="nac-eb-back">← Back to list</button>
+          <div class="nac-eb-detail-header">
+            <span class="nac-eb-detail-emoji">${emoji}</span>
+            <h3 class="nac-eb-detail-name" id="nac-eb-detail-name" title="Click to rename">${Utils.escapeHtml(entity.name)}</h3>
+            <span class="nac-eb-detail-badge nac-eb-badge-${entity.type}">${typeLabel}</span>
+          </div>
+          <div class="nac-eb-detail-created">Created: ${created}</div>
+          
+          <div class="nac-eb-section">
+            <div class="nac-eb-section-title">Aliases</div>
+            <div class="nac-eb-aliases" id="nac-eb-aliases">
+              ${aliases.map((a, i) => `
+                <span class="nac-eb-alias">
+                  ${Utils.escapeHtml(a)}
+                  <button class="nac-eb-alias-remove" data-index="${i}" title="Remove alias">✕</button>
+                </span>
+              `).join('')}
+              ${aliases.length === 0 ? '<span class="nac-eb-no-aliases">No aliases</span>' : ''}
+            </div>
+            <div class="nac-eb-alias-add">
+              <input type="text" class="nac-eb-alias-input" id="nac-eb-alias-input" placeholder="Add alias…">
+              <button class="nac-btn" id="nac-eb-add-alias">Add</button>
+            </div>
+          </div>
+          
+          <div class="nac-eb-section">
+            <div class="nac-eb-section-title">Keypair</div>
+            <div class="nac-eb-keypair">
+              <div class="nac-eb-key-row">
+                <span class="nac-eb-key-label">npub:</span>
+                <code class="nac-eb-key-value">${Utils.escapeHtml(entity.keypair?.npub || 'N/A')}</code>
+                <button class="nac-eb-copy-btn" data-copy="${Utils.escapeHtml(entity.keypair?.npub || '')}" title="Copy npub">📋</button>
+              </div>
+              <div class="nac-eb-key-row">
+                <span class="nac-eb-key-label">nsec:</span>
+                <code class="nac-eb-key-value nac-eb-nsec-hidden" id="nac-eb-nsec-value">••••••••••••••</code>
+                <button class="nac-eb-copy-btn" id="nac-eb-toggle-nsec" title="Reveal nsec">👁</button>
+                <button class="nac-eb-copy-btn" id="nac-eb-copy-nsec" title="Copy nsec">📋</button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="nac-eb-section">
+            <div class="nac-eb-section-title">Articles (${articles.length})</div>
+            <div class="nac-eb-articles" id="nac-eb-articles">
+              ${articles.length === 0 ? '<div class="nac-eb-no-articles">No linked articles</div>' : ''}
+              ${articles.map(a => `
+                <div class="nac-eb-article-item">
+                  <div class="nac-eb-article-title">${Utils.escapeHtml(a.title || 'Untitled')}</div>
+                  <a class="nac-eb-article-url" href="${Utils.escapeHtml(a.url || '#')}" target="_blank" rel="noopener">${Utils.escapeHtml(a.url || '')}</a>
+                  <div class="nac-eb-article-meta">
+                    <span class="nac-eb-article-context">${Utils.escapeHtml(a.context || 'mentioned')}</span>
+                    ${a.tagged_at ? `<span>· ${new Date(a.tagged_at * 1000).toLocaleDateString()}</span>` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          
+          <div class="nac-eb-danger-zone">
+            <button class="nac-eb-delete-btn" id="nac-eb-delete">🗑 Delete Entity</button>
+          </div>
+        </div>
+      `;
+
+      EntityBrowser.bindDetailEvents(container, entity, panel, identity);
+    },
+
+    bindDetailEvents: (container, entity, panel, identity) => {
+      // Back button
+      container.querySelector('#nac-eb-back')?.addEventListener('click', async () => {
+        await EntityBrowser.init(panel, identity);
+      });
+
+      // Rename: click name to edit
+      const nameEl = container.querySelector('#nac-eb-detail-name');
+      nameEl?.addEventListener('click', () => {
+        const currentName = entity.name;
+        const newName = prompt('Rename entity:', currentName);
+        if (newName && newName.trim() && newName.trim() !== currentName) {
+          entity.name = newName.trim();
+          Storage.entities.save(entity.id, entity).then(() => {
+            nameEl.textContent = entity.name;
+            Utils.showToast('Entity renamed', 'success');
+          });
+        }
+      });
+
+      // Add alias
+      container.querySelector('#nac-eb-add-alias')?.addEventListener('click', async () => {
+        const input = container.querySelector('#nac-eb-alias-input');
+        const alias = (input?.value || '').trim();
+        if (!alias) return;
+        if (!entity.aliases) entity.aliases = [];
+        if (entity.aliases.includes(alias)) {
+          Utils.showToast('Alias already exists', 'error');
+          return;
+        }
+        entity.aliases.push(alias);
+        await Storage.entities.save(entity.id, entity);
+        Utils.showToast('Alias added', 'success');
+        EntityBrowser.showDetail(container, entity.id, panel, identity);
+      });
+
+      // Remove alias buttons
+      container.querySelectorAll('.nac-eb-alias-remove').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const index = parseInt(btn.dataset.index);
+          if (!entity.aliases || isNaN(index)) return;
+          entity.aliases.splice(index, 1);
+          await Storage.entities.save(entity.id, entity);
+          Utils.showToast('Alias removed', 'success');
+          EntityBrowser.showDetail(container, entity.id, panel, identity);
+        });
+      });
+
+      // Toggle nsec visibility
+      let nsecVisible = false;
+      container.querySelector('#nac-eb-toggle-nsec')?.addEventListener('click', () => {
+        const nsecEl = container.querySelector('#nac-eb-nsec-value');
+        if (!nsecEl) return;
+        nsecVisible = !nsecVisible;
+        if (nsecVisible) {
+          nsecEl.textContent = entity.keypair?.nsec || 'N/A';
+          nsecEl.classList.remove('nac-eb-nsec-hidden');
+          container.querySelector('#nac-eb-toggle-nsec').textContent = '🙈';
+        } else {
+          nsecEl.textContent = '••••••••••••••';
+          nsecEl.classList.add('nac-eb-nsec-hidden');
+          container.querySelector('#nac-eb-toggle-nsec').textContent = '👁';
+        }
+      });
+
+      // Copy npub
+      container.querySelectorAll('.nac-eb-copy-btn[data-copy]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const text = btn.dataset.copy;
+          if (!text) return;
+          try {
+            await navigator.clipboard.writeText(text);
+            const orig = btn.textContent;
+            btn.textContent = '✓';
+            setTimeout(() => btn.textContent = orig, 1500);
+          } catch {
+            // Fallback
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+            const orig = btn.textContent;
+            btn.textContent = '✓';
+            setTimeout(() => btn.textContent = orig, 1500);
+          }
+        });
+      });
+
+      // Copy nsec
+      container.querySelector('#nac-eb-copy-nsec')?.addEventListener('click', async () => {
+        const nsec = entity.keypair?.nsec || '';
+        if (!nsec) return;
+        try {
+          await navigator.clipboard.writeText(nsec);
+          const btn = container.querySelector('#nac-eb-copy-nsec');
+          btn.textContent = '✓';
+          setTimeout(() => btn.textContent = '📋', 1500);
+        } catch {
+          const ta = document.createElement('textarea');
+          ta.value = nsec;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+          const btn = container.querySelector('#nac-eb-copy-nsec');
+          btn.textContent = '✓';
+          setTimeout(() => btn.textContent = '📋', 1500);
+        }
+      });
+
+      // Delete entity
+      container.querySelector('#nac-eb-delete')?.addEventListener('click', async () => {
+        if (!confirm(`Delete entity "${entity.name}"? This cannot be undone.`)) return;
+        await Storage.entities.delete(entity.id);
+        Utils.showToast('Entity deleted', 'success');
+        await EntityBrowser.init(panel, identity);
+      });
     }
   };
 
@@ -2909,6 +3395,57 @@
     
     .nac-meta-separator {
       opacity: 0.5;
+    }
+    
+    .nac-editable-field {
+      cursor: pointer;
+      position: relative;
+      border-bottom: 1px dashed transparent;
+      transition: border-color 0.2s, background-color 0.2s;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    
+    .nac-editable-field:hover {
+      border-bottom-color: var(--nac-primary);
+      background-color: rgba(99, 102, 241, 0.08);
+    }
+    
+    .nac-editable-field:hover::after {
+      content: ' ✏️';
+      font-size: 11px;
+    }
+    
+    .nac-inline-edit-input {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid var(--nac-primary);
+      color: var(--nac-text-muted);
+      font: inherit;
+      font-size: inherit;
+      padding: 2px 4px;
+      margin: 0;
+      outline: none;
+      width: auto;
+      min-width: 120px;
+      max-width: 300px;
+      box-sizing: border-box;
+    }
+    
+    .nac-inline-edit-input:focus {
+      border-bottom-color: var(--nac-primary);
+      background-color: rgba(99, 102, 241, 0.05);
+    }
+    
+    .nac-inline-edit-input[type="date"] {
+      min-width: 160px;
+      color-scheme: dark;
+    }
+    
+    @media (prefers-color-scheme: light) {
+      .nac-inline-edit-input[type="date"] {
+        color-scheme: light;
+      }
     }
     
     .nac-article-source {
@@ -3347,6 +3884,30 @@
       background: var(--nac-bg);
       border-radius: 4px;
       margin-bottom: 4px;
+      gap: 6px;
+      transition: opacity 0.2s;
+    }
+
+    .nac-relay-item.nac-relay-disabled {
+      opacity: 0.45;
+    }
+
+    .nac-relay-remove {
+      background: none;
+      border: none;
+      color: #888;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      line-height: 1;
+      flex-shrink: 0;
+      transition: color 0.15s, background 0.15s;
+    }
+
+    .nac-relay-remove:hover {
+      color: #ff6b6b;
+      background: rgba(255, 107, 107, 0.15);
     }
     
     /* Markdown Textarea */
@@ -3383,6 +3944,471 @@
       background: var(--nac-primary);
       color: white;
       border-color: var(--nac-primary);
+    }
+    
+    /* ===== Entity Browser ===== */
+    .nac-eb-list-view,
+    .nac-eb-detail {
+      font-size: 13px;
+    }
+    
+    .nac-eb-search-bar {
+      margin-bottom: 10px;
+    }
+    
+    .nac-eb-search {
+      width: 100%;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-bg);
+      color: var(--nac-text);
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    
+    .nac-eb-search:focus {
+      outline: none;
+      border-color: var(--nac-primary);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+    }
+    
+    .nac-eb-type-filters {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    
+    .nac-eb-type-btn {
+      padding: 4px 10px;
+      border-radius: 14px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    
+    .nac-eb-type-btn:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-eb-type-btn.active {
+      background: var(--nac-primary);
+      color: white;
+      border-color: var(--nac-primary);
+    }
+    
+    .nac-eb-entity-list {
+      max-height: 240px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+    }
+    
+    .nac-eb-card {
+      display: flex;
+      align-items: center;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--nac-border);
+      transition: background 0.15s;
+    }
+    
+    .nac-eb-card:last-child {
+      border-bottom: none;
+    }
+    
+    .nac-eb-card:hover {
+      background: var(--nac-bg);
+    }
+    
+    .nac-eb-card-person { border-left: 3px solid var(--nac-entity-person); }
+    .nac-eb-card-organization { border-left: 3px solid var(--nac-entity-org); }
+    .nac-eb-card-place { border-left: 3px solid var(--nac-entity-place); }
+    .nac-eb-card-thing { border-left: 3px solid var(--nac-entity-thing); }
+    
+    .nac-eb-card-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+    }
+    
+    .nac-eb-card-emoji {
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+    
+    .nac-eb-card-info {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .nac-eb-card-name {
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    
+    .nac-eb-card-meta {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      margin-top: 2px;
+    }
+    
+    .nac-eb-card-arrow {
+      font-size: 18px;
+      color: var(--nac-text-muted);
+      flex-shrink: 0;
+    }
+    
+    .nac-eb-empty {
+      text-align: center;
+      color: var(--nac-text-muted);
+      padding: 20px;
+      font-size: 13px;
+    }
+    
+    .nac-eb-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    
+    .nac-eb-actions .nac-btn {
+      flex: 1;
+      text-align: center;
+      padding: 8px;
+      font-size: 13px;
+    }
+    
+    .nac-eb-sync-section {
+      border-top: 1px solid var(--nac-border);
+      padding-top: 12px;
+    }
+    
+    .nac-eb-sync-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    
+    .nac-eb-sync-desc {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      margin-bottom: 8px;
+    }
+    
+    .nac-eb-sync-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      margin-bottom: 10px;
+      cursor: pointer;
+    }
+    
+    .nac-eb-sync-buttons {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    
+    .nac-eb-sync-btn {
+      flex: 1;
+      padding: 8px;
+      background: var(--nac-primary);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: opacity 0.15s;
+    }
+    
+    .nac-eb-sync-btn:hover {
+      opacity: 0.9;
+    }
+    
+    .nac-eb-sync-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    
+    .nac-eb-sync-status {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      padding: 8px;
+      background: var(--nac-bg);
+      border-radius: 6px;
+      min-height: 20px;
+    }
+    
+    /* Detail view */
+    .nac-eb-back {
+      background: none;
+      border: none;
+      color: var(--nac-primary);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 0;
+      margin-bottom: 12px;
+    }
+    
+    .nac-eb-back:hover {
+      text-decoration: underline;
+    }
+    
+    .nac-eb-detail-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    
+    .nac-eb-detail-emoji {
+      font-size: 28px;
+    }
+    
+    .nac-eb-detail-name {
+      flex: 1;
+      font-size: 18px;
+      margin: 0;
+      cursor: pointer;
+      border-bottom: 1px dashed transparent;
+      transition: border-color 0.15s;
+    }
+    
+    .nac-eb-detail-name:hover {
+      border-bottom-color: var(--nac-primary);
+    }
+    
+    .nac-eb-detail-badge {
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    
+    .nac-eb-badge-person { background: rgba(139, 92, 246, 0.15); color: var(--nac-entity-person); }
+    .nac-eb-badge-organization { background: rgba(8, 145, 178, 0.15); color: var(--nac-entity-org); }
+    .nac-eb-badge-place { background: rgba(22, 163, 74, 0.15); color: var(--nac-entity-place); }
+    .nac-eb-badge-thing { background: rgba(74, 158, 255, 0.15); color: var(--nac-entity-thing); }
+    
+    .nac-eb-detail-created {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      margin-bottom: 16px;
+    }
+    
+    .nac-eb-section {
+      margin-bottom: 16px;
+    }
+    
+    .nac-eb-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--nac-text-muted);
+      margin-bottom: 8px;
+    }
+    
+    .nac-eb-aliases {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    
+    .nac-eb-alias {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: var(--nac-bg);
+      border: 1px solid var(--nac-border);
+      font-size: 12px;
+    }
+    
+    .nac-eb-alias-remove {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--nac-text-muted);
+      padding: 0 2px;
+      line-height: 1;
+    }
+    
+    .nac-eb-alias-remove:hover {
+      color: var(--nac-error);
+    }
+    
+    .nac-eb-no-aliases {
+      color: var(--nac-text-muted);
+      font-size: 12px;
+      font-style: italic;
+    }
+    
+    .nac-eb-alias-add {
+      display: flex;
+      gap: 6px;
+    }
+    
+    .nac-eb-alias-input {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-bg);
+      color: var(--nac-text);
+      font-size: 12px;
+    }
+    
+    .nac-eb-alias-add .nac-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+    }
+    
+    .nac-eb-keypair {
+      background: var(--nac-bg);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    
+    .nac-eb-key-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    
+    .nac-eb-key-row:last-child {
+      margin-bottom: 0;
+    }
+    
+    .nac-eb-key-label {
+      font-weight: 600;
+      font-size: 11px;
+      flex-shrink: 0;
+      width: 36px;
+    }
+    
+    .nac-eb-key-value {
+      flex: 1;
+      font-family: monospace;
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    
+    .nac-eb-nsec-hidden {
+      color: var(--nac-text-muted);
+    }
+    
+    .nac-eb-copy-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 4px;
+      flex-shrink: 0;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    
+    .nac-eb-copy-btn:hover {
+      background: var(--nac-border);
+    }
+    
+    .nac-eb-articles {
+      max-height: 160px;
+      overflow-y: auto;
+    }
+    
+    .nac-eb-article-item {
+      padding: 8px;
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      margin-bottom: 6px;
+    }
+    
+    .nac-eb-article-title {
+      font-weight: 600;
+      font-size: 12px;
+      margin-bottom: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    
+    .nac-eb-article-url {
+      font-size: 11px;
+      color: var(--nac-primary);
+      text-decoration: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: block;
+    }
+    
+    .nac-eb-article-url:hover {
+      text-decoration: underline;
+    }
+    
+    .nac-eb-article-meta {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      margin-top: 3px;
+      display: flex;
+      gap: 4px;
+    }
+    
+    .nac-eb-article-context {
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: var(--nac-bg);
+      border: 1px solid var(--nac-border);
+      font-size: 10px;
+    }
+    
+    .nac-eb-no-articles {
+      color: var(--nac-text-muted);
+      font-size: 12px;
+      font-style: italic;
+      padding: 8px 0;
+    }
+    
+    .nac-eb-danger-zone {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--nac-border);
+    }
+    
+    .nac-eb-delete-btn {
+      width: 100%;
+      padding: 8px;
+      background: rgba(239, 68, 68, 0.1);
+      color: var(--nac-error);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    
+    .nac-eb-delete-btn:hover {
+      background: rgba(239, 68, 68, 0.2);
     }
   `;
 
