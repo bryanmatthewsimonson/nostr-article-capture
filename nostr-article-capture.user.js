@@ -467,6 +467,186 @@
       );
       const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, ciphertext);
       return new TextDecoder().decode(decrypted);
+    },
+
+    // ── NIP-44 v2 Encryption ──
+
+    // ChaCha20 block function — produces one 64-byte keystream block (pure JavaScript)
+    _chacha20Block: (key, nonce, counter) => {
+      // key: Uint8Array(32), nonce: Uint8Array(12), counter: number
+      const s = new Uint32Array(16);
+      // Constants: "expand 32-byte k"
+      s[0] = 0x61707865; s[1] = 0x3320646e; s[2] = 0x79622d32; s[3] = 0x6b206574;
+      // Key (little-endian uint32 words)
+      const kv = new DataView(key.buffer, key.byteOffset, key.byteLength);
+      for (let i = 0; i < 8; i++) s[4 + i] = kv.getUint32(i * 4, true);
+      // Block counter
+      s[12] = counter;
+      // Nonce (little-endian uint32 words)
+      const nv = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength);
+      s[13] = nv.getUint32(0, true);
+      s[14] = nv.getUint32(4, true);
+      s[15] = nv.getUint32(8, true);
+      // Working copy
+      const w = new Uint32Array(s);
+      const rotl = (x, n) => (x << n) | (x >>> (32 - n));
+      function qr(a, b, c, d) {
+        w[a] = (w[a] + w[b]) | 0; w[d] = rotl(w[d] ^ w[a], 16);
+        w[c] = (w[c] + w[d]) | 0; w[b] = rotl(w[b] ^ w[c], 12);
+        w[a] = (w[a] + w[b]) | 0; w[d] = rotl(w[d] ^ w[a], 8);
+        w[c] = (w[c] + w[d]) | 0; w[b] = rotl(w[b] ^ w[c], 7);
+      }
+      // 20 rounds (10 double rounds: column + diagonal)
+      for (let i = 0; i < 10; i++) {
+        qr(0, 4, 8, 12); qr(1, 5, 9, 13); qr(2, 6, 10, 14); qr(3, 7, 11, 15);
+        qr(0, 5, 10, 15); qr(1, 6, 11, 12); qr(2, 7, 8, 13); qr(3, 4, 9, 14);
+      }
+      // Add original state back
+      for (let i = 0; i < 16; i++) w[i] = (w[i] + s[i]) | 0;
+      // Serialize to 64 bytes (little-endian)
+      const out = new Uint8Array(64);
+      const ov = new DataView(out.buffer);
+      for (let i = 0; i < 16; i++) ov.setUint32(i * 4, w[i], true);
+      return out;
+    },
+
+    // ChaCha20 stream cipher — XOR data with keystream (same function encrypts and decrypts)
+    _chacha20Encrypt: (key, nonce, data) => {
+      // key: Uint8Array(32), nonce: Uint8Array(12), data: Uint8Array
+      const out = new Uint8Array(data.length);
+      const blocks = Math.ceil(data.length / 64);
+      for (let i = 0; i < blocks; i++) {
+        const block = Crypto._chacha20Block(key, nonce, i);
+        const offset = i * 64;
+        const len = Math.min(64, data.length - offset);
+        for (let j = 0; j < len; j++) out[offset + j] = data[offset + j] ^ block[j];
+      }
+      return out;
+    },
+
+    // NIP-44 padding: calculate padded length per spec (chunk-based, not simple power-of-2)
+    _nip44CalcPaddedLen: (unpaddedLen) => {
+      if (unpaddedLen < 1) throw new Error('Invalid plaintext length');
+      if (unpaddedLen > 65535) throw new Error('Plaintext too long for NIP-44');
+      if (unpaddedLen <= 32) return 32;
+      const nextPower = 1 << (32 - Math.clz32(unpaddedLen - 1));
+      const chunk = Math.max(32, nextPower >> 3);
+      return chunk * (Math.floor((unpaddedLen - 1) / chunk) + 1);
+    },
+
+    // NIP-44 pad: 2-byte big-endian length prefix + plaintext + zero-fill to padded length
+    _nip44Pad: (plaintext) => {
+      const textBytes = new TextEncoder().encode(plaintext);
+      const unpaddedLen = textBytes.length;
+      if (unpaddedLen < 1 || unpaddedLen > 65535) throw new Error('Plaintext length out of NIP-44 range');
+      const paddedLen = Crypto._nip44CalcPaddedLen(unpaddedLen);
+      const out = new Uint8Array(2 + paddedLen);
+      out[0] = (unpaddedLen >> 8) & 0xff;
+      out[1] = unpaddedLen & 0xff;
+      out.set(textBytes, 2);
+      return out;
+    },
+
+    // NIP-44 unpad: extract plaintext from padded buffer
+    _nip44Unpad: (padded) => {
+      const unpaddedLen = (padded[0] << 8) | padded[1];
+      if (unpaddedLen < 1 || unpaddedLen + 2 > padded.length) throw new Error('Invalid NIP-44 padding');
+      const expectedPaddedLen = Crypto._nip44CalcPaddedLen(unpaddedLen);
+      if (padded.length !== 2 + expectedPaddedLen) throw new Error('Invalid NIP-44 padded length');
+      for (let i = 2 + unpaddedLen; i < padded.length; i++) {
+        if (padded[i] !== 0) throw new Error('Invalid NIP-44 padding: non-zero byte in padding region');
+      }
+      return new TextDecoder().decode(padded.slice(2, 2 + unpaddedLen));
+    },
+
+    // HMAC-SHA256 via SubtleCrypto
+    _hmacSha256: async (key, data) => {
+      const hmacKey = await crypto.subtle.importKey(
+        'raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+      );
+      const sig = await crypto.subtle.sign('HMAC', hmacKey, data);
+      return new Uint8Array(sig);
+    },
+
+    // HKDF-extract: PRK = HMAC-SHA256(salt, ikm)
+    _hkdfExtract: async (salt, ikm) => {
+      return Crypto._hmacSha256(salt, ikm);
+    },
+
+    // HKDF-expand: derive output keying material from PRK
+    _hkdfExpand: async (prk, info, length) => {
+      const hashLen = 32;
+      const n = Math.ceil(length / hashLen);
+      const output = new Uint8Array(n * hashLen);
+      let prev = new Uint8Array(0);
+      for (let i = 1; i <= n; i++) {
+        const input = new Uint8Array(prev.length + info.length + 1);
+        input.set(prev, 0);
+        input.set(info, prev.length);
+        input[prev.length + info.length] = i;
+        prev = await Crypto._hmacSha256(prk, input);
+        output.set(prev, (i - 1) * hashLen);
+      }
+      return output.slice(0, length);
+    },
+
+    // NIP-44 conversation key: HKDF-extract(salt="nip44-v2", ikm=ECDH_shared_x)
+    nip44GetConversationKey: async (privkeyHex, pubkeyHex) => {
+      const sharedSecretHex = await Crypto.getSharedSecret(privkeyHex, pubkeyHex);
+      const sharedSecret = Crypto.hexToBytes(sharedSecretHex);
+      const salt = new TextEncoder().encode('nip44-v2');
+      return Crypto._hkdfExtract(salt, sharedSecret);
+    },
+
+    // NIP-44 v2 encrypt: returns base64(0x02 + nonce(32) + ciphertext + hmac(32))
+    nip44Encrypt: async (plaintext, conversationKey) => {
+      const nonce = crypto.getRandomValues(new Uint8Array(32));
+      const messageKey = await Crypto._hkdfExpand(conversationKey, nonce, 76);
+      const chachaKey = messageKey.slice(0, 32);
+      const chaChaNonce = messageKey.slice(32, 44);
+      const hmacKey = messageKey.slice(44, 76);
+      const padded = Crypto._nip44Pad(plaintext);
+      const ciphertext = Crypto._chacha20Encrypt(chachaKey, chaChaNonce, padded);
+      // HMAC-SHA256(hmac_key, nonce || ciphertext)
+      const hmacInput = new Uint8Array(nonce.length + ciphertext.length);
+      hmacInput.set(nonce, 0);
+      hmacInput.set(ciphertext, nonce.length);
+      const mac = await Crypto._hmacSha256(hmacKey, hmacInput);
+      // Assemble: version(1) + nonce(32) + ciphertext + hmac(32)
+      const payload = new Uint8Array(1 + 32 + ciphertext.length + 32);
+      payload[0] = 0x02;
+      payload.set(nonce, 1);
+      payload.set(ciphertext, 33);
+      payload.set(mac, 33 + ciphertext.length);
+      let binary = '';
+      for (let i = 0; i < payload.length; i++) binary += String.fromCharCode(payload[i]);
+      return btoa(binary);
+    },
+
+    // NIP-44 v2 decrypt: base64 payload → plaintext (verifies HMAC, constant-time compare)
+    nip44Decrypt: async (payload, conversationKey) => {
+      const raw = Uint8Array.from(atob(payload), c => c.charCodeAt(0));
+      if (raw[0] !== 0x02) throw new Error('Unsupported NIP-44 version: ' + raw[0]);
+      if (raw.length < 99) throw new Error('NIP-44 payload too short');
+      const nonce = raw.slice(1, 33);
+      const mac = raw.slice(raw.length - 32);
+      const ciphertext = raw.slice(33, raw.length - 32);
+      const messageKey = await Crypto._hkdfExpand(conversationKey, nonce, 76);
+      const chachaKey = messageKey.slice(0, 32);
+      const chaChaNonce = messageKey.slice(32, 44);
+      const hmacKey = messageKey.slice(44, 76);
+      // Verify HMAC (constant-time comparison)
+      const hmacInput = new Uint8Array(nonce.length + ciphertext.length);
+      hmacInput.set(nonce, 0);
+      hmacInput.set(ciphertext, nonce.length);
+      const expectedMac = await Crypto._hmacSha256(hmacKey, hmacInput);
+      if (mac.length !== expectedMac.length) throw new Error('NIP-44 HMAC verification failed');
+      let diff = 0;
+      for (let i = 0; i < mac.length; i++) diff |= mac[i] ^ expectedMac[i];
+      if (diff !== 0) throw new Error('NIP-44 HMAC verification failed');
+      // Decrypt with ChaCha20 and unpad
+      const padded = Crypto._chacha20Encrypt(chachaKey, chaChaNonce, ciphertext);
+      return Crypto._nip44Unpad(padded);
     }
   };
 
@@ -505,6 +685,7 @@
         return true;
       } catch (e) {
         console.error('[NAC Storage] Set error:', e);
+        Utils.showToast('Failed to save data. Storage may be full.', 'error');
         return false;
       }
     },
@@ -556,7 +737,18 @@
           ...data,
           updated: Math.floor(Date.now() / 1000)
         };
-        await Storage.set('entity_registry', registry);
+        const result = await Storage.set('entity_registry', registry);
+
+        // Check entity registry size after save
+        const registryJson = JSON.stringify(registry);
+        const sizeBytes = registryJson.length;
+        if (sizeBytes > 5 * 1024 * 1024) {
+          console.warn('[NAC Storage] Entity registry exceeds 5MB (' + (sizeBytes / (1024 * 1024)).toFixed(1) + ' MB). Consider cleaning up unused entities.');
+          Utils.showToast('Entity registry is very large (' + (sizeBytes / (1024 * 1024)).toFixed(1) + ' MB). Consider removing unused entities.', 'error');
+        } else if (sizeBytes > 2 * 1024 * 1024) {
+          console.warn('[NAC Storage] Entity registry exceeds 2MB (' + (sizeBytes / (1024 * 1024)).toFixed(1) + ' MB).');
+        }
+
         return registry[id];
       },
 
@@ -654,6 +846,30 @@
         config.relays = config.relays.filter(r => r.url !== url);
         await Storage.relays.set(config);
       }
+    },
+
+    // Storage usage estimation
+    getUsageEstimate: async () => {
+      const identity = await Storage.get('user_identity', null);
+      const entities = await Storage.get('entity_registry', {});
+      const relays = await Storage.get('relay_config', {});
+      const sync = await Storage.get('entity_last_sync', 0);
+
+      const identitySize = JSON.stringify(identity || '').length;
+      const entitiesSize = JSON.stringify(entities || '').length;
+      const relaysSize = JSON.stringify(relays || '').length;
+      const syncSize = JSON.stringify(sync || '').length;
+      const totalBytes = identitySize + entitiesSize + relaysSize + syncSize;
+
+      return {
+        totalBytes,
+        breakdown: {
+          identity: identitySize,
+          entities: entitiesSize,
+          relays: relaysSize,
+          sync: syncSize
+        }
+      };
     }
   };
 
@@ -1192,6 +1408,18 @@
     // Error log
     error: (...args) => {
       console.error('[NAC]', ...args);
+    },
+
+    // Make a non-button element keyboard-accessible (Enter/Space triggers click)
+    makeKeyboardAccessible: (el) => {
+      if (!el.getAttribute('tabindex')) el.setAttribute('tabindex', '0');
+      if (!el.getAttribute('role')) el.setAttribute('role', 'button');
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          el.click();
+        }
+      });
     }
   };
 
@@ -1219,10 +1447,10 @@
       EntityTagger.popover.innerHTML = `
         <div class="nac-popover-title">Tag "${Utils.escapeHtml(text)}"</div>
         <div class="nac-entity-type-buttons">
-          <button class="nac-btn-entity-type" data-type="person">👤 Person</button>
-          <button class="nac-btn-entity-type" data-type="organization">🏢 Org</button>
-          <button class="nac-btn-entity-type" data-type="place">📍 Place</button>
-          <button class="nac-btn-entity-type" data-type="thing">🔷 Thing</button>
+          <button class="nac-btn-entity-type" data-type="person" aria-label="Tag as Person">👤 Person</button>
+          <button class="nac-btn-entity-type" data-type="organization" aria-label="Tag as Organization">🏢 Org</button>
+          <button class="nac-btn-entity-type" data-type="place" aria-label="Tag as Place">📍 Place</button>
+          <button class="nac-btn-entity-type" data-type="thing" aria-label="Tag as Thing">🔷 Thing</button>
         </div>
         <div id="nac-entity-search-results"></div>
       `;
@@ -1394,10 +1622,12 @@
       const chipsContainer = document.getElementById('nac-entity-chips');
       const chip = document.createElement('div');
       chip.className = 'nac-entity-chip nac-entity-' + entity.type;
+      chip.setAttribute('tabindex', '0');
+      chip.setAttribute('aria-label', entity.type + ': ' + entity.name);
       chip.innerHTML = `
         <span class="nac-chip-icon">${entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : entity.type === 'thing' ? '🔷' : '📍'}</span>
         <span class="nac-chip-name">${Utils.escapeHtml(entity.name)}</span>
-        <button class="nac-chip-remove" data-id="${entity.id}">×</button>
+        <button class="nac-chip-remove" data-id="${entity.id}" aria-label="Remove entity ${Utils.escapeHtml(entity.name)}">×</button>
       `;
       
       chipsContainer.appendChild(chip);
@@ -1418,31 +1648,59 @@
 
     // Connect to relay
     connect: (url) => {
-      return new Promise((resolve, reject) => {
-        try {
-          if (RelayClient.connections.has(url)) {
-            resolve(RelayClient.connections.get(url));
-            return;
+      const attemptConnect = () => {
+        return new Promise((resolve, reject) => {
+          try {
+            // Check for cached connection with stale detection
+            if (RelayClient.connections.has(url)) {
+              const cached = RelayClient.connections.get(url);
+              if (cached.readyState === WebSocket.CLOSING || cached.readyState === WebSocket.CLOSED) {
+                RelayClient.connections.delete(url);
+              } else {
+                resolve(cached);
+                return;
+              }
+            }
+            
+            const ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+              RelayClient.connections.set(url, ws);
+              resolve(ws);
+            };
+            
+            ws.onerror = (error) => {
+              reject(error);
+            };
+            
+            ws.onclose = () => {
+              RelayClient.connections.delete(url);
+            };
+          } catch (e) {
+            reject(e);
           }
-          
-          const ws = new WebSocket(url);
-          
-          ws.onopen = () => {
-            RelayClient.connections.set(url, ws);
-            resolve(ws);
-          };
-          
-          ws.onerror = (error) => {
-            reject(error);
-          };
-          
-          ws.onclose = () => {
-            RelayClient.connections.delete(url);
-          };
-        } catch (e) {
-          reject(e);
+        });
+      };
+
+      // Retry with exponential backoff: 1s → 2s → 4s
+      const MAX_RETRIES = 3;
+      const BASE_DELAY = 1000;
+
+      return (async () => {
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          try {
+            return await attemptConnect();
+          } catch (err) {
+            if (attempt < MAX_RETRIES) {
+              const delay = BASE_DELAY * Math.pow(2, attempt);
+              console.log(`[NAC Relay] Connection to ${url} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+            } else {
+              throw new Error(`Failed to connect to ${url} after ${MAX_RETRIES + 1} attempts`);
+            }
+          }
         }
-      });
+      })();
     },
 
     // Disconnect from relay
@@ -1464,48 +1722,48 @@
 
     // Publish event to relays
     publish: async (event, relayUrls) => {
-      const results = {};
-      
-      for (const url of relayUrls) {
-        try {
-          const ws = await RelayClient.connect(url);
+      const publishToRelay = async (url) => {
+        const ws = await RelayClient.connect(url);
+        
+        // Send event
+        const message = JSON.stringify(['EVENT', event]);
+        ws.send(message);
+        
+        // Wait for OK response
+        const ok = await new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 5000);
           
-          // Send event
-          const message = JSON.stringify(['EVENT', event]);
-          ws.send(message);
-          
-          // Wait for OK response
-          const ok = await new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(false), 5000);
-            
-            const handler = (e) => {
-              try {
-                const data = JSON.parse(e.data);
-                if (data[0] === 'OK' && data[1] === event.id) {
-                  clearTimeout(timeout);
-                  ws.removeEventListener('message', handler);
-                  resolve(data[2]); // true if accepted
-                }
-              } catch (err) {
-                // Ignore parse errors
+          const handler = (e) => {
+            try {
+              const data = JSON.parse(e.data);
+              if (data[0] === 'OK' && data[1] === event.id) {
+                clearTimeout(timeout);
+                ws.removeEventListener('message', handler);
+                resolve(data[2]); // true if accepted
+              } else if (data[0] === 'NOTICE') {
+                console.log(`[NAC Relay] NOTICE from ${url}: ${data[1]}`);
               }
-            };
-            
-            ws.addEventListener('message', handler);
-          });
+            } catch (err) {
+              // Ignore parse errors
+            }
+          };
           
-          results[url] = {
-            success: ok,
-            error: ok ? null : 'Event rejected by relay'
-          };
-        } catch (e) {
-          results[url] = {
-            success: false,
-            error: e.message
-          };
-        }
+          ws.addEventListener('message', handler);
+        });
+        
+        return { url, success: ok, error: ok ? null : 'Event rejected by relay' };
+      };
+
+      // Publish to all relays in parallel
+      const settled = await Promise.allSettled(
+        relayUrls.map(url => publishToRelay(url).catch(e => ({ url, success: false, error: e.message })))
+      );
+
+      const results = {};
+      for (const result of settled) {
+        const { url, success, error } = result.value;
+        results[url] = { success, error };
       }
-      
       return results;
     },
 
@@ -1745,7 +2003,7 @@
 
       onProgress({ phase: 'encrypting', total: entities.length });
 
-      const sharedSecret = await Crypto.getSharedSecret(identity.privkey, identity.pubkey);
+      const conversationKey = await Crypto.nip44GetConversationKey(identity.privkey, identity.pubkey);
 
       const relayConfig = await Storage.relays.get();
       const writeRelays = relayConfig.relays.filter(r => r.enabled && r.write).map(r => r.url);
@@ -1758,7 +2016,7 @@
 
         try {
           const plaintext = JSON.stringify(entity);
-          const encrypted = await Crypto.nip04Encrypt(plaintext, sharedSecret);
+          const encrypted = await Crypto.nip44Encrypt(plaintext, conversationKey);
           const event = EventBuilder.buildEntitySyncEvent(entity.id, encrypted, entity.type, identity.pubkey);
           const signed = await Crypto.signEvent(event, identity.privkey);
           const relayResults = await RelayClient.publish(signed, writeRelays);
@@ -1827,12 +2085,19 @@
       const uniqueEvents = Array.from(byDTag.values());
       onProgress({ phase: 'decrypting', total: uniqueEvents.length });
 
+      const conversationKey = await Crypto.nip44GetConversationKey(identity.privkey, identity.pubkey);
       const sharedSecret = await Crypto.getSharedSecret(identity.privkey, identity.pubkey);
 
       const remoteEntities = [];
       for (const evt of uniqueEvents) {
         try {
-          const decrypted = await Crypto.nip04Decrypt(evt.content, sharedSecret);
+          // Try NIP-44 first, fall back to NIP-04 for backward compatibility
+          let decrypted;
+          try {
+            decrypted = await Crypto.nip44Decrypt(evt.content, conversationKey);
+          } catch (_nip44Err) {
+            decrypted = await Crypto.nip04Decrypt(evt.content, sharedSecret);
+          }
           const entity = JSON.parse(decrypted);
           if (EntitySync.validateEntity(entity)) {
             remoteEntities.push(entity);
@@ -1849,7 +2114,12 @@
       const localRegistry = await Storage.entities.getAll();
       const { merged, stats } = EntitySync.mergeEntities(localRegistry, remoteEntities);
 
-      GM_setValue('entity_registry', JSON.stringify(merged));
+      try {
+        GM_setValue('entity_registry', JSON.stringify(merged));
+      } catch (e) {
+        console.error('[NAC Storage] Failed to save merged entity registry:', e);
+        Utils.showToast('Failed to save synced entities. Storage may be full.', 'error');
+      }
 
       await Storage.entities.setLastSyncTime(Math.floor(Date.now() / 1000));
       stats.total = remoteEntities.length;
@@ -1891,18 +2161,21 @@
       ReaderView.container = document.createElement('div');
       ReaderView.container.id = 'nac-reader-view';
       ReaderView.container.className = 'nac-reader-container';
+      ReaderView.container.setAttribute('tabindex', '-1');
+      ReaderView.container.setAttribute('role', 'dialog');
+      ReaderView.container.setAttribute('aria-label', 'Article reader view');
       
       // Build UI
       ReaderView.container.innerHTML = `
         <div class="nac-reader-toolbar">
-          <button class="nac-btn-back" id="nac-back-btn">← Back to Page</button>
+          <button class="nac-btn-back" id="nac-back-btn" aria-label="Close reader and return to page">← Back to Page</button>
           <div class="nac-toolbar-title">${article.domain || 'Article'}</div>
           <div class="nac-toolbar-actions">
-            <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published">👁 Preview</button>
-            <button class="nac-btn-toolbar" id="nac-edit-btn">Edit</button>
-            <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing">📝 Markdown</button>
-            <button class="nac-btn-toolbar nac-btn-primary" id="nac-publish-btn">Publish</button>
-            <button class="nac-btn-toolbar" id="nac-settings-btn">⚙</button>
+            <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published" aria-label="Preview as published">👁 Preview</button>
+            <button class="nac-btn-toolbar" id="nac-edit-btn" aria-label="Edit article">Edit</button>
+            <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing" aria-label="Toggle markdown editor">📝 Markdown</button>
+            <button class="nac-btn-toolbar nac-btn-primary" id="nac-publish-btn" aria-label="Publish article to NOSTR">Publish</button>
+            <button class="nac-btn-toolbar" id="nac-settings-btn" aria-label="Settings">⚙</button>
           </div>
         </div>
         
@@ -1911,16 +2184,16 @@
             <div class="nac-article-header">
               <h1 class="nac-article-title" contenteditable="false" id="nac-title">${article.title || 'Untitled'}</h1>
               <div class="nac-article-meta">
-                <span class="nac-meta-author nac-editable-field" id="nac-author" data-field="byline" title="Click to edit author">${Utils.escapeHtml(article.byline || 'Unknown Author')}</span>
+                <span class="nac-meta-author nac-editable-field" id="nac-author" data-field="byline" title="Click to edit author" role="button" tabindex="0" aria-label="Edit author — click to change">${Utils.escapeHtml(article.byline || 'Unknown Author')}</span>
                 <span class="nac-meta-separator">•</span>
-                <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication">${Utils.escapeHtml(article.siteName || article.domain || '')}</span>
+                <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication" role="button" tabindex="0" aria-label="Edit publication — click to change">${Utils.escapeHtml(article.siteName || article.domain || '')}</span>
                 <span class="nac-meta-separator">•</span>
-                <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
+                <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date — click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
               </div>
               <div class="nac-article-source">
                 <span class="nac-source-label">Source:</span>
                 <span class="nac-source-url">${article.url}</span>
-                <button class="nac-btn-copy" id="nac-copy-url">Copy</button>
+                <button class="nac-btn-copy" id="nac-copy-url" aria-label="Copy article URL">Copy</button>
               </div>
               <div class="nac-article-archived">
                 Archived: ${new Date().toLocaleDateString()}
@@ -1934,10 +2207,10 @@
           
           <div class="nac-entity-bar">
             <div class="nac-entity-bar-title">Tagged Entities</div>
-            <div class="nac-entity-chips" id="nac-entity-chips">
+            <div class="nac-entity-chips" id="nac-entity-chips" role="list" aria-label="Tagged entities">
               <!-- Entity chips will be added here -->
             </div>
-            <button class="nac-btn-add-entity" id="nac-add-entity-btn">+ Tag Entity</button>
+            <button class="nac-btn-add-entity" id="nac-add-entity-btn" aria-label="Tag a new entity">+ Tag Entity</button>
           </div>
         </div>
       `;
@@ -1965,11 +2238,18 @@
         }
       });
       
-      // Attach inline edit handlers for metadata fields
+      // Attach inline edit handlers for metadata fields (click + keyboard)
       document.querySelectorAll('#nac-reader-view .nac-editable-field').forEach(el => {
         el.addEventListener('click', (e) => {
           e.stopPropagation();
           ReaderView._startInlineEdit(el, el.dataset.field);
+        });
+        el.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            ReaderView._startInlineEdit(el, el.dataset.field);
+          }
         });
       });
       
@@ -1979,6 +2259,9 @@
       
       // Keyboard shortcuts
       document.addEventListener('keydown', ReaderView.handleKeyboard);
+      
+      // Focus the reader container for keyboard accessibility
+      ReaderView.container.focus();
       
       // Auto-detect author entity from byline
       if (article.byline && article.byline.trim().length >= CONFIG.tagging.min_selection_length) {
@@ -2212,6 +2495,11 @@
       });
       ReaderView._hiddenElements = [];
       document.removeEventListener('keydown', ReaderView.handleKeyboard);
+      RelayClient.disconnectAll();
+
+      // Return focus to the FAB button
+      const fab = document.querySelector('.nac-fab');
+      if (fab) fab.focus();
     },
 
     // Toggle edit mode
@@ -2383,13 +2671,52 @@
     // Handle keyboard shortcuts
     handleKeyboard: (e) => {
       if (e.key === 'Escape') {
-        EntityTagger.hide();
-        if (document.getElementById('nac-publish-panel')) {
+        // Close topmost panel/overlay in order
+        if (EntityTagger.popover) {
+          EntityTagger.hide();
+        } else if (document.getElementById('nac-settings-panel')) {
+          ReaderView.hideSettings();
+        } else if (document.getElementById('nac-publish-panel')) {
           ReaderView.hidePublishPanel();
+        } else {
+          ReaderView.hide();
         }
+      } else if (e.key === 'Tab' && ReaderView.container) {
+        // Focus trap: keep Tab within the reader view
+        ReaderView._trapFocus(e);
       } else if (e.ctrlKey && e.key === 'e') {
         e.preventDefault();
         ReaderView.toggleEditMode();
+      }
+    },
+
+    // Focus trap implementation for reader view
+    _trapFocus: (e) => {
+      const container = ReaderView.container;
+      if (!container) return;
+
+      const focusableSelectors = 'a[href], button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+      const focusableElements = Array.from(container.querySelectorAll(focusableSelectors)).filter(el => {
+        return el.offsetParent !== null && !el.closest('[style*="display: none"], [style*="display:none"]');
+      });
+
+      if (focusableElements.length === 0) return;
+
+      const firstEl = focusableElements[0];
+      const lastEl = focusableElements[focusableElements.length - 1];
+
+      if (e.shiftKey) {
+        // Shift+Tab: if on first element, wrap to last
+        if (document.activeElement === firstEl || !container.contains(document.activeElement)) {
+          e.preventDefault();
+          lastEl.focus();
+        }
+      } else {
+        // Tab: if on last element, wrap to first
+        if (document.activeElement === lastEl || !container.contains(document.activeElement)) {
+          e.preventDefault();
+          firstEl.focus();
+        }
       }
     },
 
@@ -2410,9 +2737,15 @@
         }
       }
 
+      // Remember which element opened the panel for focus return
+      ReaderView._publishOpener = document.activeElement;
+
       const panel = document.createElement('div');
       panel.id = 'nac-publish-panel';
       panel.className = 'nac-publish-panel';
+      panel.setAttribute('tabindex', '-1');
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', 'Publish to NOSTR');
       
       const identity = await Storage.identity.get();
       const relayConfig = await Storage.relays.get();
@@ -2420,7 +2753,7 @@
       panel.innerHTML = `
         <div class="nac-publish-header">
           <h3>Publish to NOSTR</h3>
-          <button class="nac-btn-close" id="nac-close-publish">×</button>
+          <button class="nac-btn-close" id="nac-close-publish" aria-label="Close publish panel">×</button>
         </div>
         
         <div class="nac-publish-body">
@@ -2472,12 +2805,21 @@
       // Event listeners
       document.getElementById('nac-close-publish').addEventListener('click', ReaderView.hidePublishPanel);
       document.getElementById('nac-publish-confirm').addEventListener('click', ReaderView.publishArticle);
+
+      // Focus the panel
+      panel.focus();
     },
 
     // Hide publish panel
     hidePublishPanel: () => {
       const panel = document.getElementById('nac-publish-panel');
       if (panel) panel.remove();
+
+      // Return focus to the element that opened the panel
+      if (ReaderView._publishOpener && ReaderView._publishOpener.focus) {
+        ReaderView._publishOpener.focus();
+        ReaderView._publishOpener = null;
+      }
     },
 
     // Publish article to NOSTR
@@ -2558,10 +2900,25 @@
       }
     },
 
+    // Hide settings panel
+    hideSettings: () => {
+      const panel = document.getElementById('nac-settings-panel');
+      if (panel) panel.remove();
+
+      // Return focus to the element that opened the panel
+      if (ReaderView._settingsOpener && ReaderView._settingsOpener.focus) {
+        ReaderView._settingsOpener.focus();
+        ReaderView._settingsOpener = null;
+      }
+    },
+
     // Show settings panel
     showSettings: async () => {
       // Remove existing settings panel if present (for refresh)
       document.getElementById('nac-settings-panel')?.remove();
+
+      // Remember which element opened the panel for focus return
+      ReaderView._settingsOpener = document.activeElement;
 
       const identity = await Storage.identity.get();
       const relayConfig = await Storage.relays.get();
@@ -2569,11 +2926,14 @@
       const panel = document.createElement('div');
       panel.id = 'nac-settings-panel';
       panel.className = 'nac-settings-panel';
+      panel.setAttribute('tabindex', '-1');
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', 'Settings');
       
       panel.innerHTML = `
         <div class="nac-publish-header">
           <h3>Settings</h3>
-          <button class="nac-btn-close" id="nac-close-settings">×</button>
+          <button class="nac-btn-close" id="nac-close-settings" aria-label="Close settings">×</button>
         </div>
         
         <div class="nac-publish-body">
@@ -2614,7 +2974,7 @@
                   <input type="checkbox" ${r.enabled ? 'checked' : ''} data-index="${i}">
                   <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${Utils.escapeHtml(r.url)}</span>
                 </label>
-                <button class="nac-relay-remove" data-relay-url="${Utils.escapeHtml(r.url)}" title="Remove relay">✕</button>
+                <button class="nac-relay-remove" data-relay-url="${Utils.escapeHtml(r.url)}" title="Remove relay" aria-label="Remove relay ${Utils.escapeHtml(r.url)}">✕</button>
               </div>
             `).join('')}
           </div>
@@ -2623,6 +2983,10 @@
           <h4>Entity Registry</h4>
           <div id="nac-entity-browser"></div>
           
+          <div id="nac-storage-usage" style="margin-top: 16px; padding: 10px; background: #1a1a2e; border: 1px solid #333; border-radius: 6px; font-size: 11px; color: #aaa;">
+            <span style="color: #888;">Calculating storage usage...</span>
+          </div>
+          
           <div class="nac-version">Version ${CONFIG.version}</div>
         </div>
       `;
@@ -2630,7 +2994,10 @@
       ReaderView.container.appendChild(panel);
       
       // Event listeners
-      document.getElementById('nac-close-settings').addEventListener('click', () => panel.remove());
+      document.getElementById('nac-close-settings').addEventListener('click', ReaderView.hideSettings);
+
+      // Focus the settings panel
+      panel.focus();
       
       if (identity) {
         document.getElementById('nac-clear-identity').addEventListener('click', async () => {
@@ -2766,6 +3133,34 @@
       
       // Initialize entity browser UI
       await EntityBrowser.init(panel, identity);
+
+      // Populate storage usage display
+      try {
+        const usage = await Storage.getUsageEstimate();
+        const formatSize = (bytes) => {
+          if (bytes < 1024) return bytes + ' B';
+          return (bytes / 1024).toFixed(1) + ' KB';
+        };
+        const totalKB = usage.totalBytes / 1024;
+        let color = '#4caf50'; // green
+        let label = '';
+        if (totalKB >= 5120) {
+          color = '#f44336'; // red
+          label = ' — ⚠ Very large, may impact performance';
+        } else if (totalKB >= 1024) {
+          color = '#ff9800'; // yellow/orange
+          label = ' — Growing large';
+        }
+        const el = document.getElementById('nac-storage-usage');
+        if (el) {
+          el.innerHTML = `<strong style="color: ${color};">Storage: ~${formatSize(usage.totalBytes)}</strong>${label}<br>` +
+            `<span style="font-size: 10px;">Entities: ${formatSize(usage.breakdown.entities)}, ` +
+            `Identity: ${formatSize(usage.breakdown.identity)}, ` +
+            `Relays: ${formatSize(usage.breakdown.relays)}</span>`;
+        }
+      } catch (e) {
+        console.error('[NAC] Failed to calculate storage usage:', e);
+      }
     }
   };
 
@@ -2797,10 +3192,10 @@
           </div>
           <div class="nac-eb-type-filters">
             <button class="nac-eb-type-btn active" data-filter="all">All (${count})</button>
-            <button class="nac-eb-type-btn" data-filter="person">👤</button>
-            <button class="nac-eb-type-btn" data-filter="organization">🏢</button>
-            <button class="nac-eb-type-btn" data-filter="place">📍</button>
-            <button class="nac-eb-type-btn" data-filter="thing">🔷</button>
+            <button class="nac-eb-type-btn" data-filter="person" aria-label="Filter by Person">👤</button>
+            <button class="nac-eb-type-btn" data-filter="organization" aria-label="Filter by Organization">🏢</button>
+            <button class="nac-eb-type-btn" data-filter="place" aria-label="Filter by Place">📍</button>
+            <button class="nac-eb-type-btn" data-filter="thing" aria-label="Filter by Thing">🔷</button>
           </div>
           <div class="nac-eb-entity-list" id="nac-eb-entity-list">
             ${EntityBrowser.renderEntityCards(entities)}
@@ -2835,7 +3230,7 @@
         const articleCount = (e.articles || []).length;
         const created = e.created_at ? new Date(e.created_at * 1000).toLocaleDateString() : 'Unknown';
         return `
-          <div class="nac-eb-card nac-eb-card-${e.type}" data-entity-id="${Utils.escapeHtml(e.id)}">
+          <div class="nac-eb-card nac-eb-card-${e.type}" data-entity-id="${Utils.escapeHtml(e.id)}" tabindex="0" role="button" aria-label="${Utils.escapeHtml(e.name)} — ${e.type}">
             <div class="nac-eb-card-main">
               <span class="nac-eb-card-emoji">${emoji}</span>
               <div class="nac-eb-card-info">
@@ -2873,11 +3268,17 @@
         const listEl = container.querySelector('#nac-eb-entity-list');
         if (listEl) listEl.innerHTML = EntityBrowser.renderEntityCards(entities);
 
-        // Re-bind card click events
+        // Re-bind card click + keyboard events
         container.querySelectorAll('.nac-eb-card').forEach(card => {
           card.addEventListener('click', () => {
             const entityId = card.dataset.entityId;
             EntityBrowser.showDetail(container, entityId, panel, identity);
+          });
+          card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              card.click();
+            }
           });
         });
       };
@@ -2893,11 +3294,17 @@
         });
       });
 
-      // Card clicks
+      // Card clicks + keyboard
       container.querySelectorAll('.nac-eb-card').forEach(card => {
         card.addEventListener('click', () => {
           const entityId = card.dataset.entityId;
           EntityBrowser.showDetail(container, entityId, panel, identity);
+        });
+        card.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            card.click();
+          }
         });
       });
 
@@ -3032,7 +3439,7 @@
           <button class="nac-eb-back" id="nac-eb-back">← Back to list</button>
           <div class="nac-eb-detail-header">
             <span class="nac-eb-detail-emoji">${emoji}</span>
-            <h3 class="nac-eb-detail-name" id="nac-eb-detail-name" title="Click to rename">${Utils.escapeHtml(entity.name)}</h3>
+            <h3 class="nac-eb-detail-name" id="nac-eb-detail-name" title="Click to rename" tabindex="0" role="button" aria-label="Rename entity ${Utils.escapeHtml(entity.name)}">${Utils.escapeHtml(entity.name)}</h3>
             <span class="nac-eb-detail-badge nac-eb-badge-${entity.type}">${typeLabel}</span>
           </div>
           <div class="nac-eb-detail-created">Created: ${created}</div>
@@ -3103,9 +3510,9 @@
         await EntityBrowser.init(panel, identity);
       });
 
-      // Rename: click name to edit
+      // Rename: click or Enter/Space on name to edit
       const nameEl = container.querySelector('#nac-eb-detail-name');
-      nameEl?.addEventListener('click', () => {
+      const handleRename = () => {
         const currentName = entity.name;
         const newName = prompt('Rename entity:', currentName);
         if (newName && newName.trim() && newName.trim() !== currentName) {
@@ -3114,6 +3521,13 @@
             nameEl.textContent = entity.name;
             Utils.showToast('Entity renamed', 'success');
           });
+        }
+      };
+      nameEl?.addEventListener('click', handleRename);
+      nameEl?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleRename();
         }
       });
 
@@ -4410,6 +4824,43 @@
     .nac-eb-delete-btn:hover {
       background: rgba(239, 68, 68, 0.2);
     }
+    
+    /* Focus-visible styles for keyboard accessibility */
+    .nac-fab:focus-visible,
+    .nac-btn-back:focus-visible,
+    .nac-btn-toolbar:focus-visible,
+    .nac-btn:focus-visible,
+    .nac-btn-copy:focus-visible,
+    .nac-btn-close:focus-visible,
+    .nac-btn-add-entity:focus-visible,
+    .nac-btn-entity-type:focus-visible,
+    .nac-btn-link-entity:focus-visible,
+    .nac-chip-remove:focus-visible,
+    .nac-relay-remove:focus-visible,
+    .nac-eb-type-btn:focus-visible,
+    .nac-eb-card:focus-visible,
+    .nac-eb-back:focus-visible,
+    .nac-eb-copy-btn:focus-visible,
+    .nac-eb-alias-remove:focus-visible,
+    .nac-eb-delete-btn:focus-visible,
+    .nac-eb-sync-btn:focus-visible,
+    .nac-eb-detail-name:focus-visible,
+    .nac-form-select:focus-visible,
+    .nac-form-input:focus-visible,
+    .nac-editable-field:focus-visible,
+    .nac-entity-chip:focus-visible {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: 2px;
+    }
+    
+    .nac-reader-container:focus {
+      outline: none;
+    }
+    
+    .nac-publish-panel:focus,
+    .nac-settings-panel:focus {
+      outline: none;
+    }
   `;
 
   // ============================================
@@ -4427,6 +4878,7 @@
     fab.className = 'nac-fab';
     fab.innerHTML = '📰';
     fab.title = 'NOSTR Article Capture';
+    fab.setAttribute('aria-label', 'Capture Article');
     
     fab.addEventListener('click', async () => {
       Utils.log('FAB clicked');
