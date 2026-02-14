@@ -1,5 +1,7 @@
 # TamperMonkey Article Capture & NOSTR Publishing Script
 
+> **Note**: This is the original v1 planning document. The v2 implementation diverged significantly — NSecBunker was removed in favor of embedded BIP-340 Schnorr signing, the Publication entity type was folded into Organization, and the UI changed from an overlay panel to a full-page reader view. See [`plans/v2-redesign-plan.md`](../plans/v2-redesign-plan.md) for the current design. This document is retained as historical reference.
+
 ## Overview
 
 This document outlines the architecture and implementation plan for a TamperMonkey script that enables users to:

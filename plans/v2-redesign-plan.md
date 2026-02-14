@@ -8,7 +8,7 @@ The v1 NOSTR Article Capture userscript had grown to 11,398 lines in a single fi
 
 The redesign replaced the modal/panel/sidebar approach with a full-page reader view that takes over the browser tab (like Firefox Reader View), providing a distraction-free reading experience with inline metadata tagging and one-click NOSTR archival.
 
-**v2 is now fully implemented** at 4,476 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1).
+**v2 is now fully implemented** at ~4,930 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -42,7 +42,7 @@ The redesign replaced the modal/panel/sidebar approach with a full-page reader v
 - Simplified embedded Readability → full library via `@require`
 - Simplified embedded Turndown → full library via `@require` (with GFM plugin)
 - Dual identity model → unified model: one user identity that owns entity keypairs
-- Monolithic 11K-line file → well-organized modular sections (4,476 lines)
+- Monolithic 11K-line file → well-organized modular sections (~4,930 lines)
 
 ### Kept (good foundations built upon)
 - Tampermonkey userscript format
@@ -485,7 +485,7 @@ Entity data is synced across devices via NIP-78 application-specific events with
     ["L", "nostr-article-capture"],
     ["l", "<entity-type>", "nostr-article-capture"]
   ],
-  content: "<NIP-04 encrypted entity JSON>"
+  content: "<NIP-44 encrypted entity JSON>"
 }
 // Signed with user's private key; content encrypted to user's own pubkey
 ```
@@ -518,8 +518,10 @@ Rather than relying on `@require` for crypto (ESM compatibility issues), the scr
 | Verify signature | `return true` ❌ | Real Schnorr `verify(sig, hash, pubkey)` ✅ |
 | NIP-04 encrypt | Not implemented | AES-256-CBC via Web Crypto ✅ |
 | NIP-04 decrypt | Not implemented | AES-256-CBC via Web Crypto ✅ |
+| NIP-44 encrypt | Not implemented | ChaCha20 + HKDF-SHA256 + HMAC ✅ |
+| NIP-44 decrypt | Not implemented | ChaCha20 + HKDF-SHA256 + HMAC (constant-time MAC) ✅ |
 
-Validated with 65 tests including official BIP-340 test vectors — see [`tests/crypto-tests.js`](tests/crypto-tests.js:1).
+Validated with 65 crypto tests (BIP-340 vectors) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and 21 NIP-44 tests (padding, ChaCha20, round-trip, conversation key) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -532,7 +534,7 @@ Validated with 65 tests including official BIP-340 test vectors — see [`tests/
   - `generatePrivateKey()`, `getPublicKey()`, `hexToNpub()`/`npubToHex()`, `hexToNsec()`/`nsecToHex()`, `signEvent()`, `getEventHash()`, `verifySignature()`
   - NIP-04 `nip04Encrypt()` / `nip04Decrypt()` for entity sync
 - ✅ Section 3: Storage module (GM_getValue/GM_setValue wrapper, entity CRUD, identity CRUD, relay config CRUD, import/export)
-- ✅ Crypto test suite: 65 tests including BIP-340 official vectors
+- ✅ Crypto test suite: 65 tests including BIP-340 official vectors; 21 NIP-44 tests
 
 ### Phase 2: Content Extraction ✅ DONE
 - ✅ Readability integration (full library via `@require`)
@@ -574,7 +576,11 @@ Validated with 65 tests including official BIP-340 test vectors — see [`tests/
 - ✅ WebSocket relay client (connect, disconnect, publish with per-relay status)
 - ✅ Event builder: kind 30023 (NIP-23 articles), kind 0 (entity profiles), kind 30078 (NIP-78 entity sync)
 - ✅ Event signing with local keypair (BIP-340 Schnorr) or NIP-07
-- ✅ NIP-04 encryption for entity sync data
+- ✅ NIP-44 v2 encryption for entity sync data (ChaCha20, HKDF-SHA256, HMAC)
+- ✅ NIP-04 backward-compatible decryption on pull
+- ✅ Relay connection retry with exponential backoff (1 s → 2 s → 4 s)
+- ✅ Stale WebSocket detection and parallel publish via `Promise.allSettled`
+- ✅ NOTICE message handling during publish
 - ✅ Publish confirmation UI (inline panel, relay selection, per-relay status)
 - ✅ Relay management (add/remove/toggle relays in settings)
 
@@ -583,9 +589,13 @@ Validated with 65 tests including official BIP-340 test vectors — see [`tests/
 - ✅ Auto-update mechanism (`@updateURL` / `@downloadURL`)
 - ✅ XSS prevention (`Utils.escapeHtml()` used consistently throughout)
 - ✅ Entity article deduplication
-- ✅ Storage abstraction consistency
+- ✅ Storage quota monitoring and display in settings (with breakdown)
+- ✅ Graceful error handling on storage save failures (user-facing toasts)
+- ✅ Comprehensive keyboard accessibility (ARIA labels, focus trap, panel stack Escape handling)
+- ✅ `makeKeyboardAccessible()` utility for non-button elements
 - ✅ Dark mode (full `prefers-color-scheme` support)
 - ✅ Crypto test suite (65 tests with BIP-340 vectors)
+- ✅ NIP-44 test suite (21 tests: padding, ChaCha20, HKDF, encrypt/decrypt round-trip)
 
 ---
 
@@ -594,14 +604,14 @@ Validated with 65 tests including official BIP-340 test vectors — see [`tests/
 The following items are identified for post-v2 enhancement:
 
 ### Reliability & Performance
-- **Connection retry logic with exponential backoff** — relay reconnection currently does not retry on failure
-- **Storage quota handling** — no graceful handling when GM storage approaches limits
+- ~~**Connection retry logic with exponential backoff**~~ ✅ Implemented — 3 retries with 1 s → 2 s → 4 s backoff
+- ~~**Storage quota handling**~~ ✅ Implemented — warnings at 2 MB and 5 MB, toast on save failure, usage display in settings
 
 ### Accessibility
-- **Keyboard accessibility audit** — full keyboard navigation has not been systematically tested
+- ~~**Keyboard accessibility audit**~~ ✅ Implemented — ARIA labels, focus trap, panel stack Escape, `makeKeyboardAccessible()` utility
 
 ### Security
-- **NIP-44 encryption upgrade** — replace NIP-04 (AES-256-CBC) with NIP-44 (XChaCha20-Poly1305) for entity sync; NIP-04 is considered deprecated in the NOSTR ecosystem
+- ~~**NIP-44 encryption upgrade**~~ ✅ Implemented — entity sync now uses NIP-44 v2 (ChaCha20-Poly1305, HKDF-SHA256); NIP-04 retained as fallback for decrypting older events
 
 ### Architecture
 - **Build system for multi-file development** — if the codebase grows significantly, consider a bundler (rollup/esbuild) to split into modules while outputting a single userscript
@@ -628,11 +638,11 @@ const CONFIG = {
 
 Minimal. No NSecBunker config. No complex UI positioning. Just the essentials.
 
-### Section 2: Crypto (~lines 75-530)
+### Section 2: Crypto (~lines 65-665)
 
-Full BIP-340 Schnorr signature implementation with secp256k1 field/point arithmetic, bech32 encoding/decoding, SHA-256, NIP-04 encrypt/decrypt. Self-contained — no external crypto library dependencies beyond Web Crypto API.
+Full BIP-340 Schnorr signature implementation with secp256k1 field/point arithmetic, bech32 encoding/decoding, SHA-256, NIP-04 encrypt/decrypt, and NIP-44 v2 (ChaCha20 block/stream cipher, HKDF-extract/expand, NIP-44 padding, HMAC-SHA256, conversation key derivation, encrypt, decrypt with constant-time MAC verification). Self-contained — no external crypto library dependencies beyond Web Crypto API.
 
-### Section 3: Storage (~lines 535-680)
+### Section 3: Storage (~lines 665-875)
 
 ```javascript
 const Storage = {
@@ -643,7 +653,9 @@ const Storage = {
 };
 ```
 
-### Section 4: Content Extraction (~lines 685-1100)
+### Section 3 also includes `getUsageEstimate()` for storage quota monitoring displayed in settings.
+
+### Section 4: Content Extraction (~lines 875-1375)
 
 ```javascript
 const ContentExtractor = {
@@ -658,15 +670,36 @@ const ContentExtractor = {
 };
 ```
 
-### Section 5: Reader View (~lines 1105-1200)
+### Section 5: Utilities (~lines 1375-1425)
 
-The main UI container — full-page overlay, extracted article rendering, edit mode, markdown editor toggle, preview-as-published, keyboard shortcuts, back-to-page navigation.
+```javascript
+const Utils = {
+  escapeHtml(str),              // XSS prevention
+  showToast(message, type),     // Toast notifications
+  log(...args),                 // Debug logging
+  error(...args),               // Error logging
+  makeKeyboardAccessible(el),   // Add tabindex, role, Enter/Space handler
+};
+```
 
-### Section 6: Entity Tagger (~lines 1205-1450)
+### Section 6: Entity Tagger (~lines 1425-1640)
 
-Text selection popover, entity type selection, entity search/match/create/link, entity bar chips with auto-detection of author and publication entities.
+Text selection popover, entity type selection (Person/Org/Place/Thing), entity search/match/create/link, entity bar chips with auto-detection of author and publication entities.
 
-### Section 7: Event Builder (~lines 1455-1680)
+### Section 7: Relay Client (~lines 1640-1820)
+
+```javascript
+const RelayClient = {
+  connections: Map,
+  connect(url),                 // With retry + exponential backoff (3 retries)
+  disconnect(url), disconnectAll(),
+  publish(event, relayUrls),    // Parallel publish via Promise.allSettled, NOTICE handling
+  subscribe(filters, relayUrls, options), // REQ/EOSE pattern with timeouts
+  isConnected(url),
+};
+```
+
+### Section 8: Event Builder (~lines 1820-1935)
 
 ```javascript
 const EventBuilder = {
@@ -676,26 +709,31 @@ const EventBuilder = {
 };
 ```
 
-### Section 8: NOSTR Relay Client (~lines 1685-1850)
+### Section 8.5: Entity Sync (~lines 1935-2130)
 
 ```javascript
-const RelayClient = {
-  connections: Map,
-  connect(url), disconnect(url), disconnectAll(),
-  publish(event, relayUrls),  // Per-relay results
-  subscribe(filters, relayUrls, onEvent), // For entity sync fetch
+const EntitySync = {
+  validateEntity(entity),                    // Validate entity structure
+  mergeArticles(local, remote),             // URL-based dedup with newest tagged_at
+  mergeEntities(localRegistry, remoteEntities), // Last-write-wins + article union
+  push(options),                             // NIP-44 encrypt + publish to relays
+  pull(options),                             // Fetch + NIP-44 decrypt (NIP-04 fallback) + merge
 };
 ```
 
-### Section 9: Settings & Entity Browser (~lines 1855-3200)
+### Section 9: Reader View (~lines 2130-3165)
 
-Settings panel (identity, relays, entity browser), reader view initialization, publish flow, entity browser with search/filter/cards/detail view with name editing, alias management, keypair display, articles list, and entity deletion.
+The main UI container — full-page overlay, extracted article rendering, edit mode, markdown editor toggle, preview-as-published, keyboard shortcuts (Escape panel stack, Ctrl+E for edit), focus trap, back-to-page navigation.
 
-### Section 10: Styles (~lines 3205-4430)
+### Section 9B: Entity Browser (~lines 3165-3640)
 
-Complete CSS with light/dark mode, reader typography, entity colors, toolbar, popover, entity bar, settings panels, entity browser, animations.
+Entity browser with search/filter/cards, detail view with name editing, alias management, keypair display, articles list, entity deletion, push/pull sync buttons, and storage usage display.
 
-### Section 11: Initialization (~lines 4435-4476)
+### Section 10: Styles (~lines 3640-4860)
+
+Complete CSS with light/dark mode, reader typography, entity colors, toolbar, popover, entity bar, settings panels, entity browser, sync section, animations.
+
+### Section 11: Initialization (~lines 4860-4929)
 
 ```javascript
 async function init() {
@@ -714,8 +752,9 @@ async function init() {
 The project is a single userscript file plus supporting documentation and tests:
 
 ```
-nostr-article-capture.user.js    (4,476 lines — main userscript)
+nostr-article-capture.user.js    (~4,930 lines — main userscript)
 tests/crypto-tests.js            (65 tests — BIP-340 + crypto validation)
+tests/nip44-test.js              (21 tests — NIP-44 v2 padding, ChaCha20, HKDF, encrypt/decrypt)
 plans/v2-redesign-plan.md        (this file)
 docs/                            (reference documentation)
   ├── article-complete-inventory.md
@@ -774,7 +813,7 @@ docs/                            (reference documentation)
 
 5. **Private key storage security** — Private keys are stored in GM_setValue without encryption at rest. Acceptable for v2 with a documented security note. Future versions should add password-based encryption or NIP-49 key export.
 
-6. **NIP-04 deprecation** — Entity sync uses NIP-04 encryption which is considered deprecated in the NOSTR ecosystem. Upgrading to NIP-44 is listed as future work.
+6. ~~**NIP-04 deprecation**~~ ✅ Resolved. Entity sync now uses NIP-44 v2 encryption. NIP-04 is retained only as a fallback for decrypting older events during pull.
 
 ---
 
@@ -791,15 +830,22 @@ docs/                            (reference documentation)
 | User can publish to NOSTR relays from reader view | ✅ With per-relay status |
 | Published events contain correct NIP-23 structure with entity references | ✅ kind 30023 with p-tags |
 | All crypto produces valid, interoperable NOSTR keys and signatures | ✅ Validated by 65 tests + BIP-340 vectors |
-| Script size significantly reduced from 11,398 lines | ✅ 4,476 lines (61% reduction) |
+| Script size significantly reduced from 11,398 lines | ✅ ~4,930 lines (57% reduction) |
 | Reader view feels like a premium reading experience | ✅ Full typography system, dark mode, clean layout |
 
 ### Bonus achievements beyond original plan:
 - Markdown editor toggle for raw editing
 - Preview-as-Published round-trip validation
-- Entity sync across devices (NIP-78 + NIP-04)
+- Entity sync across devices (NIP-78 + NIP-44, NIP-04 fallback)
 - Entity browser with full CRUD (search, filter, detail view, aliases, delete)
 - Relay management UI (add/remove/toggle)
 - XSS prevention throughout
 - 4th entity type (Thing) for broader knowledge capture
 - `markdownToHtml()` bidirectional conversion
+- NIP-44 v2 encryption upgrade (ChaCha20, HKDF-SHA256, HMAC)
+- Relay retry with exponential backoff + stale WebSocket detection
+- Parallel publish + NOTICE handling
+- Storage quota monitoring and display
+- Comprehensive keyboard accessibility (ARIA, focus trap, panel stack)
+- Graceful error handling on storage failures
+- NIP-44 test suite (21 tests)

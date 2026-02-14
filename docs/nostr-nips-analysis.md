@@ -1,5 +1,7 @@
 # NOSTR NIPs Analysis for Content Metadata System
 
+> **Note**: This document was written during early v1 planning and analyzes NIPs for a broader annotation/verification system. The v2 implementation (NOSTR Article Capture) uses a focused subset of these NIPs. See the [NIPs Currently Used](#nips-currently-used-in-v2) section below for the actual implementation status.
+
 ## Overview
 This document analyzes existing NOSTR Implementation Possibilities (NIPs) and recommends which to leverage for a decentralized content metadata and annotation system.
 
@@ -162,11 +164,36 @@ This document analyzes existing NOSTR Implementation Possibilities (NIPs) and re
 ---
 
 #### NIP-78: Application-Specific Data
-**Status:** UNDER CONSIDERATION
-**Relevance:** Medium
+**Status:** ✅ IMPLEMENTED in v2
+**Relevance:** Critical — used for entity sync
 **Description:** Defines kind 30078 for arbitrary application data that's queryable.
 
-**Why Consider It:** Could be useful for storing structured metadata that doesn't fit other event types.
+**Why Use It:** Used for encrypted entity sync events. Each entity is stored as a kind 30078 parameterized replaceable event with NIP-44 encryption.
+
+---
+
+#### NIP-04: Encrypted Direct Messages (Legacy)
+**Status:** ✅ IMPLEMENTED in v2 (fallback only)
+**Relevance:** Medium — backward compatibility
+**Description:** Defines AES-256-CBC encryption with ECDH shared secret for encrypted content.
+
+**Why Use It:** Previously used for entity sync encryption. Now retained only as a fallback for decrypting older sync events during pull operations. New encryption uses NIP-44.
+
+---
+
+#### NIP-44: Versioned Encrypted Payloads
+**Status:** ✅ IMPLEMENTED in v2
+**Relevance:** Critical — primary encryption for entity sync
+**Description:** Defines v2 encrypted payloads using ChaCha20-Poly1305 with HKDF-SHA256 key derivation, NIP-44 padding, and HMAC authentication.
+
+**Key Features:**
+- ChaCha20 stream cipher (pure JavaScript implementation)
+- HKDF-SHA256 for conversation key and message key derivation
+- Content-length hiding via chunk-based padding
+- HMAC-SHA256 authentication with constant-time MAC comparison
+- Version byte (0x02) for forward compatibility
+
+**Why Use It:** Replaces NIP-04 as the standard for encrypted payloads in NOSTR. Provides stronger security properties including authenticated encryption and content-length hiding. Used for encrypt-to-self entity sync via kind 30078 events.
 
 ---
 
@@ -346,6 +373,25 @@ For maximum adoption:
 
 ---
 
+---
+
+## NIPs Currently Used in v2
+
+The v2 NOSTR Article Capture implementation uses the following NIPs:
+
+| NIP | Name | Usage in v2 |
+|-----|------|-------------|
+| **NIP-01** | Basic Protocol | Event structure, relay communication (REQ/EVENT/EOSE/OK/NOTICE/CLOSE) |
+| **NIP-07** | Browser Extension | Optional signing via browser extensions (nos2x, Alby) |
+| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body |
+| **NIP-32** | Labels | Label tags (`L`/`l`) on entity sync events for app-specific categorization |
+| **NIP-33** | Parameterized Replaceable | Kind 30078 entity sync events (replaceable by `d` tag) |
+| **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
+| **NIP-04** | Encrypted DMs (Legacy) | AES-256-CBC decryption fallback for older entity sync events |
+| **NIP-78** | Application Data | Kind 30078 for encrypted entity storage and cross-browser sync |
+
+---
+
 ## Summary
 
 This analysis recommends:
@@ -357,7 +403,7 @@ This analysis recommends:
 - NIP-33 (replaceability)
 - NIP-51 (bookmark lists)
 
-**Define new event kinds:**
+**Define new event kinds (v1 proposals, not yet implemented):**
 - 32123: URL Annotations
 - 32124: Content Ratings
 - 32125: Entity References

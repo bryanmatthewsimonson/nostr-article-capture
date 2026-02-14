@@ -1,5 +1,7 @@
 # Decentralized News Verification System - Data Model
 
+> **Note**: This document was written during v1 planning for a broader verification system. The v2 implementation (NOSTR Article Capture) uses a simplified entity model focused on article capture and tagging. See [v2 Entity Types](#v2-entity-types-implemented) below.
+
 ## Overview
 
 This document defines the core data model for a decentralized news/media verification system built on NOSTR. The system enables users to annotate, fact-check, and establish trust networks around news content and claims.
@@ -24,6 +26,19 @@ This document defines the core data model for a decentralized news/media verific
 - **Events**: News events, incidents, conferences
 - **Concepts**: Topics, categories, subjects (e.g., "Climate Change", "Elections")
 - **Locations**: Geographic places and regions
+
+### v2 Entity Types (Implemented)
+
+The v2 NOSTR Article Capture implementation uses four entity types, each with a real secp256k1 keypair:
+
+| Type | Emoji | Description | Examples |
+|------|-------|-------------|----------|
+| **Person** | 👤 | An individual human | Author, journalist, public figure |
+| **Organization** | 🏢 | A company, institution, or group | News outlet, university, corporation |
+| **Place** | 📍 | A geographic location | City, country, landmark |
+| **Thing** | 🔷 | A concept, event, legislation, or other noun | "Climate Change", "Title IX", "AI" |
+
+Entity data is stored in GM_setValue as an entity registry, synced across browsers via NIP-78 (kind 30078) events encrypted with NIP-44 v2.
 
 ### 4. Relationships
 - **Attribution**: Who said/wrote/published what

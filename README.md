@@ -57,6 +57,10 @@ The script bundles three `@require` dependencies automatically:
 - Publishes articles as **kind 30023** (NIP-23 long-form content) with Markdown body
 - Entity tags included in the published event
 - Configurable relay list (10 default public relays)
+- **Relay connection retry** with exponential backoff (1 s → 2 s → 4 s, up to 4 attempts)
+- **Stale WebSocket detection** — closed/closing sockets are discarded and reconnected automatically
+- **Parallel relay publish** — events are sent to all selected relays concurrently via `Promise.allSettled`
+- **NOTICE message handling** — relay NOTICE messages are logged during publish
 
 ### 🔑 Signing Methods
 
@@ -67,7 +71,8 @@ The script bundles three `@require` dependencies automatically:
 
 ### 🔄 Entity Sync
 - **Push/Pull** entities across browsers via encrypted **NIP-78** (kind 30078) events
-- **NIP-04 encrypt-to-self** — entity data is encrypted with your own key
+- **NIP-44 v2 encrypt-to-self** — entity data encrypted with ChaCha20-Poly1305 (HKDF-SHA256 key derivation)
+- **NIP-04 backward compatibility** — pull decrypts NIP-44 first, falls back to NIP-04 for older events
 - **Smart merge** — last-write-wins on `updated` timestamp; article arrays merged by URL union
 - **nsec import/export** — share your identity across browsers
 
@@ -75,6 +80,20 @@ The script bundles three `@require` dependencies automatically:
 - **Identity management** — generate a new keypair, import an existing nsec, or connect via NIP-07
 - **Relay configuration** — add, remove, enable/disable relays
 - **Entity export/import** — JSON file backup and restore of the entity registry
+- **Storage quota monitoring** — live display of storage usage breakdown; warnings at 2 MB and 5 MB thresholds
+
+### ♿ Accessibility
+- **Comprehensive keyboard navigation** — all interactive elements reachable via Tab/Shift+Tab
+- **ARIA labels** on buttons, dialogs, entity chips, and entity browser cards
+- **Focus trap** — Tab cycling is contained within the reader view when open
+- **Panel stack Escape handling** — Escape closes the topmost overlay (popover → settings → publish → reader)
+- **`makeKeyboardAccessible()` utility** — adds `tabindex`, `role="button"`, and Enter/Space handlers to non-button elements
+
+### 🔐 Crypto
+- **secp256k1 / BIP-340 Schnorr** — full embedded signing and verification (no external crypto library)
+- **NIP-04** — AES-256-CBC encrypt/decrypt via Web Crypto API (legacy, used for backward-compatible decryption)
+- **NIP-44 v2** — ChaCha20-Poly1305 stream cipher with HKDF-SHA256 key derivation, NIP-44 padding, HMAC authentication, and constant-time MAC comparison
+- **Graceful error handling** — storage save failures show user-facing toasts; sync failures are caught per-entity
 
 ---
 
@@ -92,19 +111,21 @@ The script bundles three `@require` dependencies automatically:
 
 ## 🏗️ Architecture
 
-The userscript is a single self-contained file (~3,450 lines) organized into 11 sections:
+The userscript is a single self-contained file (~4,930 lines) organized into 12 sections:
 
 | # | Section | Description |
 |---|---------|-------------|
 | 1 | **Configuration** | Default relays, reader settings, extraction limits, tagging config |
-| 2 | **Crypto** | secp256k1 curve primitives, BIP-340 Schnorr signing, SHA-256, HMAC |
-| 3 | **Storage** | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD |
+| 2 | **Crypto** | secp256k1 curve primitives, BIP-340 Schnorr signing, SHA-256, HMAC, NIP-04, NIP-44 v2 (ChaCha20, HKDF) |
+| 3 | **Storage** | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD, storage quota estimation |
 | 4 | **Content Extraction** | Readability integration, date detection, Turndown Markdown conversion |
-| 5 | **Utilities** | Formatting helpers, debounce, sanitization |
+| 5 | **Utilities** | Formatting helpers, sanitization, keyboard accessibility helper |
 | 6 | **Entity Tagger** | Text selection popover, entity type picker, auto-detection |
-| 7 | **Relay Client** | WebSocket connections, NIP-01 message handling, publish/subscribe |
+| 7 | **Relay Client** | WebSocket connections with retry/backoff, NIP-01 message handling, parallel publish, subscribe |
 | 8 | **Event Builder** | kind 0 (profile), kind 30023 (article), kind 30078 (entity sync) construction & signing |
-| 9 | **Reader View** | Full-page takeover UI, edit modes, preview, dark mode, entity bar |
+| 8.5 | **Entity Sync** | NIP-44 encrypted push/pull, NIP-04 fallback decryption, last-write-wins merge |
+| 9 | **Reader View** | Full-page takeover UI, edit modes, preview, dark mode, entity bar, focus trap |
+| 9B | **Entity Browser** | Search, filter, entity cards, detail view with alias/keypair management |
 | 10 | **Styles** | All CSS injected via `GM_addStyle` |
 | 11 | **Initialization** | FAB creation, menu commands, startup |
 
@@ -116,7 +137,7 @@ The userscript is a single self-contained file (~3,450 lines) organized into 11 
 |------|------|-------|
 | **0** | Profile (NIP-01) | Optional public identity for entities |
 | **30023** | Long-form Article (NIP-23) | Published article content in Markdown |
-| **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-04 encrypt-to-self) |
+| **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
 
 ---
 
@@ -133,8 +154,15 @@ Pre-configured with 10 public relays:
 | Document | Description |
 |----------|-------------|
 | [Data Model](docs/data-model.md) | Entity and article data structures |
-| [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol |
+| [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol (NIP-44 + NIP-04 fallback) |
 | [NOSTR NIPs Analysis](docs/nostr-nips-analysis.md) | NIP usage and rationale |
+
+## 🧪 Test Suites
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| [tests/crypto-tests.js](tests/crypto-tests.js) | 65 | secp256k1, BIP-340 Schnorr, bech32, SHA-256, NIP-04 |
+| [tests/nip44-test.js](tests/nip44-test.js) | 21 | NIP-44 v2 padding, ChaCha20, HKDF, encrypt/decrypt round-trip, conversation key |
 
 ---
 

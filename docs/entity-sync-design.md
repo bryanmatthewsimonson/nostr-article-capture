@@ -2,7 +2,9 @@
 
 ## Overview
 
-This document specifies how knowledge base entities (persons, organizations, places) are synchronized across browsers via NOSTR relays. The design addresses publishing encrypted entity data to relays, fetching it back on another browser, merging with local state, and optionally publishing public entity profiles.
+This document specifies how knowledge base entities (persons, organizations, places, things) are synchronized across browsers via NOSTR relays. The design addresses publishing encrypted entity data to relays, fetching it back on another browser, merging with local state, and optionally publishing public entity profiles.
+
+> **Implementation Status**: Entity sync is fully implemented. Encryption has been **upgraded from NIP-04 to NIP-44 v2** (ChaCha20-Poly1305, HKDF-SHA256). NIP-04 decryption is retained as a fallback for reading older sync events.
 
 ---
 
@@ -47,23 +49,31 @@ Use **two complementary event kinds**:
 - **Kind 0** is the standard profile metadata event. Publishing it from the entity's own keypair means any NOSTR client can resolve the entity's pubkey to a display name. This is already built in [`EventBuilder.buildProfileEvent()`](../nostr-article-capture.user.js:1433) but never called.
 - The two layers are independent: kind 30078 handles cross-browser sync with encryption; kind 0 is optional and public.
 
-### 2. Encryption — NIP-04 Encrypt-to-Self
+### 2. Encryption — NIP-44 v2 Encrypt-to-Self (with NIP-04 Fallback)
 
-Encrypt entity data using **NIP-04** (AES-256-CBC with ECDH shared secret), where the user encrypts to their own public key.
+Entity data is encrypted using **NIP-44 v2** (ChaCha20-Poly1305 with HKDF-SHA256 key derivation), where the user encrypts to their own public key.
 
 ```
-shared_secret = ECDH(user_privkey, user_pubkey) = point_multiply(user_privkey, user_pubkey_point).x
-key = SHA-256(shared_secret)
-ciphertext = AES-256-CBC(key, iv, plaintext)
-content = base64(ciphertext) + "?iv=" + base64(iv)
+conversation_key = HKDF-extract(salt="nip44-v2", ikm=ECDH(user_privkey, user_pubkey).x)
+message_key = HKDF-expand(conversation_key, nonce, 76)  → chacha_key(32) + chacha_nonce(12) + hmac_key(32)
+padded = 2-byte-length-prefix + plaintext + zero-padding (NIP-44 chunk-based padding)
+ciphertext = ChaCha20(chacha_key, chacha_nonce, padded)
+mac = HMAC-SHA256(hmac_key, nonce || ciphertext)
+payload = base64(0x02 + nonce(32) + ciphertext + mac(32))
 ```
 
 **Rationale:**
 
-- NIP-04 is simpler to implement and the script already has all secp256k1 point arithmetic needed (see [`_pointMultiply()`](../nostr-article-capture.user.js:104)).
+- NIP-44 v2 is the current NOSTR standard for encrypted payloads, replacing the deprecated NIP-04.
+- ChaCha20-Poly1305 with HMAC authentication provides stronger security than AES-256-CBC (NIP-04).
+- NIP-44 padding prevents content-length analysis by relay operators.
+- Constant-time MAC comparison prevents timing attacks.
 - Encrypting to self means only the holder of the user's private key can decrypt — perfect for cross-browser sync where the same user imports their nsec on both browsers.
-- NIP-44 would be preferable for inter-user messaging but is more complex (ChaCha20, padding, versioned payloads) and unnecessary for self-sync.
-- The Web Crypto API provides `AES-CBC` natively — no external library needed.
+
+**Backward Compatibility:**
+
+- When **pushing** (encrypting), the script always uses NIP-44 v2.
+- When **pulling** (decrypting), the script tries NIP-44 first. If that fails, it falls back to NIP-04 (AES-256-CBC). This allows reading older sync events encrypted with the previous NIP-04 implementation.
 
 **Why not strip private keys?** If we only synced public data, entities would need their keypairs regenerated on each new browser, breaking the identity continuity (different pubkeys = different NOSTR identity). Syncing the full entity including its private key preserves identity.
 
@@ -131,7 +141,7 @@ Add a `subscribe()` method to [`RelayClient`](../nostr-article-capture.user.js:1
     ["L", "nac/entity-sync"],
     ["l", "v1", "nac/entity-sync"]
   ],
-  "content": "<NIP-04 encrypted JSON>",
+  "content": "<NIP-44 v2 encrypted JSON (base64)>",
   "id": "<event_hash>",
   "sig": "<schnorr_signature>"
 }
@@ -195,65 +205,49 @@ This is signed with the **entity's own private key**. Already implemented in [`E
 
 ## Encryption Scheme
 
-### ECDH Shared Secret (encrypt-to-self)
+### NIP-44 v2 (Current — Used for Encryption)
+
+**Step 1: Conversation Key**
 
 ```
-1. user_privkey_scalar = BigInt('0x' + user_privkey_hex)
-2. user_pubkey_point   = lift_x(user_pubkey_hex)  // recover (x, y) from x-only pubkey
-3. shared_point        = point_multiply(user_privkey_scalar, user_pubkey_point)
-4. shared_secret       = shared_point.x  // 32 bytes, hex-encoded
+conversation_key = HKDF-extract(salt="nip44-v2", ikm=ECDH(privkey, pubkey).x)
 ```
 
-**Note:** `lift_x()` requires recovering the even-y point from an x-only pubkey. The codebase already has the modular exponentiation needed (see [`_modPow()`](../nostr-article-capture.user.js:420) used in [`Crypto.verifySignature()`](../nostr-article-capture.user.js:367) for point decompression).
+The ECDH shared secret is derived via secp256k1 point multiplication (`Crypto.getSharedSecret()`), then the x-coordinate is fed into HKDF-extract with the salt `"nip44-v2"`.
 
-### AES-256-CBC Encryption
+**Step 2: Message Key**
 
-```javascript
-async function nip04Encrypt(plaintext, sharedSecretHex) {
-    const key = await crypto.subtle.importKey(
-        'raw',
-        Crypto.hexToBytes(sharedSecretHex),
-        { name: 'AES-CBC' },
-        false,
-        ['encrypt']
-    );
-    const iv = crypto.getRandomValues(new Uint8Array(16));
-    const encoded = new TextEncoder().encode(plaintext);
-    const ciphertext = await crypto.subtle.encrypt(
-        { name: 'AES-CBC', iv },
-        key,
-        encoded
-    );
-    // NIP-04 format: base64(ciphertext) + "?iv=" + base64(iv)
-    return btoa(String.fromCharCode(...new Uint8Array(ciphertext)))
-        + '?iv='
-        + btoa(String.fromCharCode(...iv));
-}
+```
+nonce = random(32)
+message_key = HKDF-expand(conversation_key, nonce, 76)
+chacha_key   = message_key[0..32]
+chacha_nonce = message_key[32..44]
+hmac_key     = message_key[44..76]
 ```
 
-### AES-256-CBC Decryption
+**Step 3: Padding & Encryption**
 
-```javascript
-async function nip04Decrypt(payload, sharedSecretHex) {
-    const [ciphertextB64, ivB64] = payload.split('?iv=');
-    const ciphertext = Uint8Array.from(atob(ciphertextB64), c => c.charCodeAt(0));
-    const iv = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
-    
-    const key = await crypto.subtle.importKey(
-        'raw',
-        Crypto.hexToBytes(sharedSecretHex),
-        { name: 'AES-CBC' },
-        false,
-        ['decrypt']
-    );
-    const decrypted = await crypto.subtle.decrypt(
-        { name: 'AES-CBC', iv },
-        key,
-        ciphertext
-    );
-    return new TextDecoder().decode(decrypted);
-}
 ```
+padded = [2-byte big-endian length] + plaintext + zero-fill to NIP-44 padded length
+ciphertext = ChaCha20(chacha_key, chacha_nonce, padded)
+```
+
+NIP-44 padding uses chunk-based sizing: lengths ≤ 32 pad to 32, otherwise round up to the next chunk boundary (chunk = max(32, nextPower/8)).
+
+**Step 4: HMAC & Assembly**
+
+```
+mac = HMAC-SHA256(hmac_key, nonce || ciphertext)
+payload = base64(0x02 || nonce(32) || ciphertext || mac(32))
+```
+
+**Step 5: Decryption**
+
+Decryption reverses the process: decode base64, verify version byte (0x02), extract nonce/ciphertext/mac, derive message key from conversation key + nonce, verify HMAC with constant-time comparison, decrypt with ChaCha20, unpad.
+
+### NIP-04 (Legacy — Fallback for Decryption Only)
+
+NIP-04 uses AES-256-CBC with an ECDH shared secret. Format: `base64(ciphertext) + "?iv=" + base64(iv)`. This is only used during pull to decrypt older events that were encrypted before the NIP-44 upgrade.
 
 ---
 
@@ -375,7 +369,7 @@ sequenceDiagram
 7. Deduplicate across relays: for same `d` tag, keep event with highest `created_at`
 8. Derive ECDH shared secret
 9. For each event:
-   a. Decrypt content with NIP-04
+   a. Decrypt content with NIP-44 (fall back to NIP-04 for older events)
    b. Parse JSON, validate entity structure (must have id, type, name, keypair)
    c. Compare with local entity (if exists) using `updated` timestamp
    d. Merge articles arrays (union by URL)
@@ -599,7 +593,7 @@ function validateEntity(entity) {
     return entity
         && typeof entity.id === 'string'
         && typeof entity.name === 'string'
-        && ['person', 'organization', 'place'].includes(entity.type)
+        && ['person', 'organization', 'place', 'thing'].includes(entity.type)
         && entity.keypair
         && typeof entity.keypair.pubkey === 'string'
         && entity.keypair.pubkey.length === 64
@@ -635,6 +629,9 @@ Add these methods to the `Crypto` object:
 | `Crypto.getSharedSecret(privkeyHex, pubkeyHex)` | ECDH: multiply privkey scalar by pubkey point, return x-coordinate as hex. |
 | `Crypto.nip04Encrypt(plaintext, sharedSecretHex)` | AES-256-CBC encrypt, return NIP-04 formatted string. Uses Web Crypto API. |
 | `Crypto.nip04Decrypt(ciphertext, sharedSecretHex)` | AES-256-CBC decrypt from NIP-04 formatted string. Uses Web Crypto API. |
+| `Crypto.nip44GetConversationKey(privkeyHex, pubkeyHex)` | NIP-44 conversation key via HKDF-extract. |
+| `Crypto.nip44Encrypt(plaintext, conversationKey)` | NIP-44 v2 encrypt: ChaCha20 + HMAC + padding. |
+| `Crypto.nip44Decrypt(payload, conversationKey)` | NIP-44 v2 decrypt with constant-time HMAC verification. |
 
 #### 2. `RelayClient` Module — Add Subscription Support
 
@@ -766,9 +763,9 @@ The existing codebase is ~2,545 lines, so this represents a ~17% increase — we
 
 ## Security Considerations
 
-1. **Private keys in encrypted events**: Entity private keys are NIP-04 encrypted. Only the holder of the user's private key can decrypt them. Relay operators cannot read the content.
+1. **Private keys in encrypted events**: Entity private keys are NIP-44 encrypted. Only the holder of the user's private key can decrypt them. Relay operators cannot read the content.
 
-2. **NIP-04 limitations**: NIP-04 is considered deprecated in favor of NIP-44 for new applications, but for encrypt-to-self (no inter-user messaging), the known weaknesses (no padding, CBC mode) are acceptable. The threat model is relay operator snooping, not active MITM.
+2. **NIP-44 security properties**: NIP-44 v2 provides authenticated encryption (HMAC-SHA256), content-length hiding (padding), and uses ChaCha20 which is resistant to timing attacks. Constant-time MAC comparison in the implementation prevents timing-based oracle attacks.
 
 3. **User private key requirement**: Entity sync requires the user's private key to be available locally. Users who only use NIP-07 (browser extension) without exposing their private key cannot use entity sync. The UI provides an "Import nsec" option so users can paste their private key from another source (e.g., their NOSTR key manager, another browser, or a backup). The nsec is stored in Tampermonkey's GM_setValue — it never leaves the browser unencrypted.
 
@@ -780,9 +777,9 @@ The existing codebase is ~2,545 lines, so this represents a ~17% increase — we
 
 ---
 
-## Future Enhancements (Out of Scope for v1)
+## Future Enhancements
 
-- **NIP-44 encryption**: Upgrade to NIP-44 for stronger encryption (ChaCha20-Poly1305, padded)
+- ~~**NIP-44 encryption**~~ ✅ Implemented — entity sync now uses NIP-44 v2 with NIP-04 fallback for reading older events
 - **Selective sync**: Push/pull individual entities instead of all-or-nothing
 - **Auto-sync**: Periodically pull from relays on script load (configurable)
 - **Multi-user sharing**: Encrypt entities to another user's pubkey for collaborative knowledge bases
