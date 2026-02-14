@@ -1730,8 +1730,8 @@
         ws.send(message);
         
         // Wait for OK response
-        const ok = await new Promise((resolve) => {
-          const timeout = setTimeout(() => resolve(false), 5000);
+        const result = await new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve({ accepted: false, message: 'Timeout waiting for relay response' }), 5000);
           
           const handler = (e) => {
             try {
@@ -1739,7 +1739,7 @@
               if (data[0] === 'OK' && data[1] === event.id) {
                 clearTimeout(timeout);
                 ws.removeEventListener('message', handler);
-                resolve(data[2]); // true if accepted
+                resolve({ accepted: data[2], message: data[3] || '' }); // data[3] = relay reason
               } else if (data[0] === 'NOTICE') {
                 console.log(`[NAC Relay] NOTICE from ${url}: ${data[1]}`);
               }
@@ -1751,7 +1751,7 @@
           ws.addEventListener('message', handler);
         });
         
-        return { url, success: ok, error: ok ? null : 'Event rejected by relay' };
+        return { url, success: result.accepted, error: result.accepted ? null : (result.message || 'Event rejected by relay') };
       };
 
       // Publish to all relays in parallel
@@ -1831,15 +1831,9 @@
         content = ContentExtractor.htmlToMarkdown(content);
       }
 
-      // Embed images as base64 data URIs so they survive relay storage
-      // Falls back to original URLs if embedding fails
-      if (content) {
-        try {
-          content = await ContentExtractor.embedImagesInMarkdown(content);
-        } catch (e) {
-          console.warn('[NAC] Image embedding failed, using original URLs:', e);
-        }
-      }
+      // Note: Images are kept as original URLs to avoid exceeding relay event size limits
+      // (base64 embedding can inflate events to megabytes, causing universal relay rejection).
+      // The original absolute URLs are preserved by Turndown's image rule.
       
       // Build tags
       const tags = [
@@ -2800,7 +2794,10 @@
         ReaderView.entities,
         identity?.pubkey
       );
-      document.getElementById('nac-event-preview').textContent = JSON.stringify(event, null, 2);
+      const eventJson = JSON.stringify(event, null, 2);
+      const eventSizeKB = (new TextEncoder().encode(JSON.stringify(event)).length / 1024).toFixed(1);
+      const sizeWarning = eventSizeKB > 64 ? ` ⚠️ Large event (${eventSizeKB} KB) — some relays may reject` : '';
+      document.getElementById('nac-event-preview').textContent = `[Event size: ${eventSizeKB} KB${sizeWarning}]\n\n${eventJson}`;
       
       // Event listeners
       document.getElementById('nac-close-publish').addEventListener('click', ReaderView.hidePublishPanel);
@@ -2859,6 +2856,23 @@
         // Validate signed event
         if (!signedEvent) {
           throw new Error('Event signing failed — no signed event returned. Check your private key or NIP-07 extension.');
+        }
+        
+        // Verify our own signature before sending to relays (catch signing bugs early)
+        if (signingMethod === 'local') {
+          const selfVerify = await Crypto.verifySignature(signedEvent);
+          if (!selfVerify) {
+            throw new Error('Self-verification failed — signature did not pass BIP-340 verification. This is a signing bug.');
+          }
+        }
+        
+        // Check event size — most relays reject events larger than ~64-512 KB
+        const eventJson = JSON.stringify(signedEvent);
+        const eventSizeKB = new TextEncoder().encode(eventJson).length / 1024;
+        if (eventSizeKB > 512) {
+          throw new Error(`Event too large (${eventSizeKB.toFixed(0)} KB). Most relays reject events over 64-512 KB. Try removing images or shortening the article.`);
+        } else if (eventSizeKB > 64) {
+          console.warn(`[NAC] Event is ${eventSizeKB.toFixed(0)} KB — some relays may reject events this large.`);
         }
         
         // Get selected relays
