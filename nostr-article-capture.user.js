@@ -1644,40 +1644,6 @@
   // SECTION 6B: ENTITY AUTO-SUGGESTION
   // ============================================
 
-  const STOP_PHRASES = new Set([
-    'the', 'this', 'that', 'these', 'those', 'here', 'there', 'where', 'when',
-    'what', 'which', 'who', 'whom', 'how', 'why', 'has', 'have', 'had',
-    'but', 'and', 'for', 'not', 'you', 'all', 'can', 'her', 'was', 'one',
-    'our', 'out', 'are', 'also', 'been', 'from', 'had', 'has', 'his', 'its',
-    'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'get', 'let',
-    'say', 'she', 'too', 'use', 'will', 'with', 'would', 'could', 'should',
-    'about', 'after', 'again', 'being', 'below', 'between', 'both', 'during',
-    'each', 'every', 'first', 'further', 'however', 'just', 'last', 'least',
-    'like', 'long', 'many', 'more', 'most', 'much', 'must', 'next', 'only',
-    'other', 'over', 'same', 'some', 'still', 'such', 'than', 'them', 'then',
-    'they', 'very', 'well', 'were', 'while', 'your', 'according', 'although',
-    'another', 'because', 'before', 'between', 'beyond', 'despite', 'either',
-    'enough', 'instead', 'itself', 'neither', 'nothing', 'perhaps', 'several',
-    'since', 'something', 'sometimes', 'still', 'though', 'through', 'together',
-    'under', 'unless', 'until', 'upon', 'whether', 'within', 'without',
-    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
-    'september', 'october', 'november', 'december',
-    'read more', 'click here', 'sign up', 'log in', 'subscribe',
-    'skip advertisement', 'advertisement', 'sponsored content',
-    'share this', 'related articles', 'top stories'
-  ]);
-
-  const ORG_KEYWORDS = ['inc', 'corp', 'llc', 'ltd', 'co', 'company', 'corporation',
-    'university', 'college', 'institute', 'school', 'academy',
-    'bank', 'fund', 'trust', 'group', 'association', 'foundation',
-    'department', 'ministry', 'bureau', 'agency', 'commission',
-    'hospital', 'clinic', 'church', 'mosque', 'temple'];
-
-  const PLACE_KEYWORDS = ['city', 'county', 'state', 'province', 'district', 'region',
-    'street', 'avenue', 'boulevard', 'road', 'park', 'lake', 'river',
-    'mountain', 'island', 'ocean', 'sea', 'bay', 'peninsula'];
-
   const EntityAutoSuggest = {
     suggestions: [],
     dismissedIds: new Set(),
@@ -1704,14 +1670,8 @@
         const alreadyTaggedIds = new Set(existingEntities);
         const searchText = article.title + ' \n ' + article.textContent;
 
-        // Phase 1: Known entity matching
-        const knownMatches = EntityAutoSuggest.matchKnownEntities(searchText, article.title, alreadyTaggedIds, registry);
-
-        // Phase 2: New entity discovery
-        const discovered = EntityAutoSuggest.discoverEntities(searchText, knownMatches, registry);
-
-        // Phase 3: Merge — known first, then discovered
-        const suggestions = [...knownMatches, ...discovered];
+        // Match known entities from registry
+        const suggestions = EntityAutoSuggest.matchKnownEntities(searchText, article.title, alreadyTaggedIds, registry);
 
         // Store suggestions
         EntityAutoSuggest.suggestions = suggestions;
@@ -1769,143 +1729,6 @@
       return results;
     },
 
-    // Discover potential new entities from capitalized phrases
-    discoverEntities: (text, knownMatches, registry) => {
-      const candidates = new Map(); // name -> candidate object
-
-      // Build set of known entity names/aliases for deduplication
-      const knownNames = new Set();
-      const knownMatchedNames = new Set();
-      const entities = Object.values(registry);
-      for (const entity of entities) {
-        knownNames.add(entity.name.toLowerCase());
-        (entity.aliases || []).forEach(a => knownNames.add(a.toLowerCase()));
-      }
-      for (const m of knownMatches) {
-        knownMatchedNames.add(m.name.toLowerCase());
-      }
-
-      // Pass 1: Extract capitalized multi-word phrases (2-5 words)
-      const CAPS_PHRASE = /\b([A-Z][a-z]+(?:\s+(?:of|the|and|for|in|on|at|de|la|van|von)\s+)?(?:[A-Z][a-z]+\s*){1,4})\b/g;
-      let capMatch;
-      while ((capMatch = CAPS_PHRASE.exec(text)) !== null) {
-        const phrase = capMatch[1].trim();
-        const words = phrase.split(/\s+/);
-
-        // Skip single words
-        if (words.length < 2) continue;
-
-        // Pass 2: Filter sentence-start false positives
-        const pos = capMatch.index;
-        if (pos > 0) {
-          const preceding = text.substring(Math.max(0, pos - 3), pos).trim();
-          const endsWithPunctuation = /[.!?]$/.test(preceding);
-          if (endsWithPunctuation && words.length <= 2) continue;
-        } else if (words.length <= 2) {
-          continue; // start of text, only 2 words — likely sentence start
-        }
-
-        const lowerPhrase = phrase.toLowerCase();
-        const firstWordLower = words[0].toLowerCase();
-
-        // Stop phrase filter
-        if (STOP_PHRASES.has(lowerPhrase)) continue;
-        if (STOP_PHRASES.has(firstWordLower)) continue;
-
-        // Skip if matches known entity
-        if (knownNames.has(lowerPhrase)) continue;
-        if (knownMatchedNames.has(lowerPhrase)) continue;
-
-        // Check if candidate is a substring of a known entity name
-        let isSubstring = false;
-        for (const name of knownNames) {
-          if (name.includes(lowerPhrase)) { isSubstring = true; break; }
-        }
-        if (isSubstring) continue;
-
-        // Deduplicate — keep first occurrence, count occurrences
-        if (candidates.has(lowerPhrase)) {
-          candidates.get(lowerPhrase).occurrences++;
-        } else {
-          candidates.set(lowerPhrase, {
-            type: 'discovered',
-            name: phrase,
-            guessedType: EntityAutoSuggest.guessType(phrase),
-            occurrences: 1,
-            position: pos
-          });
-        }
-      }
-
-      // Pass 3: Quoted name/title detection
-      const QUOTED = /["\u201C]([A-Z][^"\u201D]{2,60})["\u201D]/g;
-      let qMatch;
-      while ((qMatch = QUOTED.exec(text)) !== null) {
-        const quoted = qMatch[1].trim();
-        const words = quoted.split(/\s+/);
-
-        // Keep only short quoted strings (< 8 words, not full sentences)
-        if (words.length >= 8) continue;
-        if (words.length < 2) continue;
-
-        const lowerQuoted = quoted.toLowerCase();
-
-        // Skip if already captured or matches known
-        if (candidates.has(lowerQuoted)) continue;
-        if (knownNames.has(lowerQuoted)) continue;
-        if (knownMatchedNames.has(lowerQuoted)) continue;
-        if (STOP_PHRASES.has(words[0].toLowerCase())) continue;
-
-        candidates.set(lowerQuoted, {
-          type: 'discovered',
-          name: quoted,
-          guessedType: EntityAutoSuggest.guessType(quoted),
-          occurrences: 1,
-          position: qMatch.index
-        });
-      }
-
-      // Convert to array, cap at 20, prefer those with multiple occurrences
-      let result = Array.from(candidates.values());
-      if (result.length > 20) {
-        const multi = result.filter(c => c.occurrences >= 2);
-        const single = result.filter(c => c.occurrences < 2);
-        multi.sort((a, b) => a.position - b.position);
-        single.sort((a, b) => a.position - b.position);
-        result = [...multi, ...single].slice(0, 20);
-      } else {
-        result.sort((a, b) => a.position - b.position);
-      }
-
-      return result;
-    },
-
-    // Guess entity type from phrase patterns
-    guessType: (phrase) => {
-      const lowerPhrase = phrase.toLowerCase();
-      const words = phrase.split(/\s+/);
-
-      // Check for organization keywords
-      for (const kw of ORG_KEYWORDS) {
-        if (lowerPhrase.includes(kw)) return 'organization';
-      }
-
-      // Check for place keywords
-      for (const kw of PLACE_KEYWORDS) {
-        if (lowerPhrase.includes(kw)) return 'place';
-      }
-
-      // 2-word capitalized phrase — likely a person name
-      if (words.length === 2 && /^[A-Z]/.test(words[0]) && /^[A-Z]/.test(words[1])) {
-        return 'person';
-      }
-
-      // 3+ words with articles/prepositions — likely organization or thing
-      if (words.length >= 3) return 'thing';
-
-      return 'unknown';
-    },
-
     // Get emoji for entity type
     _typeEmoji: (type) => {
       const map = { person: '\u{1F464}', organization: '\u{1F3E2}', place: '\u{1F4CD}', thing: '\u{1F537}', unknown: '\u2753' };
@@ -1921,7 +1744,7 @@
 
       container.innerHTML = `
         <div class="nac-suggestion-bar-header">
-          <span class="nac-suggestion-bar-title">\u2728 Suggested Entities (${count})</span>
+          <span class="nac-suggestion-bar-title">\u{1F50D} Recognized Entities (${count})</span>
           <button class="nac-suggestion-dismiss-all" aria-label="Dismiss all suggestions">Dismiss All</button>
         </div>
         <div class="nac-suggestion-chips">
@@ -1957,21 +1780,16 @@
 
     // Render a single suggestion chip HTML
     _renderChip: (suggestion, index) => {
-      const isKnown = suggestion.type === 'known';
-      const typeClass = isKnown ? 'nac-suggestion-known' : 'nac-suggestion-discovered';
-      const entityType = isKnown ? suggestion.entity.type : suggestion.guessedType;
+      const entityType = suggestion.entity.type;
       const emoji = EntityAutoSuggest._typeEmoji(entityType);
-      const badge = isKnown ? 'known' : (entityType !== 'unknown' ? 'new \u00B7 ' + entityType : 'new');
-      const actionLabel = isKnown ? 'Link' : 'Add';
       const name = Utils.escapeHtml(suggestion.name);
-      const entityId = isKnown ? ` data-entity-id="${suggestion.entityId}"` : '';
 
-      return `<div class="nac-suggestion-chip ${typeClass}" data-index="${index}"${entityId}>
+      return `<div class="nac-suggestion-chip nac-suggestion-known" data-index="${index}" data-entity-id="${suggestion.entityId}">
         <span class="nac-suggestion-icon">${emoji}</span>
         <span class="nac-suggestion-name">${name}</span>
-        <span class="nac-suggestion-badge">${badge}</span>
+        <span class="nac-suggestion-badge">${entityType}</span>
         <div class="nac-suggestion-actions">
-          <button class="nac-suggestion-accept" aria-label="Accept: ${name}">\u2713 ${actionLabel}</button>
+          <button class="nac-suggestion-accept" aria-label="Accept: ${name}">\u2713 Link</button>
           <button class="nac-suggestion-dismiss" aria-label="Dismiss: ${name}">\u2715</button>
         </div>
       </div>`;
@@ -2004,66 +1822,13 @@
       }
     },
 
-    // Accept a discovered entity suggestion — create and link it
-    acceptDiscovered: async (name, guessedType) => {
-      try {
-        const type = (guessedType && guessedType !== 'unknown') ? guessedType : null;
-
-        if (type) {
-          // Create entity directly with guessed type
-          const privkey = Crypto.generatePrivateKey();
-          const pubkey = Crypto.getPublicKey(privkey);
-          const entityId = 'entity_' + await Crypto.sha256(type + name);
-          const userIdentity = await Storage.identity.get();
-
-          const entity = await Storage.entities.save(entityId, {
-            id: entityId,
-            type,
-            name,
-            aliases: [],
-            keypair: {
-              pubkey,
-              privkey,
-              npub: Crypto.hexToNpub(pubkey),
-              nsec: Crypto.hexToNsec(privkey)
-            },
-            created_by: userIdentity?.pubkey || 'unknown',
-            created_at: Math.floor(Date.now() / 1000),
-            articles: [{
-              url: ReaderView.article.url,
-              title: ReaderView.article.title,
-              context: 'mentioned',
-              tagged_at: Math.floor(Date.now() / 1000)
-            }],
-            metadata: {}
-          });
-
-          ReaderView.entities.push({ entity_id: entityId, context: 'mentioned' });
-          EntityTagger.addChip(entity);
-          Utils.showToast(`Created ${type}: ${name}`, 'success');
-        } else {
-          // No guessed type — show the popover for user to choose type
-          EntityTagger.selectedText = name;
-          const bar = document.getElementById('nac-suggestion-bar');
-          const rect = bar ? bar.getBoundingClientRect() : { left: 100, top: 200 };
-          EntityTagger.show(name, rect.left + window.scrollX, rect.top + window.scrollY);
-        }
-      } catch (e) {
-        Utils.error('Failed to accept discovered entity suggestion:', e);
-        Utils.showToast('Failed to create entity', 'error');
-      }
-    },
 
     // Accept a suggestion by index
     acceptSuggestion: async (index) => {
       const suggestion = EntityAutoSuggest.suggestions[index];
       if (!suggestion) return;
 
-      if (suggestion.type === 'known') {
-        await EntityAutoSuggest.acceptKnown(suggestion.entity);
-      } else {
-        await EntityAutoSuggest.acceptDiscovered(suggestion.name, suggestion.guessedType);
-      }
+      await EntityAutoSuggest.acceptKnown(suggestion.entity);
 
       // Remove from suggestions
       EntityAutoSuggest.suggestions.splice(index, 1);
@@ -2074,7 +1839,7 @@
     dismissSuggestion: (index) => {
       const suggestion = EntityAutoSuggest.suggestions[index];
       if (suggestion) {
-        EntityAutoSuggest.dismissedIds.add(suggestion.entityId || suggestion.name);
+        EntityAutoSuggest.dismissedIds.add(suggestion.entityId);
       }
       EntityAutoSuggest.suggestions.splice(index, 1);
       EntityAutoSuggest._refreshUI();
@@ -4662,10 +4427,6 @@
       background: rgba(99, 102, 241, 0.06);
     }
     
-    .nac-suggestion-chip.nac-suggestion-discovered {
-      border-color: var(--nac-success);
-      background: rgba(34, 197, 94, 0.06);
-    }
     
     .nac-suggestion-icon {
       font-size: 14px;
