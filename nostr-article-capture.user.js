@@ -1544,6 +1544,7 @@
           type,
           name: EntityTagger.selectedText,
           aliases: [],
+          canonical_id: null,
           keypair: {
             pubkey,
             privkey,
@@ -1710,12 +1711,14 @@
           // Confirm with word-boundary regex
           const regex = EntityAutoSuggest.buildWordBoundaryRegex(term);
           if (regex.test(text)) {
+            const canonicalName = entity.canonical_id && registry[entity.canonical_id] ? registry[entity.canonical_id].name : null;
             results.push({
               type: 'known',
               entity: entity,
               entityId: entity.id,
               name: entity.name,
               matchedOn: term,
+              canonicalName,
               occurrences: (text.match(new RegExp(regex.source, 'gi')) || []).length,
               position: text.search(regex)
             });
@@ -1783,10 +1786,11 @@
       const entityType = suggestion.entity.type;
       const emoji = EntityAutoSuggest._typeEmoji(entityType);
       const name = Utils.escapeHtml(suggestion.name);
+      const canonicalLabel = suggestion.canonicalName ? ` → ${Utils.escapeHtml(suggestion.canonicalName)}` : '';
 
       return `<div class="nac-suggestion-chip nac-suggestion-known" data-index="${index}" data-entity-id="${suggestion.entityId}">
         <span class="nac-suggestion-icon">${emoji}</span>
-        <span class="nac-suggestion-name">${name}</span>
+        <span class="nac-suggestion-name">${name}${canonicalLabel}</span>
         <span class="nac-suggestion-badge">${entityType}</span>
         <div class="nac-suggestion-actions">
           <button class="nac-suggestion-accept" aria-label="Accept: ${name}">\u2713 Link</button>
@@ -2118,15 +2122,28 @@
       }
       
       // Add entity tags
+      const taggedPubkeys = new Set();
       for (const entityRef of entities) {
         const entity = await Storage.entities.get(entityRef.entity_id);
         if (entity && entity.keypair) {
           // Add pubkey reference
           tags.push(['p', entity.keypair.pubkey, '', entityRef.context]);
+          taggedPubkeys.add(entity.keypair.pubkey);
           
           // Add name tag for clients that don't resolve pubkeys
           const tagType = entity.type === 'person' ? 'person' : entity.type === 'organization' ? 'org' : entity.type === 'thing' ? 'thing' : 'place';
           tags.push([tagType, entity.name, entityRef.context]);
+
+          // If this entity is an alias, also tag the canonical entity
+          if (entity.canonical_id) {
+            const canonical = await Storage.entities.get(entity.canonical_id);
+            if (canonical && canonical.keypair && !taggedPubkeys.has(canonical.keypair.pubkey)) {
+              tags.push(['p', canonical.keypair.pubkey, '', entityRef.context]);
+              taggedPubkeys.add(canonical.keypair.pubkey);
+              const canonTagType = canonical.type === 'person' ? 'person' : canonical.type === 'organization' ? 'org' : canonical.type === 'thing' ? 'thing' : 'place';
+              tags.push([canonTagType, canonical.name, entityRef.context]);
+            }
+          }
         }
       }
       
@@ -2155,12 +2172,16 @@
     },
 
     // Build kind 0 profile event for entity
-    buildProfileEvent: (entity) => {
+    buildProfileEvent: (entity, canonicalNpub) => {
+      const tags = [];
+      if (canonicalNpub) {
+        tags.push(['refers_to', canonicalNpub]);
+      }
       return {
         kind: 0,
         pubkey: entity.keypair.pubkey,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [],
+        tags,
         content: JSON.stringify({
           name: entity.name,
           about: `${entity.type} entity created by nostr-article-capture`,
@@ -2200,7 +2221,8 @@
         && entity.keypair
         && typeof entity.keypair.pubkey === 'string'
         && entity.keypair.pubkey.length === 64
-        && typeof entity.updated === 'number';
+        && typeof entity.updated === 'number'
+        && (entity.canonical_id === null || entity.canonical_id === undefined || typeof entity.canonical_id === 'string');
     },
 
     mergeArticles(localArticles = [], remoteArticles = []) {
@@ -2287,7 +2309,14 @@
         for (const entity of entities) {
           try {
             if (entity.keypair?.privkey) {
-              const profileEvent = EventBuilder.buildProfileEvent(entity);
+              let canonicalNpub = null;
+              if (entity.canonical_id) {
+                const canonical = await Storage.entities.get(entity.canonical_id);
+                if (canonical && canonical.keypair) {
+                  canonicalNpub = canonical.keypair.npub || Crypto.hexToNpub(canonical.keypair.pubkey);
+                }
+              }
+              const profileEvent = EventBuilder.buildProfileEvent(entity, canonicalNpub);
               const signed = await Crypto.signEvent(profileEvent, entity.keypair.privkey);
               await RelayClient.publish(signed, writeRelays);
             }
@@ -2558,6 +2587,7 @@
               type: 'person',
               name: authorName,
               aliases: [],
+              canonical_id: null,
               keypair: {
                 pubkey,
                 privkey,
@@ -2620,6 +2650,7 @@
               type: 'organization',
               name: publicationName,
               aliases: [],
+              canonical_id: null,
               keypair: {
                 pubkey,
                 privkey,
@@ -3458,11 +3489,14 @@
     TYPE_EMOJI: { person: '👤', organization: '🏢', place: '📍', thing: '🔷' },
     TYPE_LABELS: { person: 'Person', organization: 'Org', place: 'Place', thing: 'Thing' },
 
+    _registry: {},
+
     init: async (panel, identity) => {
       const container = panel.querySelector('#nac-entity-browser');
       if (!container) return;
 
       const registry = await Storage.entities.getAll();
+      EntityBrowser._registry = registry;
       const entities = Object.values(registry);
 
       container.innerHTML = EntityBrowser.renderListView(entities);
@@ -3515,12 +3549,15 @@
         const emoji = EntityBrowser.TYPE_EMOJI[e.type] || '🔷';
         const articleCount = (e.articles || []).length;
         const created = e.created_at ? new Date(e.created_at * 1000).toLocaleDateString() : 'Unknown';
+        const canonicalEntity = e.canonical_id ? EntityBrowser._registry[e.canonical_id] : null;
+        const aliasLabel = canonicalEntity ? `<div class="nac-eb-card-alias">→ ${Utils.escapeHtml(canonicalEntity.name)}</div>` : '';
         return `
-          <div class="nac-eb-card nac-eb-card-${e.type}" data-entity-id="${Utils.escapeHtml(e.id)}" tabindex="0" role="button" aria-label="${Utils.escapeHtml(e.name)} — ${e.type}">
+          <div class="nac-eb-card nac-eb-card-${e.type}${e.canonical_id ? ' nac-eb-card-alias-entity' : ''}" data-entity-id="${Utils.escapeHtml(e.id)}" tabindex="0" role="button" aria-label="${Utils.escapeHtml(e.name)} — ${e.type}">
             <div class="nac-eb-card-main">
               <span class="nac-eb-card-emoji">${emoji}</span>
               <div class="nac-eb-card-info">
                 <div class="nac-eb-card-name">${Utils.escapeHtml(e.name)}</div>
+                ${aliasLabel}
                 <div class="nac-eb-card-meta">${articleCount} article${articleCount !== 1 ? 's' : ''} · ${created}</div>
               </div>
               <span class="nac-eb-card-arrow">›</span>
@@ -3720,6 +3757,41 @@
       const aliases = entity.aliases || [];
       const created = entity.created_at ? new Date(entity.created_at * 1000).toLocaleString() : 'Unknown';
 
+      // Look up canonical relationship
+      let canonicalEntity = null;
+      if (entity.canonical_id) {
+        canonicalEntity = await Storage.entities.get(entity.canonical_id);
+      }
+
+      // Find entities that are aliases of this entity
+      const registry = await Storage.entities.getAll();
+      const aliasEntities = Object.values(registry).filter(e => e.canonical_id === entityId);
+
+      // Build canonical reference section HTML
+      let canonicalSectionHtml = '';
+      if (canonicalEntity) {
+        canonicalSectionHtml = `
+          <div class="nac-eb-section nac-eb-canonical-section">
+            <div class="nac-eb-section-title">🔗 Canonical Reference</div>
+            <div class="nac-eb-canonical-info">
+              Alias of: <button class="nac-eb-canonical-link" id="nac-eb-goto-canonical" data-entity-id="${Utils.escapeHtml(canonicalEntity.id)}">${Utils.escapeHtml(canonicalEntity.name)}</button>
+              <button class="nac-eb-remove-alias-btn" id="nac-eb-remove-alias" title="Remove alias link">✕ Unlink</button>
+            </div>
+          </div>
+        `;
+      } else if (aliasEntities.length > 0) {
+        canonicalSectionHtml = `
+          <div class="nac-eb-section nac-eb-canonical-section">
+            <div class="nac-eb-section-title">🔗 Known Aliases</div>
+            <div class="nac-eb-alias-entities">
+              ${aliasEntities.map(ae => `
+                <button class="nac-eb-alias-entity-link" data-entity-id="${Utils.escapeHtml(ae.id)}">${Utils.escapeHtml(ae.name)}</button>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }
+
       container.innerHTML = `
         <div class="nac-eb-detail">
           <button class="nac-eb-back" id="nac-eb-back">← Back to list</button>
@@ -3729,6 +3801,12 @@
             <span class="nac-eb-detail-badge nac-eb-badge-${entity.type}">${typeLabel}</span>
           </div>
           <div class="nac-eb-detail-created">Created: ${created}</div>
+          
+          ${canonicalSectionHtml}
+          
+          <div class="nac-eb-section">
+            <button class="nac-btn" id="nac-eb-set-alias" style="width:100%; margin-bottom: 12px; font-size: 12px; padding: 6px;">🔗 Set as alias of…</button>
+          </div>
           
           <div class="nac-eb-section">
             <div class="nac-eb-section-title">Aliases</div>
@@ -3794,6 +3872,61 @@
       // Back button
       container.querySelector('#nac-eb-back')?.addEventListener('click', async () => {
         await EntityBrowser.init(panel, identity);
+      });
+
+      // "Set as alias of…" button — opens search to pick canonical entity
+      container.querySelector('#nac-eb-set-alias')?.addEventListener('click', async () => {
+        const searchTerm = prompt('Search for canonical entity:');
+        if (!searchTerm || !searchTerm.trim()) return;
+        const results = await Storage.entities.search(searchTerm.trim());
+        // Filter out self
+        const filtered = results.filter(r => r.id !== entity.id);
+        if (filtered.length === 0) {
+          Utils.showToast('No matching entities found', 'error');
+          return;
+        }
+        // If multiple results, let user pick
+        let chosen;
+        if (filtered.length === 1) {
+          chosen = filtered[0];
+        } else {
+          const options = filtered.map((e, i) => `${i + 1}. ${e.name} (${e.type})`).join('\n');
+          const choice = prompt(`Multiple matches:\n${options}\n\nEnter number:`);
+          const idx = parseInt(choice) - 1;
+          if (isNaN(idx) || idx < 0 || idx >= filtered.length) return;
+          chosen = filtered[idx];
+        }
+        // Prevent circular: don't alias to something that's already an alias of this entity
+        if (chosen.canonical_id === entity.id) {
+          Utils.showToast('Cannot set alias: would create circular reference', 'error');
+          return;
+        }
+        entity.canonical_id = chosen.id;
+        await Storage.entities.save(entity.id, entity);
+        Utils.showToast(`Set as alias of: ${chosen.name}`, 'success');
+        EntityBrowser.showDetail(container, entity.id, panel, identity);
+      });
+
+      // "Go to canonical" link
+      container.querySelector('#nac-eb-goto-canonical')?.addEventListener('click', () => {
+        const canonicalId = container.querySelector('#nac-eb-goto-canonical')?.dataset.entityId;
+        if (canonicalId) EntityBrowser.showDetail(container, canonicalId, panel, identity);
+      });
+
+      // "Remove alias link" button
+      container.querySelector('#nac-eb-remove-alias')?.addEventListener('click', async () => {
+        entity.canonical_id = null;
+        await Storage.entities.save(entity.id, entity);
+        Utils.showToast('Alias link removed', 'success');
+        EntityBrowser.showDetail(container, entity.id, panel, identity);
+      });
+
+      // Alias entity links (click to navigate)
+      container.querySelectorAll('.nac-eb-alias-entity-link').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const targetId = btn.dataset.entityId;
+          if (targetId) EntityBrowser.showDetail(container, targetId, panel, identity);
+        });
       });
 
       // Rename: click or Enter/Space on name to edit
@@ -5250,6 +5383,87 @@
       background: rgba(239, 68, 68, 0.2);
     }
     
+    /* Entity Alias Styles */
+    .nac-eb-card-alias {
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    
+    .nac-eb-card-alias-entity {
+      opacity: 0.85;
+    }
+    
+    .nac-eb-canonical-section {
+      padding: 10px;
+      background: rgba(99, 102, 241, 0.06);
+      border: 1px dashed var(--nac-primary);
+      border-radius: 8px;
+    }
+    
+    .nac-eb-canonical-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    
+    .nac-eb-canonical-link {
+      background: none;
+      border: none;
+      color: var(--nac-primary);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 0;
+      text-decoration: underline;
+    }
+    
+    .nac-eb-canonical-link:hover {
+      color: var(--nac-primary-hover);
+    }
+    
+    .nac-eb-remove-alias-btn {
+      background: none;
+      border: 1px solid var(--nac-border);
+      border-radius: 4px;
+      color: var(--nac-text-muted);
+      cursor: pointer;
+      font-size: 11px;
+      padding: 2px 8px;
+      margin-left: auto;
+    }
+    
+    .nac-eb-remove-alias-btn:hover {
+      border-color: var(--nac-error);
+      color: var(--nac-error);
+    }
+    
+    .nac-eb-alias-entities {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    
+    .nac-eb-alias-entity-link {
+      background: var(--nac-bg);
+      border: 1px solid var(--nac-border);
+      border-radius: 12px;
+      color: var(--nac-primary);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 3px 10px;
+    }
+    
+    .nac-eb-alias-entity-link:hover {
+      background: var(--nac-primary);
+      color: white;
+      border-color: var(--nac-primary);
+    }
+    
     /* Focus-visible styles for keyboard accessibility */
     .nac-fab:focus-visible,
     .nac-btn-back:focus-visible,
@@ -5289,11 +5503,98 @@
   `;
 
   // ============================================
+  // SECTION 10B: ENTITY ALIAS MIGRATION
+  // ============================================
+
+  const EntityMigration = {
+    // Migrate entity schema: convert inline aliases[] strings to separate alias entities with canonical_id
+    migrateAliasesToEntities: async () => {
+      const schemaVersion = await Storage.get('entity_schema_version', 1);
+      if (schemaVersion >= 2) return; // Already migrated
+
+      Utils.log('Running entity alias migration (v1 → v2)...');
+
+      const registry = await Storage.entities.getAll();
+      const entities = Object.values(registry);
+      let created = 0;
+
+      for (const entity of entities) {
+        // Ensure canonical_id is set on every entity
+        if (entity.canonical_id === undefined) {
+          entity.canonical_id = null;
+        }
+
+        if (!entity.aliases || entity.aliases.length === 0) {
+          registry[entity.id] = { ...entity, updated: Math.floor(Date.now() / 1000) };
+          continue;
+        }
+
+        for (const aliasName of entity.aliases) {
+          if (!aliasName || aliasName.trim().length < 2) continue;
+
+          const trimmedAlias = aliasName.trim();
+
+          // Generate keypair for alias entity
+          const privkey = Crypto.generatePrivateKey();
+          const pubkey = Crypto.getPublicKey(privkey);
+          const aliasEntityId = 'entity_' + await Crypto.sha256(entity.type + trimmedAlias);
+
+          // Don't create if an entity with this ID already exists
+          if (registry[aliasEntityId]) continue;
+
+          const userIdentity = await Storage.identity.get();
+
+          registry[aliasEntityId] = {
+            id: aliasEntityId,
+            type: entity.type,
+            name: trimmedAlias,
+            aliases: [],
+            canonical_id: entity.id,
+            keypair: {
+              pubkey,
+              privkey,
+              npub: Crypto.hexToNpub(pubkey),
+              nsec: Crypto.hexToNsec(privkey)
+            },
+            created_by: userIdentity?.pubkey || entity.created_by || 'migration',
+            created_at: Math.floor(Date.now() / 1000),
+            articles: [],
+            metadata: {},
+            updated: Math.floor(Date.now() / 1000)
+          };
+          created++;
+        }
+
+        // Remove old aliases array from canonical entity
+        entity.aliases = [];
+        registry[entity.id] = { ...entity, updated: Math.floor(Date.now() / 1000) };
+      }
+
+      // Save all changes at once
+      await Storage.set('entity_registry', registry);
+      await Storage.set('entity_schema_version', 2);
+
+      if (created > 0) {
+        Utils.log(`Migration complete: created ${created} alias entities`);
+      } else {
+        Utils.log('Migration complete: no aliases to migrate');
+      }
+    }
+  };
+
+  // ============================================
   // SECTION 11: INITIALIZATION
   // ============================================
   
   async function init() {
     Utils.log('Initializing NOSTR Article Capture v' + CONFIG.version);
+    
+    // Run migrations before anything else
+    try {
+      await EntityMigration.migrateAliasesToEntities();
+    } catch (e) {
+      console.error('[NAC] Entity migration failed:', e);
+    }
     
     // Add styles
     GM_addStyle(STYLES);
