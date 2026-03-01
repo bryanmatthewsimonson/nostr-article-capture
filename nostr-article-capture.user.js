@@ -945,15 +945,32 @@
       };
     },
 
-    // Get canonical URL
+    // Get canonical URL with validation and cleaning
     getCanonicalUrl: () => {
+      // 1. Canonical URL — most authoritative
       const canonical = document.querySelector('link[rel="canonical"]');
-      if (canonical && canonical.href) return canonical.href;
-      
+      if (canonical && canonical.href) {
+        try {
+          const url = new URL(canonical.href);
+          if (url.protocol === 'http:' || url.protocol === 'https:') {
+            return ContentExtractor.normalizeUrl(canonical.href);
+          }
+        } catch (e) { /* invalid URL, skip */ }
+      }
+
+      // 2. Open Graph URL — second most reliable
       const ogUrl = document.querySelector('meta[property="og:url"]');
-      if (ogUrl && ogUrl.content) return ogUrl.content;
-      
-      return window.location.href;
+      if (ogUrl && ogUrl.content) {
+        try {
+          const url = new URL(ogUrl.content);
+          if (url.protocol === 'http:' || url.protocol === 'https:') {
+            return ContentExtractor.normalizeUrl(ogUrl.content);
+          }
+        } catch (e) { /* invalid URL, skip */ }
+      }
+
+      // 3. Current page URL — fallback, clean tracking params
+      return ContentExtractor.normalizeUrl(window.location.href);
     },
 
     // Extract domain from URL
@@ -965,16 +982,29 @@
       }
     },
 
-    // Normalize URL (remove tracking params)
+    // Normalize URL (remove tracking params, clean hash fragments)
     normalizeUrl: (url) => {
       try {
         const parsed = new URL(url);
         const trackingParams = [
-          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-          'fbclid', 'gclid', '_ga', 'ref', 'source'
+          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id',
+          'fbclid', 'gclid', '_ga', '_gid', 'ref', 'source',
+          'mc_cid', 'mc_eid', 'mkt_tok',
+          'oly_anon_id', 'oly_enc_id',
+          'vero_id', 'wickedid',
+          '__twitter_impression', 'twclid',
+          'igshid', 'spm', 'share_source', 'from'
         ];
         trackingParams.forEach(param => parsed.searchParams.delete(param));
-        parsed.hash = '';
+        // Strip hash fragments that look like tracking (short random strings, dots, slashes)
+        // Keep meaningful anchors like #section-name (6+ chars, word-like)
+        if (parsed.hash) {
+          const frag = parsed.hash.slice(1);
+          const isTrackingHash = /^[.\/]/.test(frag) || /^[A-Za-z0-9]{1,5}$/.test(frag) || frag === '';
+          if (isTrackingHash) {
+            parsed.hash = '';
+          }
+        }
         return parsed.toString();
       } catch (e) {
         return url;
@@ -2476,7 +2506,8 @@
               </div>
               <div class="nac-article-source">
                 <span class="nac-source-label">Source:</span>
-                <span class="nac-source-url">${article.url}</span>
+                <span class="nac-source-url nac-editable-field" id="nac-url" data-field="url" title="${Utils.escapeHtml(article.url)} — Click to edit URL" role="button" tabindex="0" aria-label="Edit article URL — click to change">${Utils.escapeHtml(article.url)}</span>
+                <a class="nac-source-link" id="nac-url-link" href="${Utils.escapeHtml(article.url)}" target="_blank" rel="noopener" title="Open article URL in new tab" aria-label="Open URL in new tab">↗</a>
                 <button class="nac-btn-copy" id="nac-copy-url" aria-label="Copy article URL">Copy</button>
               </div>
               <div class="nac-article-archived">
@@ -2512,7 +2543,7 @@
       document.getElementById('nac-publish-btn').addEventListener('click', ReaderView.showPublishPanel);
       document.getElementById('nac-settings-btn').addEventListener('click', ReaderView.showSettings);
       document.getElementById('nac-copy-url').addEventListener('click', () => {
-        navigator.clipboard.writeText(article.url);
+        navigator.clipboard.writeText(ReaderView.article.url);
         Utils.showToast('URL copied to clipboard');
       });
       
@@ -2710,6 +2741,11 @@
           // Format as YYYY-MM-DD for the date input value
           input.value = d.toISOString().split('T')[0];
         }
+      } else if (fieldKey === 'url') {
+        input.type = 'text';
+        input.value = ReaderView.article.url || '';
+        input.style.fontFamily = 'monospace';
+        input.style.fontSize = '12px';
       } else {
         input.type = 'text';
         input.value = fieldKey === 'byline'
@@ -2742,6 +2778,19 @@
             const newTs = Math.floor(new Date(newValue + 'T12:00:00').getTime() / 1000);
             ReaderView.article.publishedAt = newTs;
             element.textContent = ReaderView._formatDate(newTs);
+          } else {
+            element.textContent = originalText;
+          }
+        } else if (fieldKey === 'url') {
+          if (newValue) {
+            const cleanedUrl = ContentExtractor.normalizeUrl(newValue);
+            ReaderView.article.url = cleanedUrl;
+            ReaderView.article.domain = ContentExtractor.getDomain(cleanedUrl);
+            element.textContent = cleanedUrl;
+            element.title = cleanedUrl + ' — Click to edit URL';
+            // Update the external link href
+            const linkEl = document.getElementById('nac-url-link');
+            if (linkEl) linkEl.href = cleanedUrl;
           } else {
             element.textContent = originalText;
           }
@@ -4296,6 +4345,28 @@
       text-overflow: ellipsis;
       white-space: nowrap;
       font-family: monospace;
+      cursor: pointer;
+      border-bottom: 1px dashed var(--nac-border);
+      padding-bottom: 1px;
+    }
+    
+    .nac-source-url:hover {
+      color: var(--nac-accent);
+      border-bottom-color: var(--nac-accent);
+    }
+    
+    .nac-source-link {
+      color: var(--nac-text-muted);
+      text-decoration: none;
+      font-size: 14px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    
+    .nac-source-link:hover {
+      color: var(--nac-accent);
+      background: var(--nac-surface);
     }
     
     .nac-btn-copy {
