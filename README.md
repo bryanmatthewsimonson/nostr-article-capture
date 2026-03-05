@@ -1,6 +1,6 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures web articles into a clean reader view wi
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.1.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.5.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
   </a>
 </p>
 
@@ -65,10 +65,30 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **📋 Claim button** in the text selection popover — select any text and extract it as a claim
 - **Claim types** — classify claims as Factual, Causal, Evaluative, or Predictive
 - **Crux marking** — mark key claims as "crux" (the most important claims in an article)
-- **Claims bar** — displays extracted claims with type badges and crux indicators below the article
+- **Confidence slider** — set confidence level (0–100%) on crux claims
+- **Enriched claims** — each claim captures:
+  - **Claimant** — who made the claim (linked to an entity from the registry)
+  - **Subjects** — what the claim is about (one or more entities)
+  - **Attribution type** — direct quote, paraphrase, editorial assertion, or article thesis
+- **Claims bar** — displays extracted claims with type badges, claimant labels, subject icons, and crux indicators below the article
 - **Click-to-toggle crux** — click any claim chip to toggle its crux status
 - **Per-URL persistence** — claims are stored per article URL and reloaded on revisit
-- **Claims in NOSTR events** — claims are embedded in kind 30023 events as `["claim", text, type]` and `["claim", text, type, "crux"]` tags
+- **Claims published as kind 30040** — each claim is published as its own replaceable event with `claimant`/`subject` p-tags, `attribution`, `confidence`, and `crux` markers
+
+### 🌐 View Others' Claims
+
+- **🌐 button** in the claims bar fetches kind 30040 claim events from relays for the current article URL
+- **Grouped by publisher** — remote claims are organized by npub, filtering out your own
+- **Cross-user claim discovery** — see what claims others have extracted from the same article
+
+### 🔗 Evidence Linking
+
+- **🔗 button** on each claim opens the evidence linker modal
+- **Cross-article linking** — link claims across different articles as supporting, contradicting, or contextualizing evidence
+- **Relationship types** — supports ✅, contradicts ❌, contextualizes 📎
+- **Evidence indicators** — claims with evidence links show a 🔗 badge with link count
+- **Evidence tooltips** — click the indicator to see all linked claims with source info
+- **Published as kind 30043** — evidence links are published during article publish, linking source and target claims with relationship type
 
 ### 📋 Entity Management (Settings)
 
@@ -81,10 +101,12 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 
 ### 📤 NOSTR Publishing
 
-- **Kind 30023** long-form article events (NIP-23) with Markdown body
+- **Kind 30023** long-form article events (NIP-23) with Markdown body, entity `p` tags, and `claim` summary tags
+- **Kind 30040** claim events — each claim published as its own replaceable event with claimant/subject p-tags and attribution metadata
+- **Kind 30043** evidence link events — cross-article claim relationships (supports/contradicts/contextualizes)
+- **Kind 32125** entity relationship events — published during article publish, linking entities to articles with typed relationships (author, mentioned, claimant, subject)
 - **Kind 0** profile metadata events (optional, for entity public names); alias entities include `["refers_to", canonical_npub]` tags
 - **Kind 30078** entity sync events (NIP-78, NIP-44 v2 encrypted)
-- **Claim tags** in kind 30023 — `["claim", text, type]` and `["claim", text, type, "crux"]` for extracted claims
 - **Alias entity resolution** — when an alias entity is tagged, the canonical entity's pubkey is also included in `p` tags
 - **Two signing methods:**
 
@@ -169,24 +191,25 @@ All cryptographic operations are implemented in pure JavaScript — no external 
 
 ## 🏗️ Architecture
 
-The userscript is a single self-contained file (~6,245 lines) organized into 16 sections:
+The userscript is a single self-contained file (~7,722 lines) organized into 17 sections:
 
 | # | Section | Lines | Description |
 |---|---------|-------|-------------|
 | 1 | **Configuration** | ~35 | Default relays, reader settings, extraction limits, tagging config |
 | 2 | **Crypto** | ~600 | secp256k1 curve primitives, Bech32 (BIP-173), BIP-340 Schnorr signing, SHA-256, HMAC, HKDF, ChaCha20, NIP-04, NIP-44 v2 |
-| 3 | **Storage** | ~245 | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD, claims CRUD, storage quota estimation |
+| 3 | **Storage** | ~270 | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD, claims CRUD, evidence links CRUD, storage quota estimation |
 | 4 | **Content Extraction** | ~530 | Readability integration, smart date detection, Turndown markdown conversion, markdown-to-HTML rendering, canonical URL detection |
 | 5 | **Utilities** | ~50 | Formatting helpers, HTML sanitization, `makeKeyboardAccessible()` |
 | 6 | **Entity Tagger** | ~225 | Text selection popover, entity type picker, chip rendering, auto-detection, claim button integration |
-| 6C | **Claim Extractor** | ~205 | Claim extraction form, claim types (Factual/Causal/Evaluative/Predictive), crux marking, claims bar UI, per-URL persistence |
+| 6C | **Claim Extractor** | ~620 | Enriched claim form (claimant, subjects, attribution), claim types, crux/confidence, claims bar, remote claim fetching (🌐), per-URL persistence |
+| 6D | **Evidence Linker** | ~230 | Cross-article evidence linking modal (supports/contradicts/contextualizes), evidence indicators, tooltips, kind 30043 publishing |
 | 6B | **EntityAutoSuggest** | ~265 | Known entity matching (name + alias, word-boundary regex), new entity discovery (capitalized phrases, quoted names, type heuristics), suggestion bar UI |
 | 7 | **Relay Client** | ~180 | WebSocket connections with retry/backoff, NIP-01 message handling, parallel publish, subscribe |
-| 8 | **Event Builder** | ~135 | Kind 0 (profile with `refers_to` for aliases), kind 30023 (article with claim tags), kind 30078 (entity sync) construction & signing |
+| 8 | **Event Builder** | ~220 | Kind 0 (profile), kind 30023 (article), kind 30040 (claim), kind 30043 (evidence link), kind 30078 (entity sync), kind 32125 (entity relationship) construction |
 | 8.5 | **Entity Sync** | ~200 | NIP-44 encrypted push/pull, NIP-04 fallback decryption, last-write-wins merge |
-| 9 | **Reader View** | ~1,120 | Full-page takeover UI, edit modes, preview, dark mode, inline field editing, entity bar, claims bar, focus trap, keyboard shortcuts |
+| 9 | **Reader View** | ~1,300 | Full-page takeover UI, edit modes, preview, dark mode, inline field editing, entity bar, claims bar, evidence links, focus trap, keyboard shortcuts |
 | 9B | **Entity Browser** | ~575 | Search, filter, entity cards, detail view with alias/keypair management, canonical reference UI, set-as-alias, entity delete |
-| 10 | **Styles** | ~1,700 | All CSS injected via `GM_addStyle` (dark theme, focus-visible, responsive, claim styles) |
+| 10 | **Styles** | ~2,230 | All CSS injected via `GM_addStyle` (dark theme, focus-visible, responsive, claim styles, evidence linker styles) |
 | 10B | **Entity Alias Migration** | ~80 | Auto-migration from legacy inline `aliases[]` to separate alias entities with keypairs and `canonical_id` |
 | 11 | **Initialization** | ~65 | FAB creation, `GM_registerMenuCommand`, entity migration, startup |
 
@@ -197,12 +220,78 @@ The userscript is a single self-contained file (~6,245 lines) organized into 16 
 | Kind | Name | Usage |
 |------|------|-------|
 | **0** | Profile Metadata (NIP-01) | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
-| **30023** | Long-form Article (NIP-23) | Published article content in Markdown with entity `p` tags and `claim` tags |
+| **30023** | Long-form Article (NIP-23) | Published article content in Markdown with entity `p` tags and summary `claim` tags |
+| **30040** | Claim Event | Individual claim with claimant/subject `p` tags, attribution type, confidence, crux flag |
+| **30043** | Evidence Link | Cross-article claim relationship: supports, contradicts, or contextualizes |
 | **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
+| **32125** | Entity Relationship | Links an entity to an article with a typed relationship (author, mentioned, claimant, subject) |
 
-### Claim Tags in Kind 30023
+### Claim Events (Kind 30040)
 
-When claims have been extracted from an article, they are embedded in the published event:
+Each claim is published as its own replaceable event with enriched metadata:
+
+```json
+{
+  "kind": 30040,
+  "tags": [
+    ["d", "claim_abc123"],
+    ["r", "https://example.com/article"],
+    ["claim", "The unemployment rate dropped to 3.4% in January", "factual"],
+    ["attribution", "direct_quote"],
+    ["confidence", "85"],
+    ["p", "<claimant-entity-pubkey>", "", "claimant"],
+    ["claimant", "Larry Summers"],
+    ["p", "<subject-entity-pubkey>", "", "subject"],
+    ["subject", "Federal Reserve"],
+    ["client", "nostr-article-capture"]
+  ],
+  "content": "surrounding context text"
+}
+```
+
+### Evidence Links (Kind 30043)
+
+Cross-article claim relationships:
+
+```json
+{
+  "kind": 30043,
+  "tags": [
+    ["d", "evidence_link_id"],
+    ["source-claim", "claim_abc123"],
+    ["target-claim", "claim_def456"],
+    ["relationship", "supports"],
+    ["r", "https://example.com/article-1"],
+    ["r", "https://example.com/article-2"],
+    ["client", "nostr-article-capture"]
+  ],
+  "content": "optional explanation note"
+}
+```
+
+### Entity Relationships (Kind 32125)
+
+Published during article publish, one per entity-article-relationship:
+
+```json
+{
+  "kind": 32125,
+  "tags": [
+    ["d", "<entity-id>:<article-url>:<relationship>"],
+    ["r", "https://example.com/article"],
+    ["p", "<entity-pubkey>", "", "author"],
+    ["entity-name", "Helen Andrews"],
+    ["entity-type", "person"],
+    ["relationship", "author"],
+    ["client", "nostr-article-capture"]
+  ],
+  "content": ""
+}
+```
+
+### Summary Claim Tags in Kind 30023
+
+Claims are also embedded as summary tags in the article event:
 
 ```json
 ["claim", "The unemployment rate dropped to 3.4% in January", "factual"]
@@ -220,6 +309,8 @@ When claims have been extracted from an article, they are embedded in the publis
 | **NIP-07** | Browser Extension Signing | `window.nostr.signEvent()` and `window.nostr.getPublicKey()` integration |
 | **NIP-19** | Bech32 Encoding | `npub` / `nsec` key encoding and decoding |
 | **NIP-23** | Long-form Content | Kind 30023 article events with `title`, `summary`, `published_at`, `d`, `claim` tags |
+| **NIP-32** | Labels | `L`/`l` label tags on entity sync events for app-specific categorization |
+| **NIP-33** | Parameterized Replaceable | Kinds 30023, 30040, 30043, 30078, 32125 — all replaceable by `d` tag |
 | **NIP-44** | Versioned Encryption | v2 padded encryption (ChaCha20 + HMAC-SHA256) for entity sync |
 | **NIP-78** | Application-specific Data | Kind 30078 events for storing encrypted entity data on relays |
 
@@ -253,7 +344,7 @@ node tests/nip44-test.js
 
 ```
 nostr-article-capture/
-├── nostr-article-capture.user.js   # Main userscript (~6,245 lines)
+├── nostr-article-capture.user.js   # Main userscript (~7,722 lines)
 ├── README.md
 ├── docs/
 │   ├── article-complete-inventory.md

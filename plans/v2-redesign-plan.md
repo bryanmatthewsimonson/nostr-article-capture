@@ -1,4 +1,4 @@
-# NOSTR Article Capture v2.1.0 - Redesign Plan
+# NOSTR Article Capture v2.5.0 - Redesign Plan
 
 > **Status**: All six implementation phases are **complete**. This document now serves as a living roadmap for future enhancements and a reference for the design decisions that shaped v2.
 
@@ -8,7 +8,7 @@ The v1 NOSTR Article Capture userscript had grown to 11,398 lines in a single fi
 
 The redesign replaced the modal/panel/sidebar approach with a full-page reader view that takes over the browser tab (like Firefox Reader View), providing a distraction-free reading experience with inline metadata tagging and one-click NOSTR archival.
 
-**v2 is now fully implemented** at ~6,245 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
+**v2 is now fully implemented** at ~7,722 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -42,7 +42,7 @@ The redesign replaced the modal/panel/sidebar approach with a full-page reader v
 - Simplified embedded Readability → full library via `@require`
 - Simplified embedded Turndown → full library via `@require` (with GFM plugin)
 - Dual identity model → unified model: one user identity that owns entity keypairs
-- Monolithic 11K-line file → well-organized modular sections (~6,245 lines)
+- Monolithic 11K-line file → well-organized modular sections (~7,722 lines)
 
 ### Kept (good foundations built upon)
 - Tampermonkey userscript format
@@ -627,7 +627,7 @@ The following items are identified for post-v2 enhancement:
 
 ```javascript
 const CONFIG = {
-  version: '2.1.0',
+  version: '2.5.0',
   debug: false,
   relays_default: [ /* 10 relays */ ],
   reader: { max_width, font_size, line_height },
@@ -709,6 +709,9 @@ const RelayClient = {
 const EventBuilder = {
   buildArticleEvent(article, entities, userPubkey),    // kind 30023
   buildProfileEvent(entity),                            // kind 0
+  buildClaimEvent(claim, url, title, pubkey, entities), // kind 30040
+  buildEntityRelationshipEvent(entity, url, rel, pubkey, claimId), // kind 32125
+  buildEvidenceLinkEvent(link, allClaims, pubkey),     // kind 30043
   buildEntitySyncEvent(entityId, encrypted, type, pubkey), // kind 30078
 };
 ```
@@ -756,7 +759,7 @@ async function init() {
 The project is a single userscript file plus supporting documentation and tests:
 
 ```
-nostr-article-capture.user.js    (~6,245 lines — main userscript)
+nostr-article-capture.user.js    (~7,722 lines — main userscript)
 tests/crypto-tests.js            (65 tests — BIP-340 + crypto validation)
 tests/nip44-test.js              (21 tests — NIP-44 v2 padding, ChaCha20, HKDF, encrypt/decrypt)
 plans/v2-redesign-plan.md        (this file)
@@ -835,7 +838,7 @@ docs/                            (reference documentation)
 | User can publish to NOSTR relays from reader view | ✅ With per-relay status |
 | Published events contain correct NIP-23 structure with entity references | ✅ kind 30023 with p-tags |
 | All crypto produces valid, interoperable NOSTR keys and signatures | ✅ Validated by 65 tests + BIP-340 vectors |
-| Script size significantly reduced from 11,398 lines | ✅ ~6,245 lines (45% reduction from v1, growth from new features) |
+| Script size significantly reduced from 11,398 lines | ✅ ~7,722 lines (32% reduction from v1, growth from new features) |
 | Reader view feels like a premium reading experience | ✅ Full typography system, dark mode, clean layout |
 
 ### Bonus achievements beyond original plan:
@@ -862,3 +865,10 @@ docs/                            (reference documentation)
 - Editable URL field with improved canonical URL detection and expanded tracking parameter cleanup
 - Known entity auto-recognition in article text (name + alias matching)
 - Entity browser canonical reference display and "set as alias of…" workflow
+- **Double Crux features (v2.5.0):**
+  - Enriched claims with claimant (who said it), subjects (what it's about), and attribution type (direct quote, paraphrase, editorial, thesis)
+  - Kind 30040 claim events — each claim published as its own replaceable event with claimant/subject p-tags, attribution, crux, and confidence
+  - Kind 32125 entity relationship events — published during article publish, linking entities to articles with typed relationships (author, mentioned, claimant, subject)
+  - View others' claims — 🌐 button fetches kind 30040 events from relays for the current article URL, grouped by publisher npub
+  - Evidence linking — kind 30043 events linking claims across articles as supporting/contradicting/contextualizing
+  - Evidence Linker UI (Section 6D) with modal, indicators, and tooltips

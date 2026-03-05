@@ -97,6 +97,10 @@ When an alias entity is tagged in an article, the canonical entity's pubkey is a
     text: "The unemployment rate dropped to 3.4%",  // Claim text
     type: "factual",                // factual | causal | evaluative | predictive
     is_crux: false,                 // Whether this is a key claim in the article
+    confidence: 50,                 // Confidence level (0–100), shown when is_crux is true
+    claimant_entity_id: "entity_abc123",  // Entity ID of who made the claim (or null for editorial voice)
+    subject_entity_ids: ["entity_def456"], // Entity IDs of what the claim is about
+    attribution: "direct_quote",    // direct_quote | paraphrase | editorial | thesis
     source_url: "https://...",      // URL of the article the claim was extracted from
     source_title: "Article Title",  // Title of the source article
     context: "surrounding text",    // Context around the claim in the article
@@ -115,12 +119,118 @@ When an alias entity is tagged in an article, the canonical entity's pubkey is a
 | **Evaluative** | A judgment or assessment | "This is the most important policy change in a decade" |
 | **Predictive** | A prediction about the future | "Inflation will fall below 2% by 2026" |
 
-**Claims in NOSTR Events (kind 30023):**
+**Attribution Types:**
+
+| Type | Description |
+|------|-------------|
+| **editorial** | The article's own assertion (default) |
+| **direct_quote** | A direct quote from a named claimant |
+| **paraphrase** | A paraphrased statement attributed to a claimant |
+| **thesis** | The article's main thesis or central argument |
+
+**Claims in NOSTR Events (kind 30040):**
+
+Each claim is published as its own replaceable event:
+
+```json
+{
+  "kind": 30040,
+  "tags": [
+    ["d", "claim_abc123"],
+    ["r", "https://example.com/article"],
+    ["article-title", "Example Article"],
+    ["claim", "The unemployment rate dropped to 3.4%", "factual"],
+    ["attribution", "direct_quote"],
+    ["confidence", "85"],
+    ["crux", ""],
+    ["p", "<claimant-entity-pubkey>", "", "claimant"],
+    ["claimant", "Larry Summers"],
+    ["p", "<subject-entity-pubkey>", "", "subject"],
+    ["subject", "Federal Reserve"],
+    ["client", "nostr-article-capture"]
+  ],
+  "content": "surrounding context text"
+}
+```
+
+Claims are also embedded as summary tags in the kind 30023 article event:
 
 ```json
 ["claim", "The unemployment rate dropped to 3.4%", "factual"]
 ["claim", "This policy will cause economic growth", "causal", "crux"]
 ```
+
+### v2 Evidence Link Data Structure (Implemented)
+
+```javascript
+// Storage key: 'evidence_links'
+{
+  "evidence_<hash>": {
+    id: "evidence_<hash>",           // Unique evidence link ID
+    source_claim_id: "claim_abc123", // The claim being linked from
+    target_claim_id: "claim_def456", // The claim being linked to
+    relationship: "supports",        // supports | contradicts | contextualizes
+    note: "Optional explanation",    // User-provided explanation
+    created_at: 1707350400           // Timestamp (milliseconds)
+  }
+}
+```
+
+**Relationship Types:**
+
+| Type | Icon | Description |
+|------|------|-------------|
+| **supports** | ✅ | Target claim provides evidence supporting the source claim |
+| **contradicts** | ❌ | Target claim provides evidence contradicting the source claim |
+| **contextualizes** | 📎 | Target claim provides additional context for the source claim |
+
+**Evidence Links in NOSTR Events (kind 30043):**
+
+```json
+{
+  "kind": 30043,
+  "tags": [
+    ["d", "evidence_link_id"],
+    ["source-claim", "claim_abc123"],
+    ["target-claim", "claim_def456"],
+    ["relationship", "supports"],
+    ["r", "https://example.com/article-1"],
+    ["r", "https://example.com/article-2"],
+    ["client", "nostr-article-capture"]
+  ],
+  "content": "optional explanation note"
+}
+```
+
+### v2 Entity Relationship Events (Implemented)
+
+Kind 32125 events link entities to articles with typed relationships. These are published during article publish — one event per entity-article-relationship:
+
+```json
+{
+  "kind": 32125,
+  "tags": [
+    ["d", "<entity-id>:<article-url>:<relationship>"],
+    ["r", "https://example.com/article"],
+    ["p", "<entity-pubkey>", "", "author"],
+    ["entity-name", "Helen Andrews"],
+    ["entity-type", "person"],
+    ["relationship", "author"],
+    ["client", "nostr-article-capture"],
+    ["claim-ref", "claim_abc123"]
+  ],
+  "content": ""
+}
+```
+
+**Relationship types for entity relationships:**
+
+| Type | Description |
+|------|-------------|
+| **author** | Entity is the author of the article |
+| **mentioned** | Entity is mentioned in the article |
+| **claimant** | Entity is the source of a specific claim (includes `claim-ref` tag) |
+| **subject** | Entity is the subject of a specific claim (includes `claim-ref` tag) |
 
 ### 4. Relationships
 - **Attribution**: Who said/wrote/published what

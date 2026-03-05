@@ -306,15 +306,17 @@ Based on the analysis, we need to define custom event kinds in the range 30000-3
 
 ### Proposed Event Kinds
 
-| Kind | Name | Type | Purpose |
-|------|------|------|---------|
-| 30003 | Bookmark List | Existing (NIP-51) | URL bookmarks with tags |
-| 32123 | URL Annotation | Parameterized Replaceable | Inline annotations with position |
-| 32124 | Content Rating | Parameterized Replaceable | Multi-dimensional content ratings |
-| 32125 | Entity Reference | Parameterized Replaceable | Entity identification in content |
-| 32126 | Rating Aggregate | Parameterized Replaceable | Computed aggregate ratings |
-| 32127 | Fact Check | Parameterized Replaceable | Structured fact-checking results |
-| 1063 | File Metadata | Existing (NIP-94) | Can extend for URL metadata |
+| Kind | Name | Type | Purpose | Status |
+|------|------|------|---------|--------|
+| 30003 | Bookmark List | Existing (NIP-51) | URL bookmarks with tags | Proposed |
+| 30040 | Claim Event | Parameterized Replaceable | Individual claim with claimant/subject p-tags, attribution, crux, confidence | ✅ Implemented |
+| 30043 | Evidence Link | Parameterized Replaceable | Cross-article claim relationships (supports/contradicts/contextualizes) | ✅ Implemented |
+| 32123 | URL Annotation | Parameterized Replaceable | Inline annotations with position | Proposed |
+| 32124 | Content Rating | Parameterized Replaceable | Multi-dimensional content ratings | Proposed |
+| 32125 | Entity Relationship | Parameterized Replaceable | Entity-to-article relationship with type (author/mentioned/claimant/subject) | ✅ Implemented |
+| 32126 | Rating Aggregate | Parameterized Replaceable | Computed aggregate ratings | Proposed |
+| 32127 | Fact Check | Parameterized Replaceable | Structured fact-checking results | Proposed |
+| 1063 | File Metadata | Existing (NIP-94) | Can extend for URL metadata | Proposed |
 
 ### Kind Number Rationale
 
@@ -382,13 +384,25 @@ The v2 NOSTR Article Capture implementation uses the following NIPs:
 | NIP | Name | Usage in v2 |
 |-----|------|-------------|
 | **NIP-01** | Basic Protocol | Event structure, relay communication (REQ/EVENT/EOSE/OK/NOTICE/CLOSE) |
-| **NIP-07** | Browser Extension | Optional signing via browser extensions (nos2x, Alby) |
-| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body and `claim` tags |
-| **NIP-32** | Labels | Label tags (`L`/`l`) on entity sync events for app-specific categorization |
-| **NIP-33** | Parameterized Replaceable | Kind 30078 entity sync events (replaceable by `d` tag) |
-| **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
 | **NIP-04** | Encrypted DMs (Legacy) | AES-256-CBC decryption fallback for older entity sync events |
+| **NIP-07** | Browser Extension | Optional signing via browser extensions (nos2x, Alby) |
+| **NIP-19** | Bech32 Encoding | `npub` / `nsec` key encoding and decoding |
+| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body and summary `claim` tags |
+| **NIP-32** | Labels | Label tags (`L`/`l`) on entity sync events for app-specific categorization |
+| **NIP-33** | Parameterized Replaceable | Kinds 30023, 30040, 30043, 30078, 32125 — all replaceable by `d` tag |
+| **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
 | **NIP-78** | Application Data | Kind 30078 for encrypted entity storage and cross-browser sync |
+
+### Event Kinds Used in v2
+
+| Kind | Name | Usage |
+|------|------|-------|
+| **0** | Profile Metadata | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
+| **30023** | Long-form Article | Published article content in Markdown with entity `p` tags and summary `claim` tags |
+| **30040** | Claim Event | Individual claim with claimant/subject `p` tags, attribution type, confidence, crux flag |
+| **30043** | Evidence Link | Cross-article claim relationship: supports, contradicts, or contextualizes |
+| **30078** | Application Data | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
+| **32125** | Entity Relationship | Links an entity to an article with a typed relationship (author, mentioned, claimant, subject) |
 
 ---
 
