@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.1.0
+// @version      2.2.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.1.0',
+    version: '2.2.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -1741,6 +1741,10 @@
               This is a key claim (crux)
             </label>
           </div>
+          <div class="nac-claim-form-field nac-claim-confidence-field" id="nac-claim-confidence-field" style="display: none;">
+            <label for="nac-claim-confidence">Confidence: <span id="nac-claim-confidence-value">50</span>%</label>
+            <input type="range" id="nac-claim-confidence" min="0" max="100" value="50" class="nac-claim-confidence-range" aria-label="Confidence level">
+          </div>
           <div class="nac-claim-form-actions">
             <button class="nac-btn nac-btn-primary" id="nac-claim-save" aria-label="Save claim">Save Claim</button>
             <button class="nac-btn" id="nac-claim-cancel" aria-label="Cancel">Cancel</button>
@@ -1748,10 +1752,25 @@
         </div>
       `;
 
+      // Toggle confidence slider visibility when crux is checked
+      popover.querySelector('#nac-claim-crux').addEventListener('change', (e) => {
+        const confField = popover.querySelector('#nac-claim-confidence-field');
+        if (confField) confField.style.display = e.target.checked ? '' : 'none';
+      });
+
+      // Update confidence label as slider moves
+      const confRange = popover.querySelector('#nac-claim-confidence');
+      const confLabel = popover.querySelector('#nac-claim-confidence-value');
+      if (confRange && confLabel) {
+        confRange.addEventListener('input', () => { confLabel.textContent = confRange.value; });
+      }
+
       popover.querySelector('#nac-claim-save').addEventListener('click', async () => {
         const type = popover.querySelector('#nac-claim-type').value;
         const isCrux = popover.querySelector('#nac-claim-crux').checked;
-        await ClaimExtractor.saveClaim(text, type, isCrux);
+        const confidenceEl = popover.querySelector('#nac-claim-confidence');
+        const confidence = isCrux && confidenceEl ? parseInt(confidenceEl.value, 10) : null;
+        await ClaimExtractor.saveClaim(text, type, isCrux, confidence);
         EntityTagger.hide();
       });
 
@@ -1761,7 +1780,7 @@
     },
 
     // Save a claim for the current article
-    saveClaim: async (text, type, isCrux) => {
+    saveClaim: async (text, type, isCrux, confidence = null) => {
       if (!ReaderView.article) return;
 
       const claimId = 'claim_' + await Crypto.sha256(ReaderView.article.url + text);
@@ -1790,6 +1809,7 @@
         text: text,
         type: type,
         is_crux: isCrux,
+        confidence: confidence,
         source_url: ReaderView.article.url,
         source_title: ReaderView.article.title || 'Untitled',
         context: context,
@@ -1825,9 +1845,28 @@
       const claim = ReaderView.claims.find(c => c.id === claimId);
       if (!claim) return;
       claim.is_crux = !claim.is_crux;
+      if (!claim.is_crux) claim.confidence = null;
       await Storage.claims.save(claim);
       ClaimExtractor.refreshClaimsBar();
       Utils.showToast(claim.is_crux ? 'Marked as crux claim' : 'Unmarked as crux claim', 'info');
+    },
+
+    // Update confidence for a crux claim (no UI refresh — slider already shows new value)
+    updateConfidence: async (claimId, value) => {
+      const claim = ReaderView.claims.find(c => c.id === claimId);
+      if (!claim) return;
+      claim.confidence = value;
+      await Storage.claims.save(claim);
+    },
+
+    // Edit claim text inline
+    editClaimText: async (claimId, newText) => {
+      const claim = ReaderView.claims.find(c => c.id === claimId);
+      if (!claim || !newText.trim()) return;
+      claim.text = newText.trim();
+      await Storage.claims.save(claim);
+      ClaimExtractor.refreshClaimsBar();
+      Utils.showToast('Claim text updated', 'info');
     },
 
     // Refresh the claims bar UI
@@ -1868,8 +1907,12 @@
         predictive: 'Predictive'
       };
 
-      chipsEl.innerHTML = claims.map(claim => {
+      // Sort crux claims to top
+      const sorted = [...claims].sort((a, b) => (b.is_crux ? 1 : 0) - (a.is_crux ? 1 : 0));
+
+      chipsEl.innerHTML = sorted.map(claim => {
         const cruxIcon = claim.is_crux ? '<span class="nac-claim-crux-icon" title="Key claim (crux)">🔑</span> ' : '';
+        const confDisplay = (claim.is_crux && claim.confidence != null) ? `<span class="nac-claim-confidence-display">${claim.confidence}%</span> ` : '';
         const truncatedText = claim.text.length > 80
           ? Utils.escapeHtml(claim.text.substring(0, 80)) + '…'
           : Utils.escapeHtml(claim.text);
@@ -1877,26 +1920,67 @@
         const typeLabel = typeLabels[claim.type] || 'Factual';
 
         return `
-          <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="${Utils.escapeHtml(claim.text)}" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
-            <span class="nac-claim-text">${cruxIcon}${truncatedText}</span>
+          <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="Click text to edit · Click 🔑 to toggle crux" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
+            <span class="nac-claim-text-display" data-claim-id="${Utils.escapeHtml(claim.id)}">${cruxIcon}${confDisplay}${truncatedText}</span>
             <span class="nac-claim-type-badge ${typeClass}">${typeLabel}</span>
+            <button class="nac-claim-crux-toggle" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Toggle crux" title="Toggle crux">🔑</button>
             <button class="nac-claim-remove" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Remove claim">✕</button>
           </div>
+          ${claim.is_crux ? `<div class="nac-claim-confidence-row" data-claim-id="${Utils.escapeHtml(claim.id)}">
+            <label class="nac-claim-confidence-label">Confidence: <span class="nac-claim-conf-val">${claim.confidence != null ? claim.confidence : 50}%</span></label>
+            <input type="range" class="nac-claim-confidence-range" min="0" max="100" value="${claim.confidence != null ? claim.confidence : 50}" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Set confidence for claim">
+          </div>` : ''}
         `;
       }).join('');
 
-      // Attach event listeners
-      chipsEl.querySelectorAll('.nac-claim-chip').forEach(chip => {
-        chip.addEventListener('click', (e) => {
-          if (e.target.classList.contains('nac-claim-remove')) return;
-          ClaimExtractor.toggleCrux(chip.dataset.claimId);
+      // Attach event listeners — crux toggle
+      chipsEl.querySelectorAll('.nac-claim-crux-toggle').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          ClaimExtractor.toggleCrux(btn.dataset.claimId);
         });
-        chip.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            if (e.target.classList.contains('nac-claim-remove')) return;
-            ClaimExtractor.toggleCrux(chip.dataset.claimId);
-          }
+      });
+
+      // Inline text editing — click on text to edit
+      chipsEl.querySelectorAll('.nac-claim-text-display').forEach(span => {
+        span.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const claimId = span.dataset.claimId;
+          const claim = ReaderView.claims.find(c => c.id === claimId);
+          if (!claim) return;
+
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'nac-claim-text-edit';
+          input.value = claim.text;
+          input.setAttribute('aria-label', 'Edit claim text');
+          span.replaceWith(input);
+          input.focus();
+          input.select();
+
+          const commit = () => {
+            if (input.value.trim() && input.value.trim() !== claim.text) {
+              ClaimExtractor.editClaimText(claimId, input.value.trim());
+            } else {
+              ClaimExtractor.refreshClaimsBar(); // revert
+            }
+          };
+          input.addEventListener('blur', commit);
+          input.addEventListener('keydown', (ke) => {
+            if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
+            if (ke.key === 'Escape') { input.value = claim.text; input.blur(); }
+          });
+        });
+      });
+
+      // Confidence sliders
+      chipsEl.querySelectorAll('.nac-claim-confidence-range').forEach(range => {
+        const valEl = range.closest('.nac-claim-confidence-row')?.querySelector('.nac-claim-conf-val');
+        range.addEventListener('input', () => {
+          if (valEl) valEl.textContent = range.value + '%';
+        });
+        range.addEventListener('change', () => {
+          ClaimExtractor.updateConfidence(range.dataset.claimId, parseInt(range.value, 10));
         });
       });
 
@@ -2473,6 +2557,26 @@
           about: `${entity.type} entity created by nostr-article-capture`,
           nip05: entity.nip05 || undefined
         })
+      };
+    },
+
+    // Build kind 30040 claim event
+    buildClaimEvent: (claim, articleUrl, articleTitle, userPubkey) => {
+      const tags = [
+        ['d', claim.id],
+        ['r', articleUrl],
+        ['claim-text', claim.text],
+        ['claim-type', claim.type],
+        ['title', articleTitle],
+      ];
+      if (claim.is_crux) tags.push(['crux', 'true']);
+      if (claim.confidence != null) tags.push(['confidence', String(claim.confidence)]);
+      return {
+        kind: 30040,
+        pubkey: userPubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content: claim.context || ''
       };
     },
 
@@ -3400,6 +3504,8 @@
           
           ${!identity ? '<div class="nac-warning">No identity configured. Please set up signing in settings.</div>' : ''}
           
+          <div class="nac-publish-info" id="nac-publish-info"></div>
+          
           <div class="nac-form-group">
             <label>Relays</label>
             <div class="nac-relay-list">
@@ -3438,6 +3544,18 @@
       const eventSizeKB = (new TextEncoder().encode(JSON.stringify(event)).length / 1024).toFixed(1);
       const sizeWarning = eventSizeKB > 64 ? ` ⚠️ Large event (${eventSizeKB} KB) — some relays may reject` : '';
       document.getElementById('nac-event-preview').textContent = `[Event size: ${eventSizeKB} KB${sizeWarning}]\n\n${eventJson}`;
+
+      // Show publish info with claim/crux counts
+      const claimCount = (ReaderView.claims || []).length;
+      const cruxCount = (ReaderView.claims || []).filter(c => c.is_crux).length;
+      const infoEl = document.getElementById('nac-publish-info');
+      if (infoEl) {
+        if (claimCount > 0) {
+          infoEl.innerHTML = `📋 Article + ${claimCount} claim${claimCount !== 1 ? 's' : ''} (${cruxCount} crux${cruxCount !== 1 ? 'es' : ''}) will be published`;
+        } else {
+          infoEl.innerHTML = '📋 Article will be published (no claims)';
+        }
+      }
       
       // Event listeners
       document.getElementById('nac-close-publish').addEventListener('click', ReaderView.hidePublishPanel);
@@ -3520,12 +3638,12 @@
         const relayCheckboxes = document.querySelectorAll('.nac-relay-list input[type="checkbox"]:checked');
         const relayUrls = Array.from(relayCheckboxes).map(cb => cb.value);
         
-        // Publish to relays
+        // Publish article to relays
         const results = await RelayClient.publish(signedEvent, relayUrls);
         
-        // Show results
+        // Show article results
         let successCount = 0;
-        let html = '<div class="nac-publish-results">';
+        let html = '<div class="nac-publish-results"><strong>Article:</strong>';
         for (const [url, result] of Object.entries(results)) {
           if (result.success) {
             successCount++;
@@ -3536,11 +3654,48 @@
         }
         html += '</div>';
         
+        // Publish each claim as kind 30040
+        const claims = ReaderView.claims || [];
+        let claimSuccessCount = 0;
+        if (claims.length > 0) {
+          statusEl.innerHTML = html + `<div class="nac-spinner"></div> Publishing ${claims.length} claim${claims.length !== 1 ? 's' : ''}...`;
+          
+          for (let i = 0; i < claims.length; i++) {
+            const claim = claims[i];
+            try {
+              const claimEvent = EventBuilder.buildClaimEvent(
+                claim,
+                ReaderView.article.url,
+                ReaderView.article.title || 'Untitled',
+                identity.pubkey
+              );
+              
+              let signedClaim;
+              if (signingMethod === 'nip07') {
+                signedClaim = await unsafeWindow.nostr.signEvent(claimEvent);
+              } else {
+                signedClaim = await Crypto.signEvent(claimEvent, identity.privkey);
+              }
+              
+              if (signedClaim) {
+                const claimResults = await RelayClient.publish(signedClaim, relayUrls);
+                const claimOk = Object.values(claimResults).some(r => r.success);
+                if (claimOk) claimSuccessCount++;
+              }
+            } catch (ce) {
+              console.error(`[NAC] Claim publish error (${claim.id}):`, ce);
+            }
+          }
+          
+          html += `<div class="nac-publish-results"><strong>Claims:</strong> ${claimSuccessCount}/${claims.length} published</div>`;
+        }
+        
         statusEl.innerHTML = html;
         
         if (successCount > 0) {
+          const claimMsg = claims.length > 0 ? ` ${claimSuccessCount} claim${claimSuccessCount !== 1 ? 's' : ''} published.` : '';
           btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
-          Utils.showToast(`Article published successfully to ${successCount} relay${successCount > 1 ? 's' : ''}!`, 'success');
+          Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}`, 'success');
         } else {
           btn.textContent = 'Publish Failed';
           btn.disabled = false;
@@ -5931,24 +6086,124 @@
 
     .nac-claim-crux {
       border-color: #f59e0b;
+      border-width: 2px;
       background: rgba(245, 158, 11, 0.08);
+    }
+
+    .nac-claim-crux .nac-claim-text-display {
+      font-weight: 700;
     }
 
     .nac-claim-crux:hover {
       border-color: #d97706;
     }
 
-    .nac-claim-text {
+    .nac-claim-text,
+    .nac-claim-text-display {
       flex: 1;
       font-size: 13px;
       color: var(--nac-text);
       line-height: 1.4;
       overflow: hidden;
       text-overflow: ellipsis;
+      cursor: text;
+    }
+
+    .nac-claim-text-edit {
+      flex: 1;
+      font-size: 13px;
+      color: var(--nac-text);
+      line-height: 1.4;
+      padding: 2px 6px;
+      border: 1px solid var(--nac-primary);
+      border-radius: 4px;
+      background: var(--nac-bg);
+      outline: none;
+      font-family: inherit;
     }
 
     .nac-claim-crux-icon {
       font-size: 12px;
+    }
+
+    .nac-claim-confidence-display {
+      font-size: 11px;
+      font-weight: 600;
+      color: #f59e0b;
+    }
+
+    .nac-claim-crux-toggle {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      padding: 0 2px;
+      line-height: 1;
+      flex-shrink: 0;
+      opacity: 0.5;
+      transition: opacity 0.2s;
+    }
+
+    .nac-claim-crux-toggle:hover {
+      opacity: 1;
+    }
+
+    .nac-claim-confidence-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px 8px;
+      margin-top: -4px;
+    }
+
+    .nac-claim-confidence-label {
+      font-size: 12px;
+      color: var(--nac-text-muted);
+      white-space: nowrap;
+      min-width: 100px;
+    }
+
+    .nac-claim-conf-val {
+      font-weight: 600;
+      color: #f59e0b;
+    }
+
+    .nac-claim-confidence-range {
+      flex: 1;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: var(--nac-border);
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .nac-claim-confidence-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #f59e0b;
+      cursor: pointer;
+    }
+
+    .nac-claim-confidence-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #f59e0b;
+      cursor: pointer;
+      border: none;
+    }
+
+    .nac-publish-info {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      padding: 8px 12px;
+      background: var(--nac-bg);
+      border-radius: 6px;
+      margin-bottom: 8px;
     }
 
     .nac-claim-type-badge {
@@ -6087,9 +6342,16 @@
 
     .nac-claim-chip:focus-visible,
     .nac-claim-remove:focus-visible,
+    .nac-claim-crux-toggle:focus-visible,
+    .nac-claim-text-edit:focus-visible,
     .nac-btn-add-claim:focus-visible {
       outline: 2px solid var(--nac-primary);
       outline-offset: 2px;
+    }
+
+    .nac-claim-confidence-field label {
+      font-size: 13px;
+      color: var(--nac-text-muted);
     }
   `;
 
