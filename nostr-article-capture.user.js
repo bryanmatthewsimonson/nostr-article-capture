@@ -1552,7 +1552,8 @@
       
       // Event listeners
       document.querySelectorAll('.nac-btn-entity-type').forEach(btn => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
           if (btn.dataset.type === 'claim') {
             ClaimExtractor.showForm(text, EntityTagger.popover);
           } else {
