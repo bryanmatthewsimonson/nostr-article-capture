@@ -2131,6 +2131,233 @@
       const claims = await Storage.claims.getForUrl(url);
       ReaderView.claims = claims;
       ClaimExtractor.refreshClaimsBar();
+    },
+
+    // Fetch kind 30040 claim events from relays for an article URL
+    fetchRemoteClaims: async (articleUrl) => {
+      const relayConfig = await Storage.relays.get();
+      const enabledRelayUrls = relayConfig.relays.filter(r => r.enabled && r.read).map(r => r.url);
+
+      if (enabledRelayUrls.length === 0) {
+        Utils.showToast('No read-enabled relays configured', 'error');
+        return [];
+      }
+
+      // Fetch kind 30040 events with r tag matching this article URL
+      const filter = {
+        kinds: [30040],
+        '#r': [articleUrl]
+      };
+
+      const events = await RelayClient.subscribe(filter, enabledRelayUrls, { timeout: 15000, idleTimeout: 10000 });
+
+      // Deduplicate by event id
+      const seen = new Set();
+      const unique = [];
+      for (const evt of events) {
+        if (evt.id && !seen.has(evt.id)) {
+          seen.add(evt.id);
+          unique.push(evt);
+        }
+      }
+
+      // Parse events into displayable claims
+      return unique.map(event => {
+        // Build a tag lookup (first value per tag name)
+        const tagMap = {};
+        for (const tag of (event.tags || [])) {
+          if (tag.length >= 2 && !tagMap[tag[0]]) {
+            tagMap[tag[0]] = tag.slice(1);
+          }
+        }
+        return {
+          pubkey: event.pubkey,
+          text: tagMap['claim-text']?.[0] || event.content || '',
+          type: tagMap['claim-type']?.[0] || 'factual',
+          is_crux: !!(tagMap['crux']),
+          confidence: tagMap['confidence'] ? parseInt(tagMap['confidence'][0]) : null,
+          claimant: tagMap['claimant']?.[0] || null,
+          attribution: tagMap['attribution']?.[0] || 'editorial',
+          subjects: (event.tags || []).filter(t => t[0] === 'subject').map(t => t[1]),
+          created_at: event.created_at,
+          npub: Crypto.hexToNpub(event.pubkey) || event.pubkey.substring(0, 16) + '…'
+        };
+      });
+    },
+
+    // Show remote claims panel (with caching)
+    showRemoteClaims: async () => {
+      const section = document.getElementById('nac-remote-claims-section');
+
+      // If already visible, toggle off
+      if (section && section.style.display !== 'none') {
+        section.style.display = 'none';
+        return;
+      }
+
+      // If we have a cached result, re-render from cache
+      if (ReaderView._remoteClaimsCache !== null) {
+        ClaimExtractor.renderRemoteClaims(ReaderView._remoteClaimsCache);
+        return;
+      }
+
+      // Show loading state
+      ClaimExtractor.renderRemoteClaimsLoading();
+
+      try {
+        const articleUrl = ReaderView.article?.url;
+        if (!articleUrl) {
+          Utils.showToast('No article URL available', 'error');
+          return;
+        }
+
+        const remoteClaims = await ClaimExtractor.fetchRemoteClaims(articleUrl);
+
+        // Filter out current user's own claims
+        const identity = await Storage.identity.get();
+        const ownPubkey = identity?.pubkey || null;
+        const othersClaims = ownPubkey
+          ? remoteClaims.filter(c => c.pubkey !== ownPubkey)
+          : remoteClaims;
+
+        // Cache the results
+        ReaderView._remoteClaimsCache = othersClaims;
+
+        ClaimExtractor.renderRemoteClaims(othersClaims);
+      } catch (e) {
+        console.error('[NAC] Failed to fetch remote claims:', e);
+        ClaimExtractor.renderRemoteClaimsError('Could not reach relays');
+      }
+    },
+
+    // Render loading spinner for remote claims
+    renderRemoteClaimsLoading: () => {
+      let section = document.getElementById('nac-remote-claims-section');
+      if (!section) {
+        section = document.createElement('div');
+        section.id = 'nac-remote-claims-section';
+        section.className = 'nac-remote-claims-section';
+        section.setAttribute('role', 'region');
+        section.setAttribute('aria-label', 'Other users\' claims');
+        const claimsBar = document.getElementById('nac-claims-bar');
+        if (claimsBar) claimsBar.appendChild(section);
+      }
+      section.style.display = '';
+      section.innerHTML = `
+        <div class="nac-remote-claims-header">
+          <span class="nac-remote-claims-title">🌐 Others' Claims</span>
+          <button class="nac-remote-claims-close" id="nac-remote-claims-close" aria-label="Close others' claims">✕</button>
+        </div>
+        <div class="nac-remote-claims-loading" aria-label="Loading remote claims">
+          <div class="nac-spinner"></div> Fetching claims from relays…
+        </div>
+      `;
+      section.querySelector('#nac-remote-claims-close')?.addEventListener('click', () => {
+        section.style.display = 'none';
+      });
+    },
+
+    // Render error state for remote claims
+    renderRemoteClaimsError: (message) => {
+      let section = document.getElementById('nac-remote-claims-section');
+      if (!section) return;
+      section.style.display = '';
+      section.innerHTML = `
+        <div class="nac-remote-claims-header">
+          <span class="nac-remote-claims-title">🌐 Others' Claims</span>
+          <button class="nac-remote-claims-close" id="nac-remote-claims-close" aria-label="Close others' claims">✕</button>
+        </div>
+        <div class="nac-remote-claims-empty">${Utils.escapeHtml(message)}</div>
+      `;
+      section.querySelector('#nac-remote-claims-close')?.addEventListener('click', () => {
+        section.style.display = 'none';
+      });
+    },
+
+    // Render fetched remote claims grouped by publisher npub
+    renderRemoteClaims: (claims) => {
+      let section = document.getElementById('nac-remote-claims-section');
+      if (!section) {
+        section = document.createElement('div');
+        section.id = 'nac-remote-claims-section';
+        section.className = 'nac-remote-claims-section';
+        section.setAttribute('role', 'region');
+        section.setAttribute('aria-label', 'Other users\' claims');
+        const claimsBar = document.getElementById('nac-claims-bar');
+        if (claimsBar) claimsBar.appendChild(section);
+      }
+      section.style.display = '';
+
+      if (!claims || claims.length === 0) {
+        section.innerHTML = `
+          <div class="nac-remote-claims-header">
+            <span class="nac-remote-claims-title">🌐 Others' Claims</span>
+            <button class="nac-remote-claims-close" id="nac-remote-claims-close" aria-label="Close others' claims">✕</button>
+          </div>
+          <div class="nac-remote-claims-empty">No other users have extracted claims from this article yet</div>
+        `;
+        section.querySelector('#nac-remote-claims-close')?.addEventListener('click', () => {
+          section.style.display = 'none';
+        });
+        return;
+      }
+
+      // Group by pubkey
+      const groups = {};
+      for (const claim of claims) {
+        if (!groups[claim.pubkey]) {
+          groups[claim.pubkey] = { npub: claim.npub, claims: [] };
+        }
+        groups[claim.pubkey].claims.push(claim);
+      }
+
+      const userCount = Object.keys(groups).length;
+      const typeLabels = { factual: 'Factual', causal: 'Causal', evaluative: 'Evaluative', predictive: 'Predictive' };
+      const typeColors = { factual: 'nac-claim-type-factual', causal: 'nac-claim-type-causal', evaluative: 'nac-claim-type-evaluative', predictive: 'nac-claim-type-predictive' };
+
+      let groupsHtml = '';
+      for (const [pubkey, group] of Object.entries(groups)) {
+        const truncNpub = group.npub.length > 20 ? group.npub.substring(0, 20) + '…' : group.npub;
+
+        const claimsHtml = group.claims.map(claim => {
+          const cruxIcon = claim.is_crux ? '<span class="nac-claim-crux-icon" title="Key claim (crux)">🔑</span> ' : '';
+          const confDisplay = (claim.is_crux && claim.confidence != null) ? `<span class="nac-claim-confidence-display">${claim.confidence}%</span> ` : '';
+          const truncatedText = claim.text.length > 100
+            ? Utils.escapeHtml(claim.text.substring(0, 100)) + '…'
+            : Utils.escapeHtml(claim.text);
+          const typeClass = typeColors[claim.type] || 'nac-claim-type-factual';
+          const typeLabel = typeLabels[claim.type] || 'Factual';
+          const claimantLabel = claim.claimant
+            ? ` — <span class="nac-claim-claimant-label">${Utils.escapeHtml(claim.claimant)}</span>`
+            : '';
+
+          return `<div class="nac-remote-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
+            <span class="nac-remote-claim-text">${cruxIcon}${confDisplay}"${truncatedText}"${claimantLabel}</span>
+            <span class="nac-claim-type-badge ${typeClass}">${typeLabel}</span>
+          </div>`;
+        }).join('');
+
+        groupsHtml += `
+          <div class="nac-remote-claims-group">
+            <div class="nac-remote-npub" title="${Utils.escapeHtml(group.npub)}" aria-label="Publisher ${Utils.escapeHtml(truncNpub)}">
+              ${Utils.escapeHtml(truncNpub)} (${group.claims.length} claim${group.claims.length !== 1 ? 's' : ''})
+            </div>
+            ${claimsHtml}
+          </div>
+        `;
+      }
+
+      section.innerHTML = `
+        <div class="nac-remote-claims-header">
+          <span class="nac-remote-claims-title">🌐 Others' Claims (${claims.length} from ${userCount} user${userCount !== 1 ? 's' : ''})</span>
+          <button class="nac-remote-claims-close" id="nac-remote-claims-close" aria-label="Close others' claims">✕</button>
+        </div>
+        ${groupsHtml}
+      `;
+
+      section.querySelector('#nac-remote-claims-close')?.addEventListener('click', () => {
+        section.style.display = 'none';
+      });
     }
   };
 
@@ -3246,6 +3473,7 @@
     previewMode: false,
     _originalContentHtml: null,
     _hiddenElements: [],
+    _remoteClaimsCache: null,
 
     // Create and show reader view
     show: async (article) => {
@@ -3327,7 +3555,10 @@
           <div class="nac-claims-bar" id="nac-claims-bar" aria-label="Extracted claims">
             <div class="nac-claims-bar-header">
               <span class="nac-claims-bar-title">📋 Claims (<span class="nac-claims-count">0</span>)</span>
-              <button class="nac-btn-add-claim" id="nac-add-claim-btn" aria-label="Add a claim by selecting text">+ Add Claim</button>
+              <div class="nac-claims-bar-actions">
+                <button class="nac-btn-remote-claims" id="nac-remote-claims-btn" aria-label="View claims from other NOSTR users">🌐 Others' Claims</button>
+                <button class="nac-btn-add-claim" id="nac-add-claim-btn" aria-label="Add a claim by selecting text">+ Add Claim</button>
+              </div>
             </div>
             <div class="nac-claims-chips" role="list" aria-label="Extracted claims list">
               <div class="nac-claims-empty">No claims extracted yet. Select text and click 📋 Claim.</div>
@@ -3362,6 +3593,11 @@
       // Add Claim button handler
       document.getElementById('nac-add-claim-btn').addEventListener('click', () => {
         Utils.showToast('Select text in the article, then click 📋 Claim in the popover', 'info');
+      });
+
+      // Remote claims button handler
+      document.getElementById('nac-remote-claims-btn').addEventListener('click', () => {
+        ClaimExtractor.showRemoteClaims();
       });
 
       // Tag Entity button handler
@@ -3650,6 +3886,7 @@
       ReaderView.previewMode = false;
       ReaderView.claims = [];
       ReaderView._originalContentHtml = null;
+      ReaderView._remoteClaimsCache = null;
 
       if (ReaderView.container) {
         ReaderView.container.remove();
@@ -7193,6 +7430,141 @@
     .nac-claim-link-btn:focus-visible,
     .nac-evidence-link-indicator:focus-visible,
     .nac-evidence-delete-btn:focus-visible {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: 2px;
+    }
+
+    /* Remote Claims Section */
+    .nac-remote-claims-section {
+      margin-top: 16px;
+      padding: 16px;
+      background: var(--nac-bg);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+    }
+
+    .nac-remote-claims-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .nac-remote-claims-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+    }
+
+    .nac-remote-claims-close {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+      color: var(--nac-text-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+      line-height: 1;
+    }
+
+    .nac-remote-claims-close:hover {
+      color: var(--nac-error);
+      background: rgba(239, 68, 68, 0.1);
+    }
+
+    .nac-remote-claims-loading {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      padding: 12px 0;
+      display: flex;
+      align-items: center;
+    }
+
+    .nac-remote-claims-empty {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      padding: 12px 0;
+      text-align: center;
+      font-style: italic;
+    }
+
+    .nac-remote-claims-group {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--nac-border);
+    }
+
+    .nac-remote-claims-group:last-child {
+      margin-bottom: 0;
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+
+    .nac-remote-npub {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--nac-primary);
+      font-family: monospace;
+      margin-bottom: 8px;
+      padding: 4px 8px;
+      background: rgba(99, 102, 241, 0.06);
+      border-radius: 6px;
+      display: inline-block;
+    }
+
+    .nac-remote-claim-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      margin-bottom: 6px;
+      font-size: 13px;
+      color: var(--nac-text);
+    }
+
+    .nac-remote-claim-chip.nac-claim-crux {
+      border-color: #f59e0b;
+      border-width: 2px;
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .nac-remote-claim-chip.nac-claim-crux .nac-remote-claim-text {
+      font-weight: 700;
+    }
+
+    .nac-remote-claim-text {
+      flex: 1;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .nac-btn-remote-claims {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--nac-primary);
+      background: rgba(99, 102, 241, 0.08);
+      color: var(--nac-primary);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .nac-btn-remote-claims:hover {
+      background: rgba(99, 102, 241, 0.18);
+    }
+
+    .nac-claims-bar-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .nac-remote-claims-close:focus-visible,
+    .nac-btn-remote-claims:focus-visible {
       outline: 2px solid var(--nac-primary);
       outline-offset: 2px;
     }
