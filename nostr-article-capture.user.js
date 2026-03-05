@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.3.0
+// @version      2.4.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.3.0',
+    version: '2.4.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -1747,10 +1747,30 @@
 
   const ClaimExtractor = {
     // Show the claim extraction form inside the popover
-    showForm: (text, popover) => {
+    showForm: async (text, popover) => {
       const truncated = text.length > CONFIG.tagging.max_claim_length
         ? text.substring(0, CONFIG.tagging.max_claim_length) + '…'
         : text;
+
+      // Load entity data for claimant/subject dropdowns
+      const entityOptions = [];
+      for (const ref of (ReaderView.entities || [])) {
+        try {
+          const entity = await Storage.entities.get(ref.entity_id);
+          if (entity) {
+            const emoji = entity.type === 'person' ? '👤' : entity.type === 'organization' ? '🏢' : entity.type === 'place' ? '📍' : '🔷';
+            entityOptions.push({ id: entity.id, name: entity.name, type: entity.type, emoji });
+          }
+        } catch (e) { /* skip unavailable entities */ }
+      }
+
+      const claimantOptionsHtml = entityOptions.map(e =>
+        `<option value="${Utils.escapeHtml(e.id)}">${e.emoji} ${Utils.escapeHtml(e.name)}</option>`
+      ).join('');
+
+      const subjectCheckboxesHtml = entityOptions.map(e =>
+        `<label><input type="checkbox" value="${Utils.escapeHtml(e.id)}"> ${e.emoji} ${Utils.escapeHtml(e.name)}</label>`
+      ).join('');
 
       popover.innerHTML = `
         <div class="nac-claim-form" role="form" aria-label="Extract claim">
@@ -1775,6 +1795,28 @@
             <label for="nac-claim-confidence">Confidence: <span id="nac-claim-confidence-value">50</span>%</label>
             <input type="range" id="nac-claim-confidence" min="0" max="100" value="50" class="nac-claim-confidence-range" aria-label="Confidence level">
           </div>
+          <div class="nac-claim-form-field">
+            <label for="nac-claim-attribution">Attribution:</label>
+            <select id="nac-claim-attribution" class="nac-form-select" aria-label="Claim attribution">
+              <option value="editorial">Editorial (article's own assertion)</option>
+              <option value="direct_quote">Direct Quote</option>
+              <option value="paraphrase">Paraphrase</option>
+              <option value="thesis">Article's Main Thesis</option>
+            </select>
+          </div>
+          <div class="nac-claim-form-field">
+            <label for="nac-claim-claimant">Claimed by:</label>
+            <select id="nac-claim-claimant" class="nac-form-select" aria-label="Who made this claim">
+              <option value="">Article / Editorial Voice</option>
+              ${claimantOptionsHtml}
+            </select>
+          </div>
+          ${entityOptions.length > 0 ? `<div class="nac-claim-form-field">
+            <label>About:</label>
+            <div class="nac-claim-subjects" id="nac-claim-subjects" aria-label="What this claim is about">
+              ${subjectCheckboxesHtml}
+            </div>
+          </div>` : ''}
           <div class="nac-claim-form-actions">
             <button class="nac-btn nac-btn-primary" id="nac-claim-save" aria-label="Save claim">Save Claim</button>
             <button class="nac-btn" id="nac-claim-cancel" aria-label="Cancel">Cancel</button>
@@ -1800,7 +1842,11 @@
         const isCrux = popover.querySelector('#nac-claim-crux').checked;
         const confidenceEl = popover.querySelector('#nac-claim-confidence');
         const confidence = isCrux && confidenceEl ? parseInt(confidenceEl.value, 10) : null;
-        await ClaimExtractor.saveClaim(text, type, isCrux, confidence);
+        const attribution = popover.querySelector('#nac-claim-attribution')?.value || 'editorial';
+        const claimantEntityId = popover.querySelector('#nac-claim-claimant')?.value || null;
+        const subjectCheckboxes = popover.querySelectorAll('#nac-claim-subjects input[type="checkbox"]:checked');
+        const subjectEntityIds = Array.from(subjectCheckboxes).map(cb => cb.value);
+        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantEntityId, subjectEntityIds);
         EntityTagger.hide();
       });
 
@@ -1810,7 +1856,7 @@
     },
 
     // Save a claim for the current article
-    saveClaim: async (text, type, isCrux, confidence = null) => {
+    saveClaim: async (text, type, isCrux, confidence = null, attribution = 'editorial', claimantEntityId = null, subjectEntityIds = []) => {
       if (!ReaderView.article) return;
 
       const claimId = 'claim_' + await Crypto.sha256(ReaderView.article.url + text);
@@ -1840,6 +1886,9 @@
         type: type,
         is_crux: isCrux,
         confidence: confidence,
+        claimant_entity_id: claimantEntityId || null,
+        subject_entity_ids: Array.isArray(subjectEntityIds) ? subjectEntityIds : [],
+        attribution: attribution || 'editorial',
         source_url: ReaderView.article.url,
         source_title: ReaderView.article.title || 'Untitled',
         context: context,
@@ -1900,7 +1949,7 @@
     },
 
     // Refresh the claims bar UI
-    refreshClaimsBar: () => {
+    refreshClaimsBar: async () => {
       const bar = document.getElementById('nac-claims-bar');
       if (!bar) return;
 
@@ -1937,6 +1986,31 @@
         predictive: 'Predictive'
       };
 
+      const attributionLabels = {
+        direct_quote: 'Quote',
+        paraphrase: 'Paraphrase',
+        thesis: 'Thesis'
+      };
+
+      // Pre-load entity names for claimant display
+      const entityNameCache = {};
+      const entityTypeCache = {};
+      for (const claim of claims) {
+        const idsToLoad = [...(claim.subject_entity_ids || [])];
+        if (claim.claimant_entity_id) idsToLoad.push(claim.claimant_entity_id);
+        for (const eid of idsToLoad) {
+          if (!entityNameCache[eid]) {
+            try {
+              const entity = await Storage.entities.get(eid);
+              if (entity) {
+                entityNameCache[eid] = entity.name;
+                entityTypeCache[eid] = entity.type;
+              }
+            } catch (e) { /* skip */ }
+          }
+        }
+      }
+
       // Sort crux claims to top
       const sorted = [...claims].sort((a, b) => (b.is_crux ? 1 : 0) - (a.is_crux ? 1 : 0));
 
@@ -1949,10 +2023,27 @@
         const typeClass = typeColors[claim.type] || 'nac-claim-type-factual';
         const typeLabel = typeLabels[claim.type] || 'Factual';
 
+        // Claimant label
+        const claimantName = claim.claimant_entity_id && entityNameCache[claim.claimant_entity_id]
+          ? ` — <span class="nac-claim-claimant-label" title="Claimed by ${Utils.escapeHtml(entityNameCache[claim.claimant_entity_id])}">${Utils.escapeHtml(entityNameCache[claim.claimant_entity_id])}</span>`
+          : '';
+
+        // Subject entity emojis
+        const subjectEmojis = (claim.subject_entity_ids || []).map(eid => {
+          const t = entityTypeCache[eid];
+          return t === 'person' ? '👤' : t === 'organization' ? '🏢' : t === 'place' ? '📍' : t === 'thing' ? '🔷' : '';
+        }).filter(Boolean).join('');
+        const subjectBadge = subjectEmojis ? `<span class="nac-claim-subject-emojis" title="About entities">${subjectEmojis}</span>` : '';
+
+        // Attribution badge (only show if not editorial)
+        const attrLabel = attributionLabels[claim.attribution];
+        const attrBadge = attrLabel ? `<span class="nac-claim-attribution-badge">${attrLabel}</span>` : '';
+
         return `
           <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="Click text to edit · Click 🔑 to toggle crux" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
-            <span class="nac-claim-text-display" data-claim-id="${Utils.escapeHtml(claim.id)}">${cruxIcon}${confDisplay}${truncatedText}</span>
+            <span class="nac-claim-text-display" data-claim-id="${Utils.escapeHtml(claim.id)}">${cruxIcon}${confDisplay}${truncatedText}${claimantName}</span>
             <span class="nac-claim-type-badge ${typeClass}">${typeLabel}</span>
+            ${attrBadge}${subjectBadge}
             <span class="nac-evidence-link-indicator-slot" data-claim-id="${Utils.escapeHtml(claim.id)}"></span>
             <button class="nac-claim-link-btn" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Link evidence" title="Link evidence to another claim">🔗</button>
             <button class="nac-claim-crux-toggle" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Toggle crux" title="Toggle crux">🔑</button>
@@ -2835,7 +2926,7 @@
     },
 
     // Build kind 30040 claim event
-    buildClaimEvent: (claim, articleUrl, articleTitle, userPubkey) => {
+    buildClaimEvent: (claim, articleUrl, articleTitle, userPubkey, entities) => {
       const tags = [
         ['d', claim.id],
         ['r', articleUrl],
@@ -2845,6 +2936,26 @@
       ];
       if (claim.is_crux) tags.push(['crux', 'true']);
       if (claim.confidence != null) tags.push(['confidence', String(claim.confidence)]);
+      // Attribution tag
+      tags.push(['attribution', claim.attribution || 'editorial']);
+      // Claimant entity
+      if (claim.claimant_entity_id && entities) {
+        const claimant = entities[claim.claimant_entity_id];
+        if (claimant && claimant.keypair) {
+          tags.push(['p', claimant.keypair.pubkey, '', 'claimant']);
+          tags.push(['claimant', claimant.name]);
+        }
+      }
+      // Subject entities
+      if (Array.isArray(claim.subject_entity_ids) && entities) {
+        for (const sid of claim.subject_entity_ids) {
+          const subject = entities[sid];
+          if (subject && subject.keypair) {
+            tags.push(['p', subject.keypair.pubkey, '', 'subject']);
+            tags.push(['subject', subject.name]);
+          }
+        }
+      }
       return {
         kind: 30040,
         pubkey: userPubkey,
@@ -2868,6 +2979,26 @@
           ['l', 'v1', 'nac/entity-sync']
         ],
         content: encryptedContent
+      };
+    },
+
+    // Build kind 32125 entity relationship event
+    buildEntityRelationshipEvent: (entity, articleUrl, relationshipType, userPubkey, claimId) => {
+      return {
+        kind: 32125,
+        pubkey: userPubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', `${entity.id}:${articleUrl}:${relationshipType}`],
+          ['r', articleUrl],
+          ['p', entity.keypair.pubkey, '', relationshipType],
+          ['entity-name', entity.name],
+          ['entity-type', entity.type],
+          ['relationship', relationshipType],
+          ['client', 'nostr-article-capture'],
+          ...(claimId ? [['claim-ref', claimId]] : [])
+        ],
+        content: ''
       };
     },
 
@@ -3964,6 +4095,9 @@
         }
         html += '</div>';
         
+        // Load entity registry for claim enrichment and relationship publishing
+        const entityRegistry = await Storage.entities.getAll();
+
         // Publish each claim as kind 30040
         const claims = ReaderView.claims || [];
         let claimSuccessCount = 0;
@@ -3977,7 +4111,8 @@
                 claim,
                 ReaderView.article.url,
                 ReaderView.article.title || 'Untitled',
-                identity.pubkey
+                identity.pubkey,
+                entityRegistry
               );
               
               let signedClaim;
@@ -4041,14 +4176,76 @@
         } catch (e) {
           console.error('[NAC] Evidence links publish error:', e);
         }
+
+        // Publish entity relationships as kind 32125
+        let entityRelSuccessCount = 0;
+        let entityRelTotal = 0;
+        try {
+          const relEvents = [];
+          const articleUrl = ReaderView.article.url;
+
+          // Article-level entity relationships (author, mentioned, publication)
+          for (const ref of (ReaderView.entities || [])) {
+            const entity = entityRegistry[ref.entity_id];
+            if (entity && entity.keypair) {
+              relEvents.push(EventBuilder.buildEntityRelationshipEvent(entity, articleUrl, ref.context || 'mentioned', identity.pubkey, null));
+            }
+          }
+
+          // Claim-level entity relationships (claimant, subject)
+          for (const claim of claims) {
+            if (claim.claimant_entity_id) {
+              const claimant = entityRegistry[claim.claimant_entity_id];
+              if (claimant && claimant.keypair) {
+                relEvents.push(EventBuilder.buildEntityRelationshipEvent(claimant, articleUrl, 'claimant', identity.pubkey, claim.id));
+              }
+            }
+            for (const sid of (claim.subject_entity_ids || [])) {
+              const subject = entityRegistry[sid];
+              if (subject && subject.keypair) {
+                relEvents.push(EventBuilder.buildEntityRelationshipEvent(subject, articleUrl, 'subject', identity.pubkey, claim.id));
+              }
+            }
+          }
+
+          entityRelTotal = relEvents.length;
+
+          if (relEvents.length > 0) {
+            statusEl.innerHTML = html + `<div class="nac-spinner"></div> Publishing ${relEvents.length} entity relationship${relEvents.length !== 1 ? 's' : ''}...`;
+
+            for (const relEvent of relEvents) {
+              try {
+                let signedRel;
+                if (signingMethod === 'nip07') {
+                  signedRel = await unsafeWindow.nostr.signEvent(relEvent);
+                } else {
+                  signedRel = await Crypto.signEvent(relEvent, identity.privkey);
+                }
+
+                if (signedRel) {
+                  const relResults = await RelayClient.publish(signedRel, relayUrls);
+                  const relOk = Object.values(relResults).some(r => r.success);
+                  if (relOk) entityRelSuccessCount++;
+                }
+              } catch (re) {
+                console.error('[NAC] Entity relationship publish error:', re);
+              }
+            }
+
+            html += `<div class="nac-publish-results"><strong>Entity Relationships:</strong> ${entityRelSuccessCount}/${relEvents.length} published</div>`;
+          }
+        } catch (e) {
+          console.error('[NAC] Entity relationships publish error:', e);
+        }
         
         statusEl.innerHTML = html;
         
         if (successCount > 0) {
           const claimMsg = claims.length > 0 ? ` ${claimSuccessCount} claim${claimSuccessCount !== 1 ? 's' : ''} published.` : '';
           const linkMsg = evidenceLinksTotal > 0 ? ` ${evidenceLinkSuccessCount} evidence link${evidenceLinkSuccessCount !== 1 ? 's' : ''} published.` : '';
+          const relMsg = entityRelTotal > 0 ? ` ${entityRelSuccessCount} entity relationship${entityRelSuccessCount !== 1 ? 's' : ''} published.` : '';
           btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
-          Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}`, 'success');
+          Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}${relMsg}`, 'success');
         } else {
           btn.textContent = 'Publish Failed';
           btn.disabled = false;
@@ -6601,6 +6798,53 @@
 
     .nac-claim-remove:hover {
       color: var(--nac-error);
+    }
+
+    .nac-claim-subjects {
+      max-height: 100px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 4px 0;
+    }
+
+    .nac-claim-subjects label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--nac-text);
+      cursor: pointer;
+    }
+
+    .nac-claim-subjects input[type="checkbox"] {
+      margin: 0;
+      flex-shrink: 0;
+    }
+
+    .nac-claim-claimant-label {
+      font-size: 12px;
+      font-style: italic;
+      color: var(--nac-text-muted);
+      white-space: nowrap;
+    }
+
+    .nac-claim-attribution-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      background: rgba(168, 85, 247, 0.15);
+      color: #a855f7;
+    }
+
+    .nac-claim-subject-emojis {
+      font-size: 11px;
+      flex-shrink: 0;
+      letter-spacing: 1px;
     }
 
     .nac-claims-badge {
