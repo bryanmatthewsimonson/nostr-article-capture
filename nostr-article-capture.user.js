@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.2.0
+// @version      2.3.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.2.0',
+    version: '2.3.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -846,6 +846,32 @@
       }
     },
 
+    // Evidence links storage
+    evidenceLinks: {
+      getAll: async () => {
+        return await Storage.get('evidence_links', {});
+      },
+
+      getForClaim: async (claimId) => {
+        const links = await Storage.evidenceLinks.getAll();
+        return Object.values(links).filter(
+          l => l.source_claim_id === claimId || l.target_claim_id === claimId
+        );
+      },
+
+      save: async (link) => {
+        const links = await Storage.evidenceLinks.getAll();
+        links[link.id] = link;
+        return await Storage.set('evidence_links', links);
+      },
+
+      delete: async (linkId) => {
+        const links = await Storage.evidenceLinks.getAll();
+        delete links[linkId];
+        return await Storage.set('evidence_links', links);
+      }
+    },
+
     // Relay configuration
     relays: {
       get: async () => {
@@ -885,13 +911,15 @@
       const relays = await Storage.get('relay_config', {});
       const sync = await Storage.get('entity_last_sync', 0);
       const claims = await Storage.get('article_claims', {});
+      const evidenceLinks = await Storage.get('evidence_links', {});
 
       const identitySize = JSON.stringify(identity || '').length;
       const entitiesSize = JSON.stringify(entities || '').length;
       const relaysSize = JSON.stringify(relays || '').length;
       const syncSize = JSON.stringify(sync || '').length;
       const claimsSize = JSON.stringify(claims || '').length;
-      const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize;
+      const evidenceLinksSize = JSON.stringify(evidenceLinks || '').length;
+      const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize + evidenceLinksSize;
 
       return {
         totalBytes,
@@ -900,7 +928,8 @@
           entities: entitiesSize,
           relays: relaysSize,
           sync: syncSize,
-          claims: claimsSize
+          claims: claimsSize,
+          evidenceLinks: evidenceLinksSize
         }
       };
     }
@@ -1923,6 +1952,8 @@
           <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="Click text to edit · Click 🔑 to toggle crux" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
             <span class="nac-claim-text-display" data-claim-id="${Utils.escapeHtml(claim.id)}">${cruxIcon}${confDisplay}${truncatedText}</span>
             <span class="nac-claim-type-badge ${typeClass}">${typeLabel}</span>
+            <span class="nac-evidence-link-indicator-slot" data-claim-id="${Utils.escapeHtml(claim.id)}"></span>
+            <button class="nac-claim-link-btn" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Link evidence" title="Link evidence to another claim">🔗</button>
             <button class="nac-claim-crux-toggle" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Toggle crux" title="Toggle crux">🔑</button>
             <button class="nac-claim-remove" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Remove claim">✕</button>
           </div>
@@ -1990,6 +2021,17 @@
           ClaimExtractor.removeClaim(btn.dataset.claimId);
         });
       });
+
+      // Evidence link buttons
+      chipsEl.querySelectorAll('.nac-claim-link-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          EvidenceLinker.showLinkModal(btn.dataset.claimId);
+        });
+      });
+
+      // Async load evidence link indicators for each claim
+      EvidenceLinker.loadIndicators(chipsEl, claims);
     },
 
     // Load claims for a URL and initialize the bar
@@ -1997,6 +2039,237 @@
       const claims = await Storage.claims.getForUrl(url);
       ReaderView.claims = claims;
       ClaimExtractor.refreshClaimsBar();
+    }
+  };
+
+  // ============================================
+  // SECTION 6D: EVIDENCE LINKER
+  // ============================================
+
+  const EvidenceLinker = {
+    // Load evidence link indicators for all rendered claim chips
+    loadIndicators: async (chipsEl, claims) => {
+      for (const claim of claims) {
+        try {
+          const links = await Storage.evidenceLinks.getForClaim(claim.id);
+          const slot = chipsEl.querySelector(`.nac-evidence-link-indicator-slot[data-claim-id="${claim.id}"]`);
+          if (!slot || links.length === 0) continue;
+
+          const indicator = document.createElement('span');
+          indicator.className = 'nac-evidence-link-indicator';
+          indicator.setAttribute('tabindex', '0');
+          indicator.setAttribute('role', 'button');
+          indicator.setAttribute('aria-label', `${links.length} evidence link${links.length !== 1 ? 's' : ''}`);
+          indicator.textContent = `🔗 ${links.length}`;
+          indicator.dataset.claimId = claim.id;
+          slot.replaceWith(indicator);
+
+          indicator.addEventListener('click', (e) => {
+            e.stopPropagation();
+            EvidenceLinker.showLinksTooltip(claim.id, indicator);
+          });
+        } catch (e) {
+          // Indicator loading is optional
+        }
+      }
+    },
+
+    // Show tooltip with linked claims
+    showLinksTooltip: async (claimId, anchorEl) => {
+      // Remove any existing tooltip
+      document.querySelectorAll('.nac-evidence-tooltip').forEach(t => t.remove());
+
+      const links = await Storage.evidenceLinks.getForClaim(claimId);
+      if (links.length === 0) return;
+
+      const allClaims = await Storage.claims.getAll();
+
+      const tooltip = document.createElement('div');
+      tooltip.className = 'nac-evidence-tooltip';
+      tooltip.setAttribute('role', 'tooltip');
+
+      const relIcons = { supports: '🟢', contradicts: '🔴', contextualizes: '🔵' };
+      const relClasses = { supports: 'nac-evidence-rel-supports', contradicts: 'nac-evidence-rel-contradicts', contextualizes: 'nac-evidence-rel-contextualizes' };
+
+      let html = '<div class="nac-evidence-tooltip-title">🔗 Linked Evidence:</div>';
+      for (const link of links) {
+        const otherId = link.source_claim_id === claimId ? link.target_claim_id : link.source_claim_id;
+        const otherClaim = allClaims[otherId];
+        const relIcon = relIcons[link.relationship] || '🔗';
+        const relClass = relClasses[link.relationship] || '';
+        const otherText = otherClaim
+          ? Utils.escapeHtml(otherClaim.text.substring(0, 60)) + (otherClaim.text.length > 60 ? '…' : '')
+          : '(deleted claim)';
+        const source = otherClaim ? Utils.escapeHtml(new URL(otherClaim.source_url).hostname) : '';
+
+        html += `<div class="nac-evidence-tooltip-item">
+          <span class="${relClass}">${relIcon} ${Utils.escapeHtml(link.relationship)}:</span>
+          <span>"${otherText}"${source ? ' (' + source + ')' : ''}</span>
+          <button class="nac-evidence-delete-btn" data-link-id="${Utils.escapeHtml(link.id)}" aria-label="Delete evidence link" title="Delete link">✕</button>
+        </div>`;
+      }
+      tooltip.innerHTML = html;
+
+      // Position near anchor
+      const rect = anchorEl.getBoundingClientRect();
+      tooltip.style.position = 'fixed';
+      tooltip.style.left = Math.min(rect.left, window.innerWidth - 420) + 'px';
+      tooltip.style.top = (rect.bottom + 4) + 'px';
+      document.body.appendChild(tooltip);
+
+      // Delete link handlers
+      tooltip.querySelectorAll('.nac-evidence-delete-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await Storage.evidenceLinks.delete(btn.dataset.linkId);
+          tooltip.remove();
+          ClaimExtractor.refreshClaimsBar();
+          Utils.showToast('Evidence link removed', 'info');
+        });
+      });
+
+      // Close on click outside
+      const closeHandler = (e) => {
+        if (!tooltip.contains(e.target) && e.target !== anchorEl) {
+          tooltip.remove();
+          document.removeEventListener('click', closeHandler);
+        }
+      };
+      setTimeout(() => document.addEventListener('click', closeHandler), 10);
+    },
+
+    // Show modal to create an evidence link
+    showLinkModal: async (sourceClaimId) => {
+      const sourceClaim = (ReaderView.claims || []).find(c => c.id === sourceClaimId);
+      if (!sourceClaim) return;
+
+      // Get all claims from other articles
+      const allClaims = await Storage.claims.getAll();
+      const currentUrl = ReaderView.article?.url || '';
+      const otherClaims = Object.values(allClaims).filter(c => c.source_url !== currentUrl);
+
+      if (otherClaims.length === 0) {
+        Utils.showToast('No other article claims to link to', 'info');
+        return;
+      }
+
+      // Group by source_url
+      const groups = {};
+      for (const c of otherClaims) {
+        if (!groups[c.source_url]) {
+          groups[c.source_url] = { title: c.source_title || 'Untitled', url: c.source_url, claims: [] };
+        }
+        groups[c.source_url].claims.push(c);
+      }
+
+      // Remove any existing modal
+      document.querySelectorAll('.nac-evidence-modal').forEach(m => m.remove());
+
+      const modal = document.createElement('div');
+      modal.className = 'nac-evidence-modal';
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-label', 'Link evidence between claims');
+
+      const sourceText = sourceClaim.text.length > 100
+        ? Utils.escapeHtml(sourceClaim.text.substring(0, 100)) + '…'
+        : Utils.escapeHtml(sourceClaim.text);
+
+      let groupsHtml = '';
+      for (const [url, group] of Object.entries(groups)) {
+        const hostname = Utils.escapeHtml(new URL(url).hostname);
+        groupsHtml += `<div class="nac-evidence-article-group">
+          <div class="nac-evidence-article-title">📄 "${Utils.escapeHtml(group.title)}" (${hostname})</div>`;
+        for (const c of group.claims) {
+          const cText = c.text.length > 80
+            ? Utils.escapeHtml(c.text.substring(0, 80)) + '…'
+            : Utils.escapeHtml(c.text);
+          groupsHtml += `<label class="nac-evidence-claim-option">
+            <input type="radio" name="nac-evidence-target" value="${Utils.escapeHtml(c.id)}">
+            <span>"${cText}"</span>
+          </label>`;
+        }
+        groupsHtml += '</div>';
+      }
+
+      modal.innerHTML = `
+        <div class="nac-evidence-modal-content">
+          <div class="nac-evidence-modal-header">
+            <h3>Link Evidence</h3>
+            <button class="nac-btn-close" id="nac-evidence-modal-close" aria-label="Close evidence link modal">×</button>
+          </div>
+          <div class="nac-evidence-modal-body">
+            <div class="nac-evidence-source">
+              <strong>Current claim:</strong> "${sourceText}"
+            </div>
+            <div class="nac-evidence-target-label">Select a claim to link to:</div>
+            <div class="nac-evidence-target-list">${groupsHtml}</div>
+            <div class="nac-evidence-options">
+              <div class="nac-form-group">
+                <label for="nac-evidence-relationship">Relationship:</label>
+                <select id="nac-evidence-relationship" class="nac-form-select" aria-label="Evidence relationship type">
+                  <option value="supports">Supports</option>
+                  <option value="contradicts">Contradicts</option>
+                  <option value="contextualizes">Contextualizes</option>
+                </select>
+              </div>
+              <div class="nac-form-group">
+                <label for="nac-evidence-note">Note (optional):</label>
+                <input type="text" id="nac-evidence-note" class="nac-form-input" placeholder="Optional explanation…" aria-label="Evidence link note">
+              </div>
+            </div>
+          </div>
+          <div class="nac-evidence-modal-footer">
+            <button class="nac-btn nac-btn-primary" id="nac-evidence-create" aria-label="Create evidence link">Create Link</button>
+            <button class="nac-btn" id="nac-evidence-cancel" aria-label="Cancel">Cancel</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(modal);
+
+      // Focus the modal
+      modal.querySelector('.nac-evidence-modal-content').focus();
+
+      // Close handlers
+      const closeModal = () => modal.remove();
+
+      modal.querySelector('#nac-evidence-modal-close').addEventListener('click', closeModal);
+      modal.querySelector('#nac-evidence-cancel').addEventListener('click', closeModal);
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+      });
+
+      // Create link handler
+      modal.querySelector('#nac-evidence-create').addEventListener('click', async () => {
+        const selectedRadio = modal.querySelector('input[name="nac-evidence-target"]:checked');
+        if (!selectedRadio) {
+          Utils.showToast('Please select a target claim', 'error');
+          return;
+        }
+
+        const targetClaimId = selectedRadio.value;
+        const relationship = modal.querySelector('#nac-evidence-relationship').value;
+        const note = modal.querySelector('#nac-evidence-note').value.trim();
+
+        const linkId = 'link_' + await Crypto.sha256(sourceClaimId + targetClaimId + relationship);
+
+        const identity = await Storage.identity.get();
+
+        const link = {
+          id: linkId,
+          source_claim_id: sourceClaimId,
+          target_claim_id: targetClaimId,
+          relationship: relationship,
+          note: note,
+          created_at: Date.now(),
+          created_by: identity?.pubkey || 'local'
+        };
+
+        await Storage.evidenceLinks.save(link);
+        closeModal();
+        ClaimExtractor.refreshClaimsBar();
+        Utils.showToast(`Evidence link created: ${relationship}`, 'success');
+      });
     }
   };
 
@@ -2594,6 +2867,31 @@
           ['l', 'v1', 'nac/entity-sync']
         ],
         content: encryptedContent
+      };
+    },
+
+    // Build kind 30043 evidence link event
+    buildEvidenceLinkEvent: async (link, allClaims, userPubkey) => {
+      const sourceClaim = allClaims[link.source_claim_id];
+      const targetClaim = allClaims[link.target_claim_id];
+
+      const tags = [
+        ['d', link.id],
+        ['source-claim', link.source_claim_id],
+        ['target-claim', link.target_claim_id],
+        ['relationship', link.relationship],
+        ['client', 'nostr-article-capture']
+      ];
+
+      if (sourceClaim?.source_url) tags.push(['r', sourceClaim.source_url]);
+      if (targetClaim?.source_url) tags.push(['r', targetClaim.source_url]);
+
+      return {
+        kind: 30043,
+        pubkey: userPubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content: link.note || ''
       };
     }
   };
@@ -3545,13 +3843,24 @@
       const sizeWarning = eventSizeKB > 64 ? ` ⚠️ Large event (${eventSizeKB} KB) — some relays may reject` : '';
       document.getElementById('nac-event-preview').textContent = `[Event size: ${eventSizeKB} KB${sizeWarning}]\n\n${eventJson}`;
 
-      // Show publish info with claim/crux counts
+      // Show publish info with claim/crux/evidence link counts
       const claimCount = (ReaderView.claims || []).length;
       const cruxCount = (ReaderView.claims || []).filter(c => c.is_crux).length;
+      // Count evidence links for current article's claims
+      let evidenceLinkCount = 0;
+      try {
+        const claimIds = (ReaderView.claims || []).map(c => c.id);
+        const allLinks = await Storage.evidenceLinks.getAll();
+        const articleLinks = Object.values(allLinks).filter(
+          l => claimIds.includes(l.source_claim_id) || claimIds.includes(l.target_claim_id)
+        );
+        evidenceLinkCount = articleLinks.length;
+      } catch (e) { /* ignore */ }
       const infoEl = document.getElementById('nac-publish-info');
       if (infoEl) {
         if (claimCount > 0) {
-          infoEl.innerHTML = `📋 Article + ${claimCount} claim${claimCount !== 1 ? 's' : ''} (${cruxCount} crux${cruxCount !== 1 ? 'es' : ''}) will be published`;
+          const linkMsg = evidenceLinkCount > 0 ? ` + ${evidenceLinkCount} evidence link${evidenceLinkCount !== 1 ? 's' : ''}` : '';
+          infoEl.innerHTML = `📋 Article + ${claimCount} claim${claimCount !== 1 ? 's' : ''} (${cruxCount} crux${cruxCount !== 1 ? 'es' : ''})${linkMsg} will be published`;
         } else {
           infoEl.innerHTML = '📋 Article will be published (no claims)';
         }
@@ -3690,12 +3999,55 @@
           html += `<div class="nac-publish-results"><strong>Claims:</strong> ${claimSuccessCount}/${claims.length} published</div>`;
         }
         
+        // Publish evidence links as kind 30043
+        const claimIds = claims.map(c => c.id);
+        let evidenceLinkSuccessCount = 0;
+        let evidenceLinksTotal = 0;
+        try {
+          const allLinks = await Storage.evidenceLinks.getAll();
+          const allClaims = await Storage.claims.getAll();
+          const articleLinks = Object.values(allLinks).filter(
+            l => claimIds.includes(l.source_claim_id) || claimIds.includes(l.target_claim_id)
+          );
+          evidenceLinksTotal = articleLinks.length;
+
+          if (articleLinks.length > 0) {
+            statusEl.innerHTML = html + `<div class="nac-spinner"></div> Publishing ${articleLinks.length} evidence link${articleLinks.length !== 1 ? 's' : ''}...`;
+
+            for (const link of articleLinks) {
+              try {
+                const linkEvent = await EventBuilder.buildEvidenceLinkEvent(link, allClaims, identity.pubkey);
+
+                let signedLink;
+                if (signingMethod === 'nip07') {
+                  signedLink = await unsafeWindow.nostr.signEvent(linkEvent);
+                } else {
+                  signedLink = await Crypto.signEvent(linkEvent, identity.privkey);
+                }
+
+                if (signedLink) {
+                  const linkResults = await RelayClient.publish(signedLink, relayUrls);
+                  const linkOk = Object.values(linkResults).some(r => r.success);
+                  if (linkOk) evidenceLinkSuccessCount++;
+                }
+              } catch (le) {
+                console.error(`[NAC] Evidence link publish error (${link.id}):`, le);
+              }
+            }
+
+            html += `<div class="nac-publish-results"><strong>Evidence Links:</strong> ${evidenceLinkSuccessCount}/${articleLinks.length} published</div>`;
+          }
+        } catch (e) {
+          console.error('[NAC] Evidence links publish error:', e);
+        }
+        
         statusEl.innerHTML = html;
         
         if (successCount > 0) {
           const claimMsg = claims.length > 0 ? ` ${claimSuccessCount} claim${claimSuccessCount !== 1 ? 's' : ''} published.` : '';
+          const linkMsg = evidenceLinksTotal > 0 ? ` ${evidenceLinkSuccessCount} evidence link${evidenceLinkSuccessCount !== 1 ? 's' : ''} published.` : '';
           btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
-          Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}`, 'success');
+          Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}`, 'success');
         } else {
           btn.textContent = 'Publish Failed';
           btn.disabled = false;
@@ -6352,6 +6704,252 @@
     .nac-claim-confidence-field label {
       font-size: 13px;
       color: var(--nac-text-muted);
+    }
+
+    /* Evidence Linking */
+    .nac-evidence-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 1000000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .nac-evidence-modal-content {
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 560px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    .nac-evidence-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--nac-border);
+    }
+
+    .nac-evidence-modal-header h3 {
+      margin: 0;
+      font-size: 16px;
+      color: var(--nac-text);
+    }
+
+    .nac-evidence-modal-body {
+      padding: 16px 20px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .nac-evidence-source {
+      font-size: 13px;
+      color: var(--nac-text);
+      background: rgba(99, 102, 241, 0.08);
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+
+    .nac-evidence-target-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+      margin-bottom: 8px;
+    }
+
+    .nac-evidence-target-list {
+      max-height: 240px;
+      overflow-y: auto;
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 8px;
+      margin-bottom: 16px;
+    }
+
+    .nac-evidence-article-group {
+      margin-bottom: 12px;
+    }
+
+    .nac-evidence-article-group:last-child {
+      margin-bottom: 0;
+    }
+
+    .nac-evidence-article-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+      padding: 4px 0;
+      margin-bottom: 4px;
+    }
+
+    .nac-evidence-claim-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--nac-text);
+      line-height: 1.4;
+      transition: background 0.15s;
+    }
+
+    .nac-evidence-claim-option:hover {
+      background: rgba(99, 102, 241, 0.08);
+    }
+
+    .nac-evidence-claim-option input[type="radio"] {
+      margin-top: 3px;
+      flex-shrink: 0;
+    }
+
+    .nac-evidence-options {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .nac-evidence-options .nac-form-group {
+      margin-bottom: 0;
+    }
+
+    .nac-evidence-options .nac-form-group label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .nac-evidence-modal-footer {
+      display: flex;
+      gap: 8px;
+      padding: 12px 20px;
+      border-top: 1px solid var(--nac-border);
+      justify-content: flex-end;
+    }
+
+    .nac-evidence-link-indicator {
+      font-size: 11px;
+      background: rgba(99, 102, 241, 0.12);
+      color: var(--nac-primary);
+      padding: 2px 6px;
+      border-radius: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+
+    .nac-evidence-link-indicator:hover {
+      background: rgba(99, 102, 241, 0.25);
+    }
+
+    .nac-claim-link-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+      opacity: 0.5;
+      transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+
+    .nac-claim-link-btn:hover {
+      opacity: 1;
+    }
+
+    .nac-evidence-tooltip {
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+      max-width: 400px;
+      font-size: 12px;
+      color: var(--nac-text);
+      z-index: 1000001;
+    }
+
+    .nac-evidence-tooltip-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    .nac-evidence-tooltip-item {
+      padding: 3px 0;
+      line-height: 1.4;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .nac-evidence-rel-supports {
+      color: #22c55e;
+    }
+
+    .nac-evidence-rel-contradicts {
+      color: #ef4444;
+    }
+
+    .nac-evidence-rel-contextualizes {
+      color: #3b82f6;
+    }
+
+    .nac-evidence-delete-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--nac-text-muted);
+      padding: 0 4px;
+      margin-left: auto;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    .nac-evidence-delete-btn:hover {
+      opacity: 1;
+      color: var(--nac-error);
+    }
+
+    .nac-form-input {
+      width: 100%;
+      padding: 6px 10px;
+      border: 1px solid var(--nac-border);
+      border-radius: 6px;
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+
+    .nac-form-input:focus {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: -1px;
+    }
+
+    .nac-claim-link-btn:focus-visible,
+    .nac-evidence-link-indicator:focus-visible,
+    .nac-evidence-delete-btn:focus-visible {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: 2px;
     }
   `;
 
