@@ -40,6 +40,88 @@ The v2 NOSTR Article Capture implementation uses four entity types, each with a 
 
 Entity data is stored in GM_setValue as an entity registry, synced across browsers via NIP-78 (kind 30078) events encrypted with NIP-44 v2.
 
+### v2 Entity Data Structure (Implemented)
+
+```javascript
+// Storage key: 'entity_registry'
+{
+  "entity_<hash>": {
+    id: "entity_<hash>",           // SHA-256 of type + normalized name
+    type: "person",                 // person | organization | place | thing
+    name: "Larry Summers",         // Display name
+    aliases: [],                    // Legacy field (migrated to separate alias entities)
+    canonical_id: null,             // If this entity is an alias: points to the canonical entity ID
+                                    // If null: this is a primary (canonical) entity
+    keypair: {
+      pubkey: "<real-hex-pubkey>",  // Derived from real secp256k1
+      privkey: "<hex-privkey>",     // Stored locally
+      npub: "npub1...",             // Real bech32 encoding
+      nsec: "nsec1..."             // Real bech32 encoding
+    },
+    created_by: "<user-pubkey>",    // Which user created this entity
+    created_at: 1707350400,         // Unix timestamp
+    updated: 1707350500,            // Unix timestamp of last modification
+    articles: [                     // Articles this entity appears in
+      {
+        url: "https://example.com/article",
+        title: "Example Article",
+        context: "mentioned",       // quoted | mentioned | author | subject
+        tagged_at: 1707350400
+      }
+    ],
+    metadata: {}                    // Extensible metadata
+  }
+}
+```
+
+**Entity Alias Relationships:**
+
+Aliases are separate entities with their own keypair and `canonical_id` pointing to the primary entity:
+
+```
+Entity: "Lawrence Summers" (canonical_id: "entity_abc123")
+  └── points to → Entity: "Larry Summers" (canonical_id: null)  ← canonical entity
+```
+
+When an alias entity is tagged in an article, the canonical entity's pubkey is also included in the published NOSTR event's `p` tags. When publishing kind 0 profile events for alias entities, a `["refers_to", canonical_npub]` tag is included.
+
+**Migration:** Legacy entities with inline `aliases[]` strings are auto-migrated on startup to separate alias entities with their own keypairs (Section 10B: Entity Alias Migration).
+
+### v2 Claim Data Structure (Implemented)
+
+```javascript
+// Storage key: 'article_claims'
+{
+  "claim_<hash>": {
+    id: "claim_<hash>",             // "claim_" + SHA-256 of (source_url + text)
+    text: "The unemployment rate dropped to 3.4%",  // Claim text
+    type: "factual",                // factual | causal | evaluative | predictive
+    is_crux: false,                 // Whether this is a key claim in the article
+    source_url: "https://...",      // URL of the article the claim was extracted from
+    source_title: "Article Title",  // Title of the source article
+    context: "surrounding text",    // Context around the claim in the article
+    created_at: 1707350400,         // Timestamp (milliseconds)
+    created_by: "<user-pubkey>"     // Pubkey of the user who extracted the claim (or "local")
+  }
+}
+```
+
+**Claim Types:**
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Factual** | Verifiable statement of fact | "GDP grew 2.1% in Q3" |
+| **Causal** | Asserts a cause-effect relationship | "The tax cut led to increased investment" |
+| **Evaluative** | A judgment or assessment | "This is the most important policy change in a decade" |
+| **Predictive** | A prediction about the future | "Inflation will fall below 2% by 2026" |
+
+**Claims in NOSTR Events (kind 30023):**
+
+```json
+["claim", "The unemployment rate dropped to 3.4%", "factual"]
+["claim", "This policy will cause economic growth", "causal", "crux"]
+```
+
 ### 4. Relationships
 - **Attribution**: Who said/wrote/published what
 - **Causation**: One event caused another

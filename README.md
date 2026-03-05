@@ -1,10 +1,10 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
-A Tampermonkey userscript that captures web articles into a clean reader view with entity tagging, WYSIWYG and markdown editing, and publishes long-form content to the NOSTR network as kind 30023 events. All cryptography — including secp256k1, BIP-340 Schnorr signing, NIP-44 v2 encryption, and bech32 encoding — is implemented from scratch with zero external crypto dependencies.
+A Tampermonkey userscript that captures web articles into a clean reader view with entity tagging, claim extraction, WYSIWYG and markdown editing, and publishes long-form content to the NOSTR network as kind 30023 events. All cryptography — including secp256k1, BIP-340 Schnorr signing, NIP-44 v2 encryption, and bech32 encoding — is implemented from scratch with zero external crypto dependencies.
 
 ---
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures web articles into a clean reader view wi
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.0.1-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.1.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
   </a>
 </p>
 
@@ -38,13 +38,14 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Full-page reader view** with clean typography and optimal reading width
 - **Dark mode** support
 - **Inline metadata editing** — click author, publication, or date to edit in place
+- **Editable URL** — canonical URL is displayed and editable; expanded tracking parameter cleanup (`utm_*`, `fbclid`, `gclid`, etc.)
 
 ### ✏️ Editing
 
 - **WYSIWYG visual editor** — `contentEditable` rich-text editing directly in the reader view
 - **Raw markdown editor** — toggle between visual and markdown mode (auto-resizing textarea)
 - **Preview as Published** — HTML → markdown → HTML roundtrip to see exactly what NOSTR will display
-- **Editable fields** — title, author, publication, date, and body
+- **Editable fields** — title, author, publication, date, URL, and body
 
 ### 🏷️ Entity Tagging
 
@@ -53,23 +54,38 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Manual tagging** — add entities by name via the "+ Tag Entity" button
 - **Auto-detection** — author (Person) and publication (Organization) are automatically tagged on capture
 - **Keypair per entity** — each entity gets its own secp256k1 keypair (npub/nsec) for future NOSTR identity
-- **Entity aliases** — add multiple aliases for each entity
+- **Entity aliases** (`canonical_id`) — entities can be linked as aliases of a canonical entity; alias entities carry `canonical_id` pointing to the primary entity, enabling deduplication across name variants
 - **Auto-suggestion** — automatically detects known entities from your registry in article text (name + alias matching)
 - **Entity discovery** — heuristic-based detection of proper nouns, organization names, places, and other entities using capitalized phrase analysis
 - **Suggestion bar** — accept or dismiss entity suggestions with one click; known entities link directly, new entities are created with guessed type
+- **Known entity auto-recognition** — previously tagged entities are automatically recognized when their name or any alias appears in new articles
+
+### 📋 Claim Extraction
+
+- **📋 Claim button** in the text selection popover — select any text and extract it as a claim
+- **Claim types** — classify claims as Factual, Causal, Evaluative, or Predictive
+- **Crux marking** — mark key claims as "crux" (the most important claims in an article)
+- **Claims bar** — displays extracted claims with type badges and crux indicators below the article
+- **Click-to-toggle crux** — click any claim chip to toggle its crux status
+- **Per-URL persistence** — claims are stored per article URL and reloaded on revisit
+- **Claims in NOSTR events** — claims are embedded in kind 30023 events as `["claim", text, type]` and `["claim", text, type, "crux"]` tags
 
 ### 📋 Entity Management (Settings)
 
 - **Entity browser** with search and type filtering (All / 👤 / 🏢 / 📍 / 🔷)
 - **Entity detail view** — rename, manage aliases, view keypair (npub/nsec with copy), articles list
+- **Canonical reference display** — alias entities show their canonical parent; parent entities list their known aliases
+- **Set as alias of…** — search and link an entity as an alias of another entity, with circular reference prevention
 - **Entity delete** with confirmation dialog
 - **JSON export/import** for full entity registry backup and restore
 
 ### 📤 NOSTR Publishing
 
 - **Kind 30023** long-form article events (NIP-23) with Markdown body
-- **Kind 0** profile metadata events (optional, for entity public names)
+- **Kind 0** profile metadata events (optional, for entity public names); alias entities include `["refers_to", canonical_npub]` tags
 - **Kind 30078** entity sync events (NIP-78, NIP-44 v2 encrypted)
+- **Claim tags** in kind 30023 — `["claim", text, type]` and `["claim", text, type, "crux"]` for extracted claims
+- **Alias entity resolution** — when an alias entity is tagged, the canonical entity's pubkey is also included in `p` tags
 - **Two signing methods:**
 
 | Method | Description |
@@ -95,6 +111,7 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **NIP-04 backward compatibility** — pull decrypts NIP-44 first, falls back to NIP-04 AES-256-CBC for older events
 - **Smart merge** — last-write-wins on `updated` timestamp; article arrays merged by URL union
 - **nsec import/export** — share your identity across browsers
+- **Entity alias migration** — automatic one-time migration converts legacy inline `aliases[]` strings to separate alias entities with their own keypairs and `canonical_id` links
 
 ### 🔐 Crypto (built-in, no dependencies)
 
@@ -117,8 +134,9 @@ All cryptographic operations are implemented in pure JavaScript — no external 
 
 - **`GM_setValue` / `GM_getValue`** for persistent Tampermonkey storage
 - **Storage quota monitoring** — color-coded display in settings (green → orange at 1 MB → red at 5 MB)
-- **Size breakdown** — entities, identity, and relays shown separately
+- **Size breakdown** — entities, identity, relays, and claims shown separately
 - **Graceful error handling** — storage save failures show user-facing toasts
+- **Claims storage** — claims stored per article URL in `article_claims` key
 
 ### ♿ Accessibility
 
@@ -139,35 +157,38 @@ All cryptographic operations are implemented in pure JavaScript — no external 
 1. **Navigate** to any article page
 2. **Click** the floating **📰** button (bottom-right corner)
 3. **Read** the article in the clean reader view
-4. **Edit metadata** — click author, publication, or date to edit inline
+4. **Edit metadata** — click author, publication, date, or URL to edit inline
 5. **Toggle Edit mode** for content editing (visual WYSIWYG or raw markdown)
 6. **Tag entities** — select text to tag people, orgs, places, or things; or use "+ Tag Entity"
-7. **Preview as Published** — check the final markdown roundtrip format
-8. **Publish** — click Publish → select relays and signing method → publish to NOSTR
-9. **Settings** — manage identity (generate, import nsec, NIP-07), relays, entities, sync
+7. **Extract claims** — select text and click 📋 Claim to extract claims with type classification and crux marking
+8. **Preview as Published** — check the final markdown roundtrip format
+9. **Publish** — click Publish → select relays and signing method → publish to NOSTR (claims included as tags)
+10. **Settings** — manage identity (generate, import nsec, NIP-07), relays, entities, sync
 
 ---
 
 ## 🏗️ Architecture
 
-The userscript is a single self-contained file (~5,590 lines) organized into 14 sections:
+The userscript is a single self-contained file (~6,245 lines) organized into 16 sections:
 
 | # | Section | Lines | Description |
 |---|---------|-------|-------------|
 | 1 | **Configuration** | ~35 | Default relays, reader settings, extraction limits, tagging config |
 | 2 | **Crypto** | ~600 | secp256k1 curve primitives, Bech32 (BIP-173), BIP-340 Schnorr signing, SHA-256, HMAC, HKDF, ChaCha20, NIP-04, NIP-44 v2 |
-| 3 | **Storage** | ~210 | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD, storage quota estimation |
-| 4 | **Content Extraction** | ~500 | Readability integration, smart date detection, Turndown markdown conversion, markdown-to-HTML rendering |
+| 3 | **Storage** | ~245 | `GM_setValue`/`GM_getValue` persistence, entity registry CRUD, claims CRUD, storage quota estimation |
+| 4 | **Content Extraction** | ~530 | Readability integration, smart date detection, Turndown markdown conversion, markdown-to-HTML rendering, canonical URL detection |
 | 5 | **Utilities** | ~50 | Formatting helpers, HTML sanitization, `makeKeyboardAccessible()` |
-| 6 | **Entity Tagger** | ~215 | Text selection popover, entity type picker, chip rendering, auto-detection |
-| 6B | **EntityAutoSuggest** | ~250 | Known entity matching (name + alias, word-boundary regex), new entity discovery (capitalized phrases, quoted names, type heuristics), suggestion bar UI |
+| 6 | **Entity Tagger** | ~225 | Text selection popover, entity type picker, chip rendering, auto-detection, claim button integration |
+| 6C | **Claim Extractor** | ~205 | Claim extraction form, claim types (Factual/Causal/Evaluative/Predictive), crux marking, claims bar UI, per-URL persistence |
+| 6B | **EntityAutoSuggest** | ~265 | Known entity matching (name + alias, word-boundary regex), new entity discovery (capitalized phrases, quoted names, type heuristics), suggestion bar UI |
 | 7 | **Relay Client** | ~180 | WebSocket connections with retry/backoff, NIP-01 message handling, parallel publish, subscribe |
-| 8 | **Event Builder** | ~115 | Kind 0 (profile), kind 30023 (article), kind 30078 (entity sync) construction & signing |
-| 8.5 | **Entity Sync** | ~195 | NIP-44 encrypted push/pull, NIP-04 fallback decryption, last-write-wins merge |
-| 9 | **Reader View** | ~1,035 | Full-page takeover UI, edit modes, preview, dark mode, inline field editing, entity bar, focus trap, keyboard shortcuts |
-| 9B | **Entity Browser** | ~475 | Search, filter, entity cards, detail view with alias/keypair management, entity delete |
-| 10 | **Styles** | ~1,225 | All CSS injected via `GM_addStyle` (dark theme, focus-visible, responsive) |
-| 11 | **Initialization** | ~60 | FAB creation, `GM_registerMenuCommand`, startup |
+| 8 | **Event Builder** | ~135 | Kind 0 (profile with `refers_to` for aliases), kind 30023 (article with claim tags), kind 30078 (entity sync) construction & signing |
+| 8.5 | **Entity Sync** | ~200 | NIP-44 encrypted push/pull, NIP-04 fallback decryption, last-write-wins merge |
+| 9 | **Reader View** | ~1,120 | Full-page takeover UI, edit modes, preview, dark mode, inline field editing, entity bar, claims bar, focus trap, keyboard shortcuts |
+| 9B | **Entity Browser** | ~575 | Search, filter, entity cards, detail view with alias/keypair management, canonical reference UI, set-as-alias, entity delete |
+| 10 | **Styles** | ~1,700 | All CSS injected via `GM_addStyle` (dark theme, focus-visible, responsive, claim styles) |
+| 10B | **Entity Alias Migration** | ~80 | Auto-migration from legacy inline `aliases[]` to separate alias entities with keypairs and `canonical_id` |
+| 11 | **Initialization** | ~65 | FAB creation, `GM_registerMenuCommand`, entity migration, startup |
 
 ---
 
@@ -175,9 +196,18 @@ The userscript is a single self-contained file (~5,590 lines) organized into 14 
 
 | Kind | Name | Usage |
 |------|------|-------|
-| **0** | Profile Metadata (NIP-01) | Optional public identity for entities |
-| **30023** | Long-form Article (NIP-23) | Published article content in Markdown |
+| **0** | Profile Metadata (NIP-01) | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
+| **30023** | Long-form Article (NIP-23) | Published article content in Markdown with entity `p` tags and `claim` tags |
 | **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
+
+### Claim Tags in Kind 30023
+
+When claims have been extracted from an article, they are embedded in the published event:
+
+```json
+["claim", "The unemployment rate dropped to 3.4% in January", "factual"]
+["claim", "This policy will lead to economic growth by 2028", "predictive", "crux"]
+```
 
 ---
 
@@ -189,7 +219,7 @@ The userscript is a single self-contained file (~5,590 lines) organized into 14 
 | **NIP-04** | Encrypted Direct Messages | Legacy AES-256-CBC encryption (fallback for reading older entity sync events) |
 | **NIP-07** | Browser Extension Signing | `window.nostr.signEvent()` and `window.nostr.getPublicKey()` integration |
 | **NIP-19** | Bech32 Encoding | `npub` / `nsec` key encoding and decoding |
-| **NIP-23** | Long-form Content | Kind 30023 article events with `title`, `summary`, `published_at`, `d` tags |
+| **NIP-23** | Long-form Content | Kind 30023 article events with `title`, `summary`, `published_at`, `d`, `claim` tags |
 | **NIP-44** | Versioned Encryption | v2 padded encryption (ChaCha20 + HMAC-SHA256) for entity sync |
 | **NIP-78** | Application-specific Data | Kind 30078 events for storing encrypted entity data on relays |
 
@@ -223,13 +253,13 @@ node tests/nip44-test.js
 
 ```
 nostr-article-capture/
-├── nostr-article-capture.user.js   # Main userscript (~5,590 lines)
+├── nostr-article-capture.user.js   # Main userscript (~6,245 lines)
 ├── README.md
 ├── docs/
 │   ├── article-complete-inventory.md
 │   ├── article-data-collection.md
 │   ├── data-model.md
-│   ├── entity-auto-suggestion-design.md
+│   ├── entity-hierarchy-design.md
 │   ├── entity-sync-design.md
 │   ├── nostr-nips-analysis.md
 │   └── tampermonkey-article-capture-plan.md
@@ -246,8 +276,8 @@ nostr-article-capture/
 
 | Document | Description |
 |----------|-------------|
-| [Data Model](docs/data-model.md) | Entity and article data structures |
-| [Entity Auto-Suggestion Design](docs/entity-auto-suggestion-design.md) | Auto-suggestion architecture (known matching, discovery, suggestion bar) |
+| [Data Model](docs/data-model.md) | Entity, claim, and article data structures |
+| [Entity Hierarchy Design](docs/entity-hierarchy-design.md) | Entity alias system and canonical_id design |
 | [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol (NIP-44 + NIP-04 fallback) |
 | [NOSTR NIPs Analysis](docs/nostr-nips-analysis.md) | NIP usage and rationale |
 | [Article Data Collection](docs/article-data-collection.md) | Article capture field reference |

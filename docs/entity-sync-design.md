@@ -163,7 +163,8 @@ Add a `subscribe()` method to [`RelayClient`](../nostr-article-capture.user.js:1
   "id": "entity_a1b2c3d4",
   "type": "person",
   "name": "Larry Summers",
-  "aliases": ["Lawrence Summers", "Lawrence H. Summers"],
+  "aliases": [],
+  "canonical_id": null,
   "keypair": {
     "pubkey": "ab12...ef56",
     "privkey": "cd34...gh78",
@@ -184,6 +185,8 @@ Add a `subscribe()` method to [`RelayClient`](../nostr-article-capture.user.js:1
   "updated": 1707350500
 }
 ```
+
+**Note:** The `canonical_id` field links alias entities to their canonical (primary) entity. When `canonical_id` is `null`, the entity is a primary entity. When set to another entity's ID, this entity is an alias of that entity. Legacy `aliases[]` strings are auto-migrated to separate alias entities on startup (see Section 10B: Entity Alias Migration).
 
 ### Kind 0 — Public Entity Profile Event
 

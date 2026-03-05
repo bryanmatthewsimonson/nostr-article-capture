@@ -383,7 +383,7 @@ The v2 NOSTR Article Capture implementation uses the following NIPs:
 |-----|------|-------------|
 | **NIP-01** | Basic Protocol | Event structure, relay communication (REQ/EVENT/EOSE/OK/NOTICE/CLOSE) |
 | **NIP-07** | Browser Extension | Optional signing via browser extensions (nos2x, Alby) |
-| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body |
+| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body and `claim` tags |
 | **NIP-32** | Labels | Label tags (`L`/`l`) on entity sync events for app-specific categorization |
 | **NIP-33** | Parameterized Replaceable | Kind 30078 entity sync events (replaceable by `d` tag) |
 | **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
