@@ -57,7 +57,8 @@
     tagging: {
       selection_debounce_ms: 300,
       min_selection_length: 2,
-      max_selection_length: 100
+      max_selection_length: 100,
+      max_claim_length: 500
     }
   };
 
@@ -816,6 +817,35 @@
       }
     },
 
+    // Claims storage
+    claims: {
+      getAll: async () => {
+        return await Storage.get('article_claims', {});
+      },
+
+      get: async (claimId) => {
+        const claims = await Storage.claims.getAll();
+        return claims[claimId] || null;
+      },
+
+      getForUrl: async (url) => {
+        const claims = await Storage.claims.getAll();
+        return Object.values(claims).filter(c => c.source_url === url);
+      },
+
+      save: async (claim) => {
+        const claims = await Storage.claims.getAll();
+        claims[claim.id] = claim;
+        return await Storage.set('article_claims', claims);
+      },
+
+      delete: async (claimId) => {
+        const claims = await Storage.claims.getAll();
+        delete claims[claimId];
+        return await Storage.set('article_claims', claims);
+      }
+    },
+
     // Relay configuration
     relays: {
       get: async () => {
@@ -854,12 +884,14 @@
       const entities = await Storage.get('entity_registry', {});
       const relays = await Storage.get('relay_config', {});
       const sync = await Storage.get('entity_last_sync', 0);
+      const claims = await Storage.get('article_claims', {});
 
       const identitySize = JSON.stringify(identity || '').length;
       const entitiesSize = JSON.stringify(entities || '').length;
       const relaysSize = JSON.stringify(relays || '').length;
       const syncSize = JSON.stringify(sync || '').length;
-      const totalBytes = identitySize + entitiesSize + relaysSize + syncSize;
+      const claimsSize = JSON.stringify(claims || '').length;
+      const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize;
 
       return {
         totalBytes,
@@ -867,7 +899,8 @@
           identity: identitySize,
           entities: entitiesSize,
           relays: relaysSize,
-          sync: syncSize
+          sync: syncSize,
+          claims: claimsSize
         }
       };
     }
@@ -1481,6 +1514,7 @@
           <button class="nac-btn-entity-type" data-type="organization" aria-label="Tag as Organization">🏢 Org</button>
           <button class="nac-btn-entity-type" data-type="place" aria-label="Tag as Place">📍 Place</button>
           <button class="nac-btn-entity-type" data-type="thing" aria-label="Tag as Thing">🔷 Thing</button>
+          <button class="nac-btn-entity-type nac-btn-claim-type" data-type="claim" aria-label="Extract as Claim">📋 Claim</button>
         </div>
         <div id="nac-entity-search-results"></div>
       `;
@@ -1489,7 +1523,13 @@
       
       // Event listeners
       document.querySelectorAll('.nac-btn-entity-type').forEach(btn => {
-        btn.addEventListener('click', () => EntityTagger.selectType(btn.dataset.type));
+        btn.addEventListener('click', () => {
+          if (btn.dataset.type === 'claim') {
+            ClaimExtractor.showForm(text, EntityTagger.popover);
+          } else {
+            EntityTagger.selectType(btn.dataset.type);
+          }
+        });
       });
       
       // Click outside to close
@@ -1668,6 +1708,211 @@
         chip.remove();
         ReaderView.entities = ReaderView.entities.filter(e => e.entity_id !== entity.id);
       });
+    }
+  };
+
+  // ============================================
+  // SECTION 6C: CLAIM EXTRACTOR
+  // ============================================
+
+  const ClaimExtractor = {
+    // Show the claim extraction form inside the popover
+    showForm: (text, popover) => {
+      const truncated = text.length > CONFIG.tagging.max_claim_length
+        ? text.substring(0, CONFIG.tagging.max_claim_length) + '…'
+        : text;
+
+      popover.innerHTML = `
+        <div class="nac-claim-form" role="form" aria-label="Extract claim">
+          <div class="nac-claim-form-title">📋 Extract Claim</div>
+          <div class="nac-claim-form-text">"${Utils.escapeHtml(truncated)}"</div>
+          <div class="nac-claim-form-field">
+            <label for="nac-claim-type">Type:</label>
+            <select id="nac-claim-type" class="nac-form-select" aria-label="Claim type">
+              <option value="factual">Factual</option>
+              <option value="causal">Causal</option>
+              <option value="evaluative">Evaluative</option>
+              <option value="predictive">Predictive</option>
+            </select>
+          </div>
+          <div class="nac-claim-form-field">
+            <label class="nac-claim-crux-label">
+              <input type="checkbox" id="nac-claim-crux" aria-label="Mark as key claim (crux)">
+              This is a key claim (crux)
+            </label>
+          </div>
+          <div class="nac-claim-form-actions">
+            <button class="nac-btn nac-btn-primary" id="nac-claim-save" aria-label="Save claim">Save Claim</button>
+            <button class="nac-btn" id="nac-claim-cancel" aria-label="Cancel">Cancel</button>
+          </div>
+        </div>
+      `;
+
+      popover.querySelector('#nac-claim-save').addEventListener('click', async () => {
+        const type = popover.querySelector('#nac-claim-type').value;
+        const isCrux = popover.querySelector('#nac-claim-crux').checked;
+        await ClaimExtractor.saveClaim(text, type, isCrux);
+        EntityTagger.hide();
+      });
+
+      popover.querySelector('#nac-claim-cancel').addEventListener('click', () => {
+        EntityTagger.hide();
+      });
+    },
+
+    // Save a claim for the current article
+    saveClaim: async (text, type, isCrux) => {
+      if (!ReaderView.article) return;
+
+      const claimId = 'claim_' + await Crypto.sha256(ReaderView.article.url + text);
+
+      // Get surrounding paragraph for context
+      let context = '';
+      try {
+        const contentEl = document.getElementById('nac-content');
+        if (contentEl) {
+          const paragraphs = contentEl.querySelectorAll('p');
+          for (const p of paragraphs) {
+            if (p.textContent.includes(text.substring(0, 40))) {
+              context = p.textContent.substring(0, 300);
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        // Context extraction is optional
+      }
+
+      const identity = await Storage.identity.get();
+
+      const claim = {
+        id: claimId,
+        text: text,
+        type: type,
+        is_crux: isCrux,
+        source_url: ReaderView.article.url,
+        source_title: ReaderView.article.title || 'Untitled',
+        context: context,
+        created_at: Date.now(),
+        created_by: identity?.pubkey || 'local'
+      };
+
+      await Storage.claims.save(claim);
+
+      // Add to in-memory claims list
+      if (!ReaderView.claims.find(c => c.id === claimId)) {
+        ReaderView.claims.push(claim);
+      } else {
+        // Update existing
+        const idx = ReaderView.claims.findIndex(c => c.id === claimId);
+        ReaderView.claims[idx] = claim;
+      }
+
+      ClaimExtractor.refreshClaimsBar();
+      Utils.showToast(`Claim saved: ${text.substring(0, 50)}…`, 'success');
+    },
+
+    // Remove a claim
+    removeClaim: async (claimId) => {
+      await Storage.claims.delete(claimId);
+      ReaderView.claims = ReaderView.claims.filter(c => c.id !== claimId);
+      ClaimExtractor.refreshClaimsBar();
+      Utils.showToast('Claim removed', 'info');
+    },
+
+    // Toggle crux status for a claim
+    toggleCrux: async (claimId) => {
+      const claim = ReaderView.claims.find(c => c.id === claimId);
+      if (!claim) return;
+      claim.is_crux = !claim.is_crux;
+      await Storage.claims.save(claim);
+      ClaimExtractor.refreshClaimsBar();
+      Utils.showToast(claim.is_crux ? 'Marked as crux claim' : 'Unmarked as crux claim', 'info');
+    },
+
+    // Refresh the claims bar UI
+    refreshClaimsBar: () => {
+      const bar = document.getElementById('nac-claims-bar');
+      if (!bar) return;
+
+      const claims = ReaderView.claims || [];
+      const countEl = bar.querySelector('.nac-claims-count');
+      if (countEl) countEl.textContent = claims.length;
+
+      const chipsEl = bar.querySelector('.nac-claims-chips');
+      if (!chipsEl) return;
+
+      // Update toolbar badge
+      const toolbarBadge = document.getElementById('nac-claims-badge');
+      if (toolbarBadge) {
+        toolbarBadge.textContent = claims.length;
+        toolbarBadge.style.display = claims.length > 0 ? 'inline-flex' : 'none';
+      }
+
+      if (claims.length === 0) {
+        chipsEl.innerHTML = '<div class="nac-claims-empty">No claims extracted yet. Select text and click 📋 Claim.</div>';
+        return;
+      }
+
+      const typeColors = {
+        factual: 'nac-claim-type-factual',
+        causal: 'nac-claim-type-causal',
+        evaluative: 'nac-claim-type-evaluative',
+        predictive: 'nac-claim-type-predictive'
+      };
+
+      const typeLabels = {
+        factual: 'Factual',
+        causal: 'Causal',
+        evaluative: 'Evaluative',
+        predictive: 'Predictive'
+      };
+
+      chipsEl.innerHTML = claims.map(claim => {
+        const cruxIcon = claim.is_crux ? '<span class="nac-claim-crux-icon" title="Key claim (crux)">🔑</span> ' : '';
+        const truncatedText = claim.text.length > 80
+          ? Utils.escapeHtml(claim.text.substring(0, 80)) + '…'
+          : Utils.escapeHtml(claim.text);
+        const typeClass = typeColors[claim.type] || 'nac-claim-type-factual';
+        const typeLabel = typeLabels[claim.type] || 'Factual';
+
+        return `
+          <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="${Utils.escapeHtml(claim.text)}" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
+            <span class="nac-claim-text">${cruxIcon}${truncatedText}</span>
+            <span class="nac-claim-type-badge ${typeClass}">${typeLabel}</span>
+            <button class="nac-claim-remove" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Remove claim">✕</button>
+          </div>
+        `;
+      }).join('');
+
+      // Attach event listeners
+      chipsEl.querySelectorAll('.nac-claim-chip').forEach(chip => {
+        chip.addEventListener('click', (e) => {
+          if (e.target.classList.contains('nac-claim-remove')) return;
+          ClaimExtractor.toggleCrux(chip.dataset.claimId);
+        });
+        chip.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            if (e.target.classList.contains('nac-claim-remove')) return;
+            ClaimExtractor.toggleCrux(chip.dataset.claimId);
+          }
+        });
+      });
+
+      chipsEl.querySelectorAll('.nac-claim-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          ClaimExtractor.removeClaim(btn.dataset.claimId);
+        });
+      });
+    },
+
+    // Load claims for a URL and initialize the bar
+    loadForArticle: async (url) => {
+      const claims = await Storage.claims.getForUrl(url);
+      ReaderView.claims = claims;
+      ClaimExtractor.refreshClaimsBar();
     }
   };
 
@@ -2119,7 +2364,7 @@
   
   const EventBuilder = {
     // Build NIP-23 article event (kind 30023)
-    buildArticleEvent: async (article, entities, userPubkey) => {
+    buildArticleEvent: async (article, entities, userPubkey, claims = []) => {
       // Convert content to markdown, preserving formatting and images
       let content = article.content;
       if (content && content.includes('<')) {
@@ -2177,6 +2422,17 @@
         }
       }
       
+      // Add claim tags
+      if (Array.isArray(claims)) {
+        for (const claim of claims) {
+          if (claim.is_crux) {
+            tags.push(['claim', claim.text, claim.type, 'crux']);
+          } else {
+            tags.push(['claim', claim.text, claim.type]);
+          }
+        }
+      }
+
       // Add topic tags
       tags.push(['t', 'article']);
       if (article.domain) {
@@ -2450,6 +2706,7 @@
     container: null,
     article: null,
     entities: [],
+    claims: [],
     editMode: false,
     markdownMode: false,
     previewMode: false,
@@ -2460,6 +2717,7 @@
     show: async (article) => {
       ReaderView.article = article;
       ReaderView.entities = [];
+      ReaderView.claims = [];
       
       // Hide original page content by hiding each child element,
       // rather than hiding the body itself (which would also hide our reader view)
@@ -2488,6 +2746,7 @@
             <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published" aria-label="Preview as published">👁 Preview</button>
             <button class="nac-btn-toolbar" id="nac-edit-btn" aria-label="Edit article">Edit</button>
             <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing" aria-label="Toggle markdown editor">📝 Markdown</button>
+            <button class="nac-btn-toolbar" id="nac-claims-btn" title="Claims" aria-label="Toggle claims section">📋 <span id="nac-claims-badge" class="nac-claims-badge" style="display:none;">0</span></button>
             <button class="nac-btn-toolbar nac-btn-primary" id="nac-publish-btn" aria-label="Publish article to NOSTR">Publish</button>
             <button class="nac-btn-toolbar" id="nac-settings-btn" aria-label="Settings">⚙</button>
           </div>
@@ -2530,6 +2789,16 @@
             </div>
             <button class="nac-btn-add-entity" id="nac-add-entity-btn" aria-label="Tag a new entity">+ Tag Entity</button>
           </div>
+          
+          <div class="nac-claims-bar" id="nac-claims-bar" aria-label="Extracted claims">
+            <div class="nac-claims-bar-header">
+              <span class="nac-claims-bar-title">📋 Claims (<span class="nac-claims-count">0</span>)</span>
+              <button class="nac-btn-add-claim" id="nac-add-claim-btn" aria-label="Add a claim by selecting text">+ Add Claim</button>
+            </div>
+            <div class="nac-claims-chips" role="list" aria-label="Extracted claims list">
+              <div class="nac-claims-empty">No claims extracted yet. Select text and click 📋 Claim.</div>
+            </div>
+          </div>
         </div>
       `;
       
@@ -2542,11 +2811,25 @@
       document.getElementById('nac-preview-btn').addEventListener('click', ReaderView.togglePreviewMode);
       document.getElementById('nac-publish-btn').addEventListener('click', ReaderView.showPublishPanel);
       document.getElementById('nac-settings-btn').addEventListener('click', ReaderView.showSettings);
+      document.getElementById('nac-claims-btn').addEventListener('click', () => {
+        const claimsBar = document.getElementById('nac-claims-bar');
+        if (claimsBar) {
+          const isHidden = claimsBar.style.display === 'none';
+          claimsBar.style.display = isHidden ? '' : 'none';
+          if (!isHidden) return;
+          claimsBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
       document.getElementById('nac-copy-url').addEventListener('click', () => {
         navigator.clipboard.writeText(ReaderView.article.url);
         Utils.showToast('URL copied to clipboard');
       });
       
+      // Add Claim button handler
+      document.getElementById('nac-add-claim-btn').addEventListener('click', () => {
+        Utils.showToast('Select text in the article, then click 📋 Claim in the popover', 'info');
+      });
+
       // Tag Entity button handler
       document.getElementById('nac-add-entity-btn').addEventListener('click', (e) => {
         const name = prompt('Enter entity name to tag:');
@@ -2713,6 +2996,9 @@
      } else {
        setTimeout(() => EntityAutoSuggest.scan(article), 500);
      }
+
+     // Load claims for this article
+     await ClaimExtractor.loadForArticle(article.url);
    },
 
     // Format a Unix timestamp as a readable date string
@@ -2825,9 +3111,10 @@
 
     // Hide reader view and restore original page
     hide: () => {
-      // Reset markdown/preview state
+      // Reset markdown/preview/claims state
       ReaderView.markdownMode = false;
       ReaderView.previewMode = false;
+      ReaderView.claims = [];
       ReaderView._originalContentHtml = null;
 
       if (ReaderView.container) {
@@ -3144,7 +3431,8 @@
       const event = await EventBuilder.buildArticleEvent(
         ReaderView.article,
         ReaderView.entities,
-        identity?.pubkey
+        identity?.pubkey,
+        ReaderView.claims
       );
       const eventJson = JSON.stringify(event, null, 2);
       const eventSizeKB = (new TextEncoder().encode(JSON.stringify(event)).length / 1024).toFixed(1);
@@ -3188,7 +3476,8 @@
         const event = await EventBuilder.buildArticleEvent(
           ReaderView.article,
           ReaderView.entities,
-          identity.pubkey
+          identity.pubkey,
+          ReaderView.claims
         );
         
         // Sign event
@@ -5570,6 +5859,237 @@
     .nac-publish-panel:focus,
     .nac-settings-panel:focus {
       outline: none;
+    }
+
+    /* Claims Bar */
+    .nac-claims-bar {
+      max-width: var(--reader-max-width, 680px);
+      margin: 24px auto 0;
+      padding-top: 20px;
+      border-top: 1px solid var(--nac-border);
+    }
+
+    .nac-claims-bar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .nac-claims-bar-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--nac-text-muted);
+    }
+
+    .nac-claims-count {
+      font-weight: 700;
+    }
+
+    .nac-btn-add-claim {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px dashed var(--nac-border);
+      background: transparent;
+      color: var(--nac-text-muted);
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .nac-btn-add-claim:hover {
+      background: var(--nac-bg);
+      color: var(--nac-text);
+    }
+
+    .nac-claims-chips {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .nac-claims-empty {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      padding: 12px 0;
+    }
+
+    .nac-claim-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--nac-surface);
+      border: 1px solid var(--nac-border);
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+
+    .nac-claim-chip:hover {
+      border-color: var(--nac-primary);
+    }
+
+    .nac-claim-crux {
+      border-color: #f59e0b;
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .nac-claim-crux:hover {
+      border-color: #d97706;
+    }
+
+    .nac-claim-text {
+      flex: 1;
+      font-size: 13px;
+      color: var(--nac-text);
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .nac-claim-crux-icon {
+      font-size: 12px;
+    }
+
+    .nac-claim-type-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .nac-claim-type-factual {
+      background: rgba(59, 130, 246, 0.15);
+      color: #3b82f6;
+    }
+
+    .nac-claim-type-causal {
+      background: rgba(139, 92, 246, 0.15);
+      color: #8b5cf6;
+    }
+
+    .nac-claim-type-evaluative {
+      background: rgba(249, 115, 22, 0.15);
+      color: #f97316;
+    }
+
+    .nac-claim-type-predictive {
+      background: rgba(34, 197, 94, 0.15);
+      color: #22c55e;
+    }
+
+    .nac-claim-remove {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      color: var(--nac-text-muted);
+      padding: 0 2px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    .nac-claim-remove:hover {
+      color: var(--nac-error);
+    }
+
+    .nac-claims-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--nac-primary);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      min-width: 16px;
+      height: 16px;
+      border-radius: 8px;
+      padding: 0 4px;
+      margin-left: 4px;
+    }
+
+    /* Claim Form (in popover) */
+    .nac-claim-form {
+      min-width: 280px;
+    }
+
+    .nac-claim-form-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--nac-text);
+    }
+
+    .nac-claim-form-text {
+      font-size: 13px;
+      color: var(--nac-text-muted);
+      font-style: italic;
+      margin-bottom: 12px;
+      padding: 8px;
+      background: var(--nac-bg);
+      border-radius: 6px;
+      max-height: 100px;
+      overflow-y: auto;
+      line-height: 1.4;
+    }
+
+    .nac-claim-form-field {
+      margin-bottom: 10px;
+    }
+
+    .nac-claim-form-field label {
+      font-size: 13px;
+      color: var(--nac-text);
+      margin-right: 8px;
+    }
+
+    .nac-claim-form-field select {
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      font-size: 13px;
+    }
+
+    .nac-claim-crux-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--nac-text);
+      cursor: pointer;
+    }
+
+    .nac-claim-form-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    /* Claim button in popover */
+    .nac-btn-claim-type {
+      border-color: #f59e0b !important;
+      color: #92400e;
+    }
+
+    .nac-btn-claim-type:hover {
+      background: rgba(245, 158, 11, 0.1) !important;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .nac-btn-claim-type {
+        color: #fbbf24;
+      }
+    }
+
+    .nac-claim-chip:focus-visible,
+    .nac-claim-remove:focus-visible,
+    .nac-btn-add-claim:focus-visible {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: 2px;
     }
   `;
 
