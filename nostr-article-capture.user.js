@@ -1746,13 +1746,13 @@
   // ============================================
 
   const ClaimExtractor = {
-    // Show the claim extraction form inside the popover
+    // Show the claim extraction form inside the popover (progressive disclosure)
     showForm: async (text, popover) => {
       const truncated = text.length > CONFIG.tagging.max_claim_length
         ? text.substring(0, CONFIG.tagging.max_claim_length) + '…'
         : text;
 
-      // Load entity data for claimant/subject dropdowns
+      // Load entity data for dropdowns
       const entityOptions = [];
       for (const ref of (ReaderView.entities || [])) {
         try {
@@ -1764,59 +1764,115 @@
         } catch (e) { /* skip unavailable entities */ }
       }
 
-      const claimantOptionsHtml = entityOptions.map(e =>
+      // Auto-match entities from claim text (case-insensitive)
+      const matchedEntities = entityOptions.filter(e =>
+        text.toLowerCase().includes(e.name.toLowerCase())
+      );
+      const autoSubject = matchedEntities.length >= 1 ? matchedEntities[0].id : '';
+      const autoObject = matchedEntities.length >= 2 ? matchedEntities[1].id : '';
+      const autoExpandAttribution = false;
+      const autoExpandStructure = matchedEntities.length > 0;
+
+      const entitySelectOptions = entityOptions.map(e =>
         `<option value="${Utils.escapeHtml(e.id)}">${e.emoji} ${Utils.escapeHtml(e.name)}</option>`
       ).join('');
 
-      const subjectCheckboxesHtml = entityOptions.map(e =>
-        `<label><input type="checkbox" value="${Utils.escapeHtml(e.id)}"> ${e.emoji} ${Utils.escapeHtml(e.name)}</label>`
+      const claimantOptionsHtml = entityOptions.map(e =>
+        `<option value="${Utils.escapeHtml(e.id)}">${e.emoji} ${Utils.escapeHtml(e.name)}</option>`
       ).join('');
 
       popover.innerHTML = `
         <div class="nac-claim-form" role="form" aria-label="Extract claim">
           <div class="nac-claim-form-title">📋 Extract Claim</div>
           <div class="nac-claim-form-text">"${Utils.escapeHtml(truncated)}"</div>
-          <div class="nac-claim-form-field">
-            <label for="nac-claim-type">Type:</label>
-            <select id="nac-claim-type" class="nac-form-select" aria-label="Claim type">
-              <option value="factual">Factual</option>
-              <option value="causal">Causal</option>
-              <option value="evaluative">Evaluative</option>
-              <option value="predictive">Predictive</option>
-            </select>
-          </div>
-          <div class="nac-claim-form-field">
+
+          <div class="nac-claim-form-field nac-claim-form-row">
+            <div class="nac-claim-form-row-left">
+              <label for="nac-claim-type">Type:</label>
+              <select id="nac-claim-type" class="nac-form-select" aria-label="Claim type">
+                <option value="factual">Factual</option>
+                <option value="causal">Causal</option>
+                <option value="evaluative">Evaluative</option>
+                <option value="predictive">Predictive</option>
+              </select>
+            </div>
             <label class="nac-claim-crux-label">
               <input type="checkbox" id="nac-claim-crux" aria-label="Mark as key claim (crux)">
-              This is a key claim (crux)
+              ☐ Key claim (crux)
             </label>
           </div>
+
           <div class="nac-claim-form-field nac-claim-confidence-field" id="nac-claim-confidence-field" style="display: none;">
             <label for="nac-claim-confidence">Confidence: <span id="nac-claim-confidence-value">50</span>%</label>
             <input type="range" id="nac-claim-confidence" min="0" max="100" value="50" class="nac-claim-confidence-range" aria-label="Confidence level">
           </div>
-          <div class="nac-claim-form-field">
-            <label for="nac-claim-attribution">Attribution:</label>
-            <select id="nac-claim-attribution" class="nac-form-select" aria-label="Claim attribution">
-              <option value="editorial">Editorial (article's own assertion)</option>
-              <option value="direct_quote">Direct Quote</option>
-              <option value="paraphrase">Paraphrase</option>
-              <option value="thesis">Article's Main Thesis</option>
-            </select>
+
+          <!-- Collapsible: Who Said It -->
+          <div class="nac-claim-section-header" data-section="attribution" aria-expanded="${autoExpandAttribution}" aria-controls="nac-claim-attribution-section" tabindex="0" role="button">
+            <span class="nac-claim-section-arrow">${autoExpandAttribution ? '▾' : '▸'}</span> Who Said It
           </div>
-          <div class="nac-claim-form-field">
-            <label for="nac-claim-claimant">Claimed by:</label>
-            <select id="nac-claim-claimant" class="nac-form-select" aria-label="Who made this claim">
-              <option value="">Article / Editorial Voice</option>
-              ${claimantOptionsHtml}
-            </select>
-          </div>
-          ${entityOptions.length > 0 ? `<div class="nac-claim-form-field">
-            <label>About:</label>
-            <div class="nac-claim-subjects" id="nac-claim-subjects" aria-label="What this claim is about">
-              ${subjectCheckboxesHtml}
+          <div class="nac-claim-section-body" id="nac-claim-attribution-section" style="display:${autoExpandAttribution ? '' : 'none'}">
+            <div class="nac-claim-form-field">
+              <label for="nac-claim-attribution">Attribution:</label>
+              <select id="nac-claim-attribution" class="nac-form-select" aria-label="Claim attribution">
+                <option value="editorial">Editorial (article's own assertion)</option>
+                <option value="direct_quote">Direct Quote</option>
+                <option value="paraphrase">Paraphrase</option>
+                <option value="thesis">Article's Main Thesis</option>
+              </select>
             </div>
-          </div>` : ''}
+            <div class="nac-claim-form-field">
+              <label for="nac-claim-claimant">Claimed by:</label>
+              <select id="nac-claim-claimant" class="nac-form-select" aria-label="Who made this claim">
+                <option value="">Article / Editorial Voice</option>
+                ${claimantOptionsHtml}
+              </select>
+            </div>
+            <div class="nac-claim-form-field" id="nac-claim-quote-date-field" style="display:none;">
+              <label for="nac-claim-quote-date">Quote date:</label>
+              <input type="date" id="nac-claim-quote-date" class="nac-form-input" aria-label="Date of quote or statement">
+            </div>
+          </div>
+
+          <!-- Collapsible: What It Says (sentence builder) -->
+          <div class="nac-claim-section-header" data-section="structure" aria-expanded="${autoExpandStructure}" aria-controls="nac-claim-structure-section" tabindex="0" role="button">
+            <span class="nac-claim-section-arrow">${autoExpandStructure ? '▾' : '▸'}</span> What It Says
+          </div>
+          <div class="nac-claim-section-body" id="nac-claim-structure-section" style="display:${autoExpandStructure ? '' : 'none'}">
+            <div class="nac-claim-sentence-builder">
+              <div class="nac-claim-sentence-slot">
+                <select id="nac-claim-subject" class="nac-form-select" aria-label="Subject entity">
+                  <option value="">Select subject…</option>
+                  ${entitySelectOptions}
+                </select>
+                <span class="nac-claim-sentence-label">subject</span>
+              </div>
+              <div class="nac-claim-sentence-slot">
+                <input id="nac-claim-predicate" list="nac-predicates" class="nac-form-input" placeholder="is, funds, causes…" aria-label="Predicate verb">
+                <datalist id="nac-predicates">
+                  <option value="is">
+                  <option value="causes">
+                  <option value="funds">
+                  <option value="prevents">
+                  <option value="supports">
+                  <option value="opposes">
+                  <option value="characterizes">
+                  <option value="employs">
+                  <option value="produces">
+                  <option value="regulates">
+                </datalist>
+                <span class="nac-claim-sentence-label">verb</span>
+              </div>
+              <div class="nac-claim-sentence-slot">
+                <select id="nac-claim-object" class="nac-form-select" aria-label="Object entity">
+                  <option value="">Select object…</option>
+                  ${entitySelectOptions}
+                </select>
+                <span class="nac-claim-sentence-label">object</span>
+              </div>
+            </div>
+          </div>
+
           <div class="nac-claim-form-actions">
             <button class="nac-btn nac-btn-primary" id="nac-claim-save" aria-label="Save claim">Save Claim</button>
             <button class="nac-btn" id="nac-claim-cancel" aria-label="Cancel">Cancel</button>
@@ -1824,29 +1880,76 @@
         </div>
       `;
 
-      // Toggle confidence slider visibility when crux is checked
+      // --- Auto-populate subject/object from entity matches ---
+      if (autoSubject) {
+        const subjectEl = popover.querySelector('#nac-claim-subject');
+        if (subjectEl) subjectEl.value = autoSubject;
+      }
+      if (autoObject) {
+        const objectEl = popover.querySelector('#nac-claim-object');
+        if (objectEl) objectEl.value = autoObject;
+      }
+
+      // --- Section toggle handlers ---
+      popover.querySelectorAll('.nac-claim-section-header').forEach(header => {
+        const toggle = () => {
+          const section = header.dataset.section;
+          const bodyId = section === 'attribution' ? 'nac-claim-attribution-section' : 'nac-claim-structure-section';
+          const body = popover.querySelector('#' + bodyId);
+          const arrow = header.querySelector('.nac-claim-section-arrow');
+          if (!body) return;
+          const isHidden = body.style.display === 'none';
+          body.style.display = isHidden ? '' : 'none';
+          arrow.textContent = isHidden ? '▾' : '▸';
+          header.setAttribute('aria-expanded', String(isHidden));
+        };
+        header.addEventListener('click', toggle);
+        header.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        });
+      });
+
+      // --- Toggle confidence slider visibility when crux is checked ---
       popover.querySelector('#nac-claim-crux').addEventListener('change', (e) => {
         const confField = popover.querySelector('#nac-claim-confidence-field');
         if (confField) confField.style.display = e.target.checked ? '' : 'none';
       });
 
-      // Update confidence label as slider moves
+      // --- Update confidence label as slider moves ---
       const confRange = popover.querySelector('#nac-claim-confidence');
       const confLabel = popover.querySelector('#nac-claim-confidence-value');
       if (confRange && confLabel) {
         confRange.addEventListener('input', () => { confLabel.textContent = confRange.value; });
       }
 
+      // --- Conditional quote date visibility ---
+      const attrSelect = popover.querySelector('#nac-claim-attribution');
+      const quoteDateField = popover.querySelector('#nac-claim-quote-date-field');
+      if (attrSelect && quoteDateField) {
+        const updateQuoteDateVisibility = () => {
+          const val = attrSelect.value;
+          quoteDateField.style.display = (val === 'direct_quote' || val === 'paraphrase') ? '' : 'none';
+        };
+        attrSelect.addEventListener('change', updateQuoteDateVisibility);
+        updateQuoteDateVisibility();
+      }
+
+      // --- Save handler ---
       popover.querySelector('#nac-claim-save').addEventListener('click', async () => {
-        const type = popover.querySelector('#nac-claim-type').value;
-        const isCrux = popover.querySelector('#nac-claim-crux').checked;
-        const confidenceEl = popover.querySelector('#nac-claim-confidence');
-        const confidence = isCrux && confidenceEl ? parseInt(confidenceEl.value, 10) : null;
-        const attribution = popover.querySelector('#nac-claim-attribution')?.value || 'editorial';
-        const claimantEntityId = popover.querySelector('#nac-claim-claimant')?.value || null;
-        const subjectCheckboxes = popover.querySelectorAll('#nac-claim-subjects input[type="checkbox"]:checked');
-        const subjectEntityIds = Array.from(subjectCheckboxes).map(cb => cb.value);
-        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantEntityId, subjectEntityIds);
+        const type = document.getElementById('nac-claim-type').value;
+        const isCrux = document.getElementById('nac-claim-crux').checked;
+        const confidence = isCrux ? parseInt(document.getElementById('nac-claim-confidence')?.value) : null;
+        const attribution = document.getElementById('nac-claim-attribution')?.value || 'editorial';
+        const claimantId = document.getElementById('nac-claim-claimant')?.value || null;
+        const quoteDate = document.getElementById('nac-claim-quote-date')?.value || null;
+        const subjectId = document.getElementById('nac-claim-subject')?.value || null;
+        const predicate = document.getElementById('nac-claim-predicate')?.value || null;
+        const objectId = document.getElementById('nac-claim-object')?.value || null;
+
+        const subjectEntityIds = subjectId ? [subjectId] : [];
+        const objectEntityIds = objectId ? [objectId] : [];
+
+        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantId, subjectEntityIds, objectEntityIds, predicate, quoteDate);
         EntityTagger.hide();
       });
 
@@ -7126,9 +7229,10 @@
       margin-left: 4px;
     }
 
-    /* Claim Form (in popover) */
+    /* Claim Form (in popover) — progressive disclosure */
     .nac-claim-form {
-      min-width: 280px;
+      min-width: 300px;
+      max-width: 380px;
     }
 
     .nac-claim-form-title {
@@ -7146,7 +7250,7 @@
       padding: 8px;
       background: var(--nac-bg);
       border-radius: 6px;
-      max-height: 100px;
+      max-height: 80px;
       overflow-y: auto;
       line-height: 1.4;
     }
@@ -7155,13 +7259,28 @@
       margin-bottom: 10px;
     }
 
+    .nac-claim-form-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .nac-claim-form-row-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .nac-claim-form-field label {
       font-size: 13px;
       color: var(--nac-text);
-      margin-right: 8px;
+      margin-right: 4px;
     }
 
-    .nac-claim-form-field select {
+    .nac-claim-form-field select,
+    .nac-claim-form-field input[type="date"],
+    .nac-form-input {
       padding: 4px 8px;
       border-radius: 4px;
       border: 1px solid var(--nac-border);
@@ -7177,12 +7296,83 @@
       font-size: 13px;
       color: var(--nac-text);
       cursor: pointer;
+      white-space: nowrap;
     }
 
     .nac-claim-form-actions {
       display: flex;
       gap: 8px;
       margin-top: 12px;
+    }
+
+    /* Collapsible section headers */
+    .nac-claim-section-header {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 0;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--nac-text);
+      border-bottom: 1px solid var(--nac-border);
+      margin-bottom: 6px;
+      user-select: none;
+    }
+
+    .nac-claim-section-header:hover {
+      color: var(--nac-primary);
+    }
+
+    .nac-claim-section-header:focus-visible {
+      outline: 2px solid var(--nac-primary);
+      outline-offset: 2px;
+    }
+
+    .nac-claim-section-arrow {
+      display: inline-block;
+      width: 12px;
+      text-align: center;
+      font-size: 12px;
+    }
+
+    .nac-claim-section-body {
+      padding-left: 16px;
+      padding-bottom: 4px;
+    }
+
+    /* Sentence builder (subject-verb-object row) */
+    .nac-claim-sentence-builder {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
+    .nac-claim-sentence-slot {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    .nac-claim-sentence-slot select,
+    .nac-claim-sentence-slot input {
+      width: 100%;
+      padding: 4px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--nac-border);
+      background: var(--nac-surface);
+      color: var(--nac-text);
+      font-size: 12px;
+      box-sizing: border-box;
+    }
+
+    .nac-claim-sentence-label {
+      font-size: 10px;
+      color: var(--nac-text-muted);
+      text-align: center;
+      margin-top: 2px;
     }
 
     /* Claim button in popover */
