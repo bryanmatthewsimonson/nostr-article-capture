@@ -1,6 +1,6 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures web articles into a clean reader view wi
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.6.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.6.1-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
   </a>
 </p>
 
@@ -63,21 +63,22 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 ### 📋 Claim Extraction
 
 - **📋 Claim button** in the text selection popover — select any text and extract it as a claim
+- **Sentence builder** — subject and object fields accept both entity selections from the registry and freetext input, so claims can reference entities not yet in your registry
 - **Claim types** — classify claims as Factual, Causal, Evaluative, or Predictive
 - **Crux marking** — mark key claims as "crux" (the most important claims in an article)
 - **Confidence slider** — set confidence level (0–100%) on crux claims
 - **Enriched claims** — each claim captures:
   - **Claimant** — who made the claim (linked to an entity from the registry)
-  - **Subjects** — what the claim is about (one or more entities)
-  - **Objects** — what is asserted about the subject (e.g., "woke" in "Anthropic is woke")
+  - **Subjects** — what the claim is about (entity selection from registry OR freetext input via `subject_text`)
+  - **Objects** — what is asserted about the subject (entity selection OR freetext input via `object_text`, e.g., "woke" in "Anthropic is woke")
   - **Predicate** — relationship verb between subject and object ("is", "funds", "causes")
   - **Quote date** — when the statement was made (distinct from article publish date)
   - **Attribution type** — direct quote, paraphrase, editorial assertion, or article thesis
-  - **Structured claim triples** — `[Subject] → [Predicate] → [Object]` with entity references
+  - **Structured claim triples** — `[Subject] → [Predicate] → [Object]` with entity references or freetext
 - **Claims bar** — displays extracted claims with type badges, claimant labels, subject icons, and crux indicators below the article
 - **Click-to-toggle crux** — click any claim chip to toggle its crux status
 - **Per-URL persistence** — claims are stored per article URL and reloaded on revisit
-- **Claims published as kind 30040** — each claim is published as its own replaceable event with `claimant`/`subject` p-tags, `attribution`, `confidence`, and `crux` markers
+- **Claims published as kind 30040** — each claim is published as its own replaceable event with `claimant`/`subject`/`object` p-tags (for entity references) or freetext `subject`/`object` tags, plus `attribution`, `confidence`, and `crux` markers
 
 ### 🌐 View Others' Claims
 
@@ -240,7 +241,8 @@ Each claim is published as its own replaceable event with enriched metadata:
   "tags": [
     ["d", "claim_abc123"],
     ["r", "https://example.com/article"],
-    ["claim", "The unemployment rate dropped to 3.4% in January", "factual"],
+    ["claim-text", "The unemployment rate dropped to 3.4% in January"],
+    ["claim-type", "factual"],
     ["attribution", "direct_quote"],
     ["confidence", "85"],
     ["p", "<claimant-entity-pubkey>", "", "claimant"],
@@ -255,6 +257,13 @@ Each claim is published as its own replaceable event with enriched metadata:
   ],
   "content": "surrounding context text"
 }
+
+When subject or object is freetext (no entity in registry), the `p` tag is omitted and only the name tag appears:
+
+```json
+["subject", "some freetext subject"],
+["object", "some freetext object"]
+```
 ```
 
 ### Evidence Links (Kind 30043)
