@@ -8,7 +8,7 @@ The v1 NOSTR Article Capture userscript had grown to 11,398 lines in a single fi
 
 The redesign replaced the modal/panel/sidebar approach with a full-page reader view that takes over the browser tab (like Firefox Reader View), providing a distraction-free reading experience with inline metadata tagging and one-click NOSTR archival.
 
-**v2 is now fully implemented** at ~7,722 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (21 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
+**v2 is now fully implemented** at ~7,722 lines in [`nostr-article-capture.user.js`](nostr-article-capture.user.js:1) with a comprehensive crypto test suite (65 tests) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and a NIP-44 test suite (5 tests) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -473,7 +473,7 @@ When an entity keypair is created, the script can publish a kind 0 profile event
 
 ### Entity Sync Event (kind 30078 — NIP-78)
 
-Entity data is synced across devices via NIP-78 application-specific events with NIP-04 encryption:
+Entity data is synced across devices via NIP-78 application-specific events with NIP-44 v2 encryption:
 
 ```javascript
 {
@@ -481,11 +481,13 @@ Entity data is synced across devices via NIP-78 application-specific events with
   pubkey: "<user-pubkey>",
   created_at: <unix-timestamp>,
   tags: [
-    ["d", "nac-entity-<entity-id>"],
-    ["L", "nostr-article-capture"],
-    ["l", "<entity-type>", "nostr-article-capture"]
+    ["d", "<entity-id>"],
+    ["client", "nostr-article-capture"],
+    ["entity-type", "<entity-type>"],
+    ["L", "nac/entity-sync"],
+    ["l", "v1", "nac/entity-sync"]
   ],
-  content: "<NIP-44 encrypted entity JSON>"
+  content: "<NIP-44 v2 encrypted entity JSON (base64)>"
 }
 // Signed with user's private key; content encrypted to user's own pubkey
 ```
@@ -521,7 +523,7 @@ Rather than relying on `@require` for crypto (ESM compatibility issues), the scr
 | NIP-44 encrypt | Not implemented | ChaCha20 + HKDF-SHA256 + HMAC ✅ |
 | NIP-44 decrypt | Not implemented | ChaCha20 + HKDF-SHA256 + HMAC (constant-time MAC) ✅ |
 
-Validated with 65 crypto tests (BIP-340 vectors) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and 21 NIP-44 tests (padding, ChaCha20, round-trip, conversation key) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
+Validated with 65 crypto tests (BIP-340 vectors) in [`tests/crypto-tests.js`](tests/crypto-tests.js:1) and 5 NIP-44 tests (ChaCha20 RFC 7539 vector, padding, pad/unpad roundtrip, encrypt/decrypt roundtrip, HMAC tamper detection) in [`tests/nip44-test.js`](tests/nip44-test.js:1).
 
 ---
 
@@ -534,7 +536,7 @@ Validated with 65 crypto tests (BIP-340 vectors) in [`tests/crypto-tests.js`](te
   - `generatePrivateKey()`, `getPublicKey()`, `hexToNpub()`/`npubToHex()`, `hexToNsec()`/`nsecToHex()`, `signEvent()`, `getEventHash()`, `verifySignature()`
   - NIP-04 `nip04Encrypt()` / `nip04Decrypt()` for entity sync
 - ✅ Section 3: Storage module (GM_getValue/GM_setValue wrapper, entity CRUD, identity CRUD, relay config CRUD, import/export)
-- ✅ Crypto test suite: 65 tests including BIP-340 official vectors; 21 NIP-44 tests
+- ✅ Crypto test suite: 65 tests including BIP-340 official vectors; 5 NIP-44 tests
 
 ### Phase 2: Content Extraction ✅ DONE
 - ✅ Readability integration (full library via `@require`)
@@ -595,7 +597,7 @@ Validated with 65 crypto tests (BIP-340 vectors) in [`tests/crypto-tests.js`](te
 - ✅ `makeKeyboardAccessible()` utility for non-button elements
 - ✅ Dark mode (full `prefers-color-scheme` support)
 - ✅ Crypto test suite (65 tests with BIP-340 vectors)
-- ✅ NIP-44 test suite (21 tests: padding, ChaCha20, HKDF, encrypt/decrypt round-trip)
+- ✅ NIP-44 test suite (5 tests: ChaCha20 RFC 7539 vector, padding, pad/unpad roundtrip, encrypt/decrypt roundtrip, HMAC tamper detection)
 
 ---
 
@@ -761,13 +763,13 @@ The project is a single userscript file plus supporting documentation and tests:
 ```
 nostr-article-capture.user.js    (~7,722 lines — main userscript)
 tests/crypto-tests.js            (65 tests — BIP-340 + crypto validation)
-tests/nip44-test.js              (21 tests — NIP-44 v2 padding, ChaCha20, HKDF, encrypt/decrypt)
+tests/nip44-test.js              (5 tests — NIP-44 v2 ChaCha20, padding, encrypt/decrypt, HMAC)
 plans/v2-redesign-plan.md        (this file)
 docs/                            (reference documentation)
   ├── article-complete-inventory.md
   ├── article-data-collection.md
   ├── data-model.md
-  ├── entity-auto-suggestion-design.md
+  ├── entity-hierarchy-design.md
   ├── entity-sync-design.md
   ├── nostr-nips-analysis.md
   └── tampermonkey-article-capture-plan.md
@@ -856,7 +858,7 @@ docs/                            (reference documentation)
 - Storage quota monitoring and display
 - Comprehensive keyboard accessibility (ARIA, focus trap, panel stack)
 - Graceful error handling on storage failures
-- NIP-44 test suite (21 tests)
+- NIP-44 test suite (5 tests)
 - Entity auto-suggestion (known entity matching + new entity discovery + suggestion bar UI)
 - Claim extraction system (📋 Claim button, claim types, crux marking, claims bar, per-URL persistence)
 - Claims in NOSTR events (claim tags in kind 30023: `["claim", text, type]` and `["claim", text, type, "crux"]`)

@@ -408,20 +408,12 @@ The v2 NOSTR Article Capture implementation uses the following NIPs:
 
 ## Summary
 
-This analysis recommends:
+**NIPs used in v2:** NIP-01, NIP-04, NIP-07, NIP-19, NIP-23, NIP-32, NIP-33, NIP-44, NIP-78
 
-**Use existing NIPs:**
-- NIP-01 (foundation)
-- NIP-10 (threading)
-- NIP-25 (simple reactions)
-- NIP-33 (replaceability)
-- NIP-51 (bookmark lists)
+**Event kinds implemented in v2:** 0, 30023, 30040, 30043, 30078, 32125
 
-**Define new event kinds (v1 proposals, not yet implemented):**
+**v1 proposed event kinds (not implemented):**
 - 32123: URL Annotations
 - 32124: Content Ratings
-- 32125: Entity References
 - 32126: Rating Aggregates
 - 32127: Fact Checks
-
-This approach maximizes compatibility with existing NOSTR infrastructure while providing the specialized functionality needed for decentralized content metadata and quality assessment.

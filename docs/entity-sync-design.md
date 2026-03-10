@@ -10,25 +10,16 @@ This document specifies how knowledge base entities (persons, organizations, pla
 
 ## Current State Analysis
 
-### What Exists
+### Implemented Modules
 
 | Module | Relevant Capabilities |
 |--------|----------------------|
-| [`Crypto`](../nostr-article-capture.user.js:191) | secp256k1 key generation, BIP-340 Schnorr signing/verification, SHA-256, bech32 npub/nsec encoding/decoding |
-| [`Storage.entities`](../nostr-article-capture.user.js:489) | `getAll()`, `get(id)`, `save(id, data)`, `delete(id)`, `search()`, `findByPubkey()`, `exportAll()`, `importAll()` |
-| [`RelayClient`](../nostr-article-capture.user.js:1248) | WebSocket connect/disconnect, `publish(event, relayUrls)` with OK response handling |
-| [`EventBuilder`](../nostr-article-capture.user.js:1355) | `buildArticleEvent()` (kind 30023), `buildProfileEvent()` (kind 0 — exists but never called) |
-| [`Storage.identity`](../nostr-article-capture.user.js:469) | User keypair (pubkey/privkey/npub/nsec) stored in GM_setValue |
-
-### What's Missing
-
-| Gap | Impact |
-|-----|--------|
-| No ECDH shared secret derivation | Cannot encrypt to self per NIP-04 |
-| No AES-256-CBC encrypt/decrypt | Cannot encrypt event content |
-| No REQ/subscription in `RelayClient` | Cannot fetch events from relays |
-| No EOSE handling | Cannot detect when relay has sent all matching events |
-| Import button not wired | Settings UI has the button but no file-picker handler |
+| [`Crypto`](../nostr-article-capture.user.js:66) | secp256k1 key generation, BIP-340 Schnorr signing/verification, SHA-256, bech32, ECDH, NIP-04, NIP-44 v2 (ChaCha20, HKDF, HMAC) |
+| [`Storage.entities`](../nostr-article-capture.user.js:667) | `getAll()`, `get(id)`, `save(id, data)`, `delete(id)`, `search()`, `findByPubkey()`, `exportAll()`, `importAll()` |
+| [`RelayClient`](../nostr-article-capture.user.js:2858) | WebSocket connect/disconnect with retry/backoff, `publish()`, `subscribe()` with REQ/EOSE |
+| [`EventBuilder`](../nostr-article-capture.user.js:3037) | `buildArticleEvent()` (30023), `buildProfileEvent()` (0), `buildClaimEvent()` (30040), `buildEvidenceLinkEvent()` (30043), `buildEntitySyncEvent()` (30078), `buildEntityRelationshipEvent()` (32125) |
+| [`EntitySync`](../nostr-article-capture.user.js:3258) | `push()`, `pull()`, `mergeEntities()`, `validateEntity()` |
+| [`Storage.identity`](../nostr-article-capture.user.js:667) | User keypair (pubkey/privkey/npub/nsec) stored in GM_setValue |
 
 ---
 
@@ -272,7 +263,7 @@ sequenceDiagram
     S-->>UI: user identity with privkey
 
     loop For each entity
-        UI->>C: Crypto.nip04Encrypt - JSON of entity, user shared secret
+        UI->>C: Crypto.nip44Encrypt - JSON of entity, conversation key
         C-->>UI: encrypted content string
         UI->>EB: EventBuilder.buildEntitySyncEvent - entity id, encrypted content, entity type
         EB-->>UI: unsigned kind 30078 event
@@ -301,10 +292,10 @@ sequenceDiagram
 1. User clicks **"Push to NOSTR"** in the Settings panel
 2. Load all entities from `Storage.entities.getAll()`
 3. Load user identity from `Storage.identity.get()` — must have `privkey`
-4. Derive ECDH shared secret (user privkey × user pubkey point)
+4. Derive NIP-44 conversation key (HKDF-extract of ECDH shared secret)
 5. For each entity:
    a. Serialize entity to JSON
-   b. Encrypt with NIP-04 using shared secret
+   b. Encrypt with NIP-44 v2 using conversation key
    c. Build kind 30078 event with `d` tag = entity ID
    d. Sign with user's private key (BIP-340 Schnorr)
    e. Publish to all enabled write-relays
@@ -341,7 +332,7 @@ sequenceDiagram
     UI->>UI: Deduplicate events by d-tag - keep newest created_at per d-tag
 
     loop For each received event
-        UI->>C: Crypto.nip04Decrypt - event.content, user shared secret
+        UI->>C: Crypto.nip44Decrypt (fallback: nip04Decrypt) - event.content, conversation key
         C-->>UI: decrypted entity JSON
         UI->>UI: Parse and validate entity structure
     end
@@ -370,7 +361,7 @@ sequenceDiagram
 5. Collect EVENT responses until EOSE or timeout (15s)
 6. Send CLOSE to clean up subscription
 7. Deduplicate across relays: for same `d` tag, keep event with highest `created_at`
-8. Derive ECDH shared secret
+8. Derive NIP-44 conversation key (HKDF-extract of ECDH shared secret)
 9. For each event:
    a. Decrypt content with NIP-44 (fall back to NIP-04 for older events)
    b. Parse JSON, validate entity structure (must have id, type, name, keypair)
@@ -579,7 +570,7 @@ Add an **"Entity Sync"** section to the existing settings panel ([`ReaderView.sh
 ### Encryption Errors
 
 - If ECDH shared secret derivation fails (invalid key), abort the entire operation and show an error.
-- If AES encryption fails for a single entity, skip it, log the error, continue with remaining entities.
+- If NIP-44 encryption fails for a single entity, skip it, log the error, continue with remaining entities.
 
 ### Network Errors
 
@@ -608,23 +599,21 @@ Invalid entities are skipped with a warning toast.
 
 ---
 
-## Implementation Plan
+## Implementation Plan — All Complete ✅
 
-### New Module: `EntitySync`
+> **Status**: All modules described below have been implemented. This section is retained as a historical reference for the design decisions.
 
-Add a new Section between [`EventBuilder`](../nostr-article-capture.user.js:1355) (Section 8) and [`ReaderView`](../nostr-article-capture.user.js:1452) (Section 9):
+### Module: `EntitySync` (Section 8.5)
 
-```
-SECTION 8.5: ENTITY SYNC
-```
+Located between [`EventBuilder`](../nostr-article-capture.user.js:3037) (Section 8) and [`ReaderView`](../nostr-article-capture.user.js:3462) (Section 9).
 
-### Changes by Module
+### Implemented Crypto Methods
 
-#### 1. `Crypto` Module — Add NIP-04 Encryption
+#### 1. `Crypto` Module — NIP-04 + NIP-44 Encryption ✅
 
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 2 (around line 416)
+**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 2
 
-Add these methods to the `Crypto` object:
+Implemented methods in the `Crypto` object:
 
 | Method | Purpose |
 |--------|---------|
@@ -636,131 +625,42 @@ Add these methods to the `Crypto` object:
 | `Crypto.nip44Encrypt(plaintext, conversationKey)` | NIP-44 v2 encrypt: ChaCha20 + HMAC + padding. |
 | `Crypto.nip44Decrypt(payload, conversationKey)` | NIP-44 v2 decrypt with constant-time HMAC verification. |
 
-#### 2. `RelayClient` Module — Add Subscription Support
+#### 2. `RelayClient` Module — Subscription Support ✅
 
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 7 (around line 1343)
-
-Add this method:
+**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 7
 
 | Method | Purpose |
 |--------|---------|
-| `RelayClient.subscribe(filter, relayUrls, options)` | Send REQ, collect EVENTs, resolve on EOSE or timeout. Returns array of events. Options: `{ timeout: 15000, idleTimeout: 10000 }` |
+| `RelayClient.subscribe(filter, relayUrls, options)` | Send REQ, collect EVENTs, resolve on EOSE or timeout. Returns array of events. |
 
-**Implementation sketch:**
+#### 3. `EventBuilder` Module — Entity Sync Event Builder ✅
 
-```javascript
-subscribe: async (filter, relayUrls, options = {}) => {
-    const timeout = options.timeout || 15000;
-    const idleTimeout = options.idleTimeout || 10000;
-    const events = [];
-    const subId = Crypto.bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
-    
-    for (const url of relayUrls) {
-        try {
-            const ws = await RelayClient.connect(url);
-            ws.send(JSON.stringify(['REQ', subId, filter]));
-            
-            await new Promise((resolve) => {
-                let idleTimer = setTimeout(resolve, idleTimeout);
-                const totalTimer = setTimeout(resolve, timeout);
-                
-                const handler = (e) => {
-                    const data = JSON.parse(e.data);
-                    if (data[0] === 'EVENT' && data[1] === subId) {
-                        events.push(data[2]);
-                        clearTimeout(idleTimer);
-                        idleTimer = setTimeout(resolve, idleTimeout);
-                    } else if (data[0] === 'EOSE' && data[1] === subId) {
-                        clearTimeout(idleTimer);
-                        clearTimeout(totalTimer);
-                        ws.removeEventListener('message', handler);
-                        resolve();
-                    }
-                };
-                ws.addEventListener('message', handler);
-            });
-            
-            ws.send(JSON.stringify(['CLOSE', subId]));
-        } catch (e) {
-            console.error('[NAC RelayClient] Subscribe error:', url, e);
-        }
-    }
-    
-    return events;
-}
-```
-
-#### 3. `EventBuilder` Module — Add Entity Sync Event Builder
-
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 8 (around line 1445)
-
-Add this method:
+**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 8
 
 | Method | Purpose |
 |--------|---------|
 | `EventBuilder.buildEntitySyncEvent(entityId, encryptedContent, entityType, userPubkey)` | Build kind 30078 event with appropriate tags |
 
-#### 4. New `EntitySync` Module
+#### 4. `EntitySync` Module ✅
 
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — New Section 8.5
+**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 8.5
 
 | Method | Purpose |
 |--------|---------|
-| `EntitySync.push(options)` | Encrypt and publish all entities to relays. Options: `{ publishProfiles: false, onProgress: fn }` |
-| `EntitySync.pull(options)` | Fetch, decrypt, validate, and merge entities from relays. Options: `{ onProgress: fn }` |
+| `EntitySync.push(options)` | NIP-44 encrypt and publish all entities to relays |
+| `EntitySync.pull(options)` | Fetch, NIP-44 decrypt (NIP-04 fallback), validate, and merge entities from relays |
 | `EntitySync.mergeEntities(local, remote)` | Apply merge strategy: last-write-wins + article union |
-| `EntitySync.validateEntity(entity)` | Validate entity structure after decryption |
+| `EntitySync.validateEntity(entity)` | Validate entity structure after decryption (accepts `canonical_id` field) |
 
-#### 5. `ReaderView.showSettings()` — Add Identity Import + Sync UI
+#### 5. Settings UI — Identity Import + Sync ✅
 
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 9 (around line 1803)
+**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 9
 
-Changes:
-- **Identity setup (no identity):** Add nsec text input + "Import Private Key" button alongside existing NIP-07 and Generate options
-- **Identity display (has identity with privkey):** Add "Show nsec" / "Copy nsec" buttons with security hint about cross-browser usage
-- **Entity Sync section:** Add sync UI with Push/Pull buttons and status area
-- Wire up all event handlers
-
-#### 6. `Storage.entities` — Add Sync Metadata
-
-**File:** [`nostr-article-capture.user.js`](../nostr-article-capture.user.js) — Section 3 (around line 562)
-
-Add:
-
-| Method | Purpose |
-|--------|---------|
-| `Storage.entities.getLastSyncTime()` | Get timestamp of last successful sync |
-| `Storage.entities.setLastSyncTime(timestamp)` | Store timestamp after successful sync |
-
-Uses GM key `"entity_last_sync"`.
-
-### Implementation Order
-
-```mermaid
-flowchart TD
-    A[1. Crypto: liftX + getSharedSecret] --> B[2. Crypto: nip04Encrypt + nip04Decrypt]
-    B --> C[3. RelayClient: subscribe method]
-    C --> D[4. EventBuilder: buildEntitySyncEvent]
-    D --> E[5. EntitySync module: push + pull + merge]
-    E --> F[6. Settings UI: nsec import/export + sync section]
-    F --> G[7. Wire up entity file-import button]
-    G --> H[8. Testing: nsec import roundtrip, encrypt-decrypt, push-pull across browsers]
-```
-
-### Estimated Scope
-
-| Change | Lines of Code |
-|--------|---------------|
-| `Crypto` additions (liftX, ECDH, NIP-04) | ~80 |
-| `RelayClient.subscribe()` | ~50 |
-| `EventBuilder.buildEntitySyncEvent()` | ~20 |
-| `EntitySync` module | ~150 |
-| Settings UI: nsec import/export | ~50 |
-| Settings UI: entity sync section | ~80 |
-| Storage sync metadata | ~15 |
-| **Total** | **~445** |
-
-The existing codebase is ~2,545 lines, so this represents a ~17% increase — well within the "no major refactoring" constraint.
+Implemented:
+- **Identity setup:** nsec text input + "Import Private Key" button alongside NIP-07 and Generate options
+- **Identity display:** "Show nsec" / "Copy nsec" buttons with security hint
+- **Entity Sync section:** Push/Pull buttons with status area
+- All event handlers wired up
 
 ---
 
