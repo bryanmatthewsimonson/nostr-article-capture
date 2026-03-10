@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.5.0
+// @version      2.5.1
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -1856,7 +1856,7 @@
     },
 
     // Save a claim for the current article
-    saveClaim: async (text, type, isCrux, confidence = null, attribution = 'editorial', claimantEntityId = null, subjectEntityIds = []) => {
+    saveClaim: async (text, type, isCrux, confidence = null, attribution = 'editorial', claimantEntityId = null, subjectEntityIds = [], objectEntityIds = [], predicate = null, quoteDate = null) => {
       if (!ReaderView.article) return;
 
       const claimId = 'claim_' + await Crypto.sha256(ReaderView.article.url + text);
@@ -1888,6 +1888,9 @@
         confidence: confidence,
         claimant_entity_id: claimantEntityId || null,
         subject_entity_ids: Array.isArray(subjectEntityIds) ? subjectEntityIds : [],
+        object_entity_ids: Array.isArray(objectEntityIds) ? objectEntityIds : [],
+        predicate: predicate || null,
+        quote_date: quoteDate || null,
         attribution: attribution || 'editorial',
         source_url: ReaderView.article.url,
         source_title: ReaderView.article.title || 'Untitled',
@@ -3183,6 +3186,24 @@
           }
         }
       }
+      // Object entities
+      if (Array.isArray(claim.object_entity_ids) && entities) {
+        for (const oid of claim.object_entity_ids) {
+          const obj = entities[oid];
+          if (obj && obj.keypair) {
+            tags.push(['p', obj.keypair.pubkey, '', 'object']);
+            tags.push(['object', obj.name]);
+          }
+        }
+      }
+      // Predicate
+      if (claim.predicate) {
+        tags.push(['predicate', claim.predicate]);
+      }
+      // Quote date
+      if (claim.quote_date) {
+        tags.push(['quote-date', claim.quote_date]);
+      }
       return {
         kind: 30040,
         pubkey: userPubkey,
@@ -4441,6 +4462,12 @@
               const subject = entityRegistry[sid];
               if (subject && subject.keypair) {
                 relEvents.push(EventBuilder.buildEntityRelationshipEvent(subject, articleUrl, 'subject', identity.pubkey, claim.id));
+              }
+            }
+            for (const oid of (claim.object_entity_ids || [])) {
+              const obj = entityRegistry[oid];
+              if (obj && obj.keypair) {
+                relEvents.push(EventBuilder.buildEntityRelationshipEvent(obj, articleUrl, 'object', identity.pubkey, claim.id));
               }
             }
           }

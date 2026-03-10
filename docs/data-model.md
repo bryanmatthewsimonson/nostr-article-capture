@@ -1,6 +1,6 @@
 # NOSTR Article Capture — Data Model
 
-> **Version**: 2.5.0 — This document describes the data structures used in the current implementation.
+> **Version**: 2.5.1 — This document describes the data structures used in the current implementation.
 
 ## Entity Types
 
@@ -75,6 +75,9 @@ When an alias entity is tagged in an article, the canonical entity's pubkey is a
     confidence: 50,                 // Confidence level (0–100), shown when is_crux is true
     claimant_entity_id: "entity_abc123",  // Entity ID of who made the claim (or null for editorial voice)
     subject_entity_ids: ["entity_def456"], // Entity IDs of what the claim is about
+    object_entity_ids: [],          // Entity IDs of what is asserted about the subject (v2.5.1)
+    predicate: null,                // Verb/relationship: "is", "funds", "causes", etc. (v2.5.1)
+    quote_date: null,               // ISO date string: when the statement was made, not article date (v2.5.1)
     attribution: "direct_quote",    // direct_quote | paraphrase | editorial | thesis
     source_url: "https://...",      // URL of the article the claim was extracted from
     source_title: "Article Title",  // Title of the source article
@@ -103,6 +106,16 @@ When an alias entity is tagged in an article, the canonical entity's pubkey is a
 | **paraphrase** | A paraphrased statement attributed to a claimant |
 | **thesis** | The article's main thesis or central argument |
 
+**New Fields (v2.5.1):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **object_entity_ids** | `string[]` | `[]` | Entity IDs of what is asserted about the subject. E.g., in "Larry Summers funds Harvard", Harvard is the object. |
+| **predicate** | `string \| null` | `null` | The verb/relationship connecting subject to object: "is", "funds", "causes", "opposes", etc. |
+| **quote_date** | `string \| null` | `null` | ISO date string for when the statement was originally made (not the article publication date). E.g., `"2024-01-15"` for a quote from a January 15 speech reported in a February article. |
+
+These fields default to `null`/`[]` and are fully backward compatible — older claims without them continue to work.
+
 **Claims in NOSTR Events (kind 30040):**
 
 Each claim is published as its own replaceable event:
@@ -122,6 +135,10 @@ Each claim is published as its own replaceable event:
     ["claimant", "Larry Summers"],
     ["p", "<subject-entity-pubkey>", "", "subject"],
     ["subject", "Federal Reserve"],
+    ["p", "<object-entity-pubkey>", "", "object"],
+    ["object", "Monetary Policy"],
+    ["predicate", "opposes"],
+    ["quote-date", "2024-01-15"],
     ["client", "nostr-article-capture"]
   ],
   "content": "surrounding context text"
@@ -206,3 +223,4 @@ Kind 32125 events link entities to articles with typed relationships. These are 
 | **mentioned** | Entity is mentioned in the article |
 | **claimant** | Entity is the source of a specific claim (includes `claim-ref` tag) |
 | **subject** | Entity is the subject of a specific claim (includes `claim-ref` tag) |
+| **object** | Entity is the object of a specific claim — what is asserted about the subject (includes `claim-ref` tag, v2.5.1) |
