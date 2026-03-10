@@ -1768,13 +1768,13 @@
       const matchedEntities = entityOptions.filter(e =>
         text.toLowerCase().includes(e.name.toLowerCase())
       );
-      const autoSubject = matchedEntities.length >= 1 ? matchedEntities[0].id : '';
-      const autoObject = matchedEntities.length >= 2 ? matchedEntities[1].id : '';
+      const autoSubject = matchedEntities.length >= 1 ? `${matchedEntities[0].emoji} ${matchedEntities[0].name}` : '';
+      const autoObject = matchedEntities.length >= 2 ? `${matchedEntities[1].emoji} ${matchedEntities[1].name}` : '';
       const autoExpandAttribution = false;
       const autoExpandStructure = matchedEntities.length > 0;
 
-      const entitySelectOptions = entityOptions.map(e =>
-        `<option value="${Utils.escapeHtml(e.id)}">${e.emoji} ${Utils.escapeHtml(e.name)}</option>`
+      const entityDatalistOptions = entityOptions.map(e =>
+        `<option value="${e.emoji} ${Utils.escapeHtml(e.name)}">`
       ).join('');
 
       const claimantOptionsHtml = entityOptions.map(e =>
@@ -1828,10 +1828,6 @@
                 ${claimantOptionsHtml}
               </select>
             </div>
-            <div class="nac-claim-form-field" id="nac-claim-quote-date-field" style="display:none;">
-              <label for="nac-claim-quote-date">Quote date:</label>
-              <input type="date" id="nac-claim-quote-date" class="nac-form-input" aria-label="Date of quote or statement">
-            </div>
           </div>
 
           <!-- Collapsible: What It Says (sentence builder) -->
@@ -1841,10 +1837,10 @@
           <div class="nac-claim-section-body" id="nac-claim-structure-section" style="display:${autoExpandStructure ? '' : 'none'}">
             <div class="nac-claim-sentence-builder">
               <div class="nac-claim-sentence-slot">
-                <select id="nac-claim-subject" class="nac-form-select" aria-label="Subject entity">
-                  <option value="">Select subject…</option>
-                  ${entitySelectOptions}
-                </select>
+                <input type="text" id="nac-claim-subject" list="nac-claim-subject-list" placeholder="Entity or text…" class="nac-form-input" aria-label="Subject">
+                <datalist id="nac-claim-subject-list">
+                  ${entityDatalistOptions}
+                </datalist>
                 <span class="nac-claim-sentence-label">subject</span>
               </div>
               <div class="nac-claim-sentence-slot">
@@ -1864,12 +1860,16 @@
                 <span class="nac-claim-sentence-label">verb</span>
               </div>
               <div class="nac-claim-sentence-slot">
-                <select id="nac-claim-object" class="nac-form-select" aria-label="Object entity">
-                  <option value="">Select object…</option>
-                  ${entitySelectOptions}
-                </select>
+                <input type="text" id="nac-claim-object" list="nac-claim-object-list" placeholder="Entity or text…" class="nac-form-input" aria-label="Object">
+                <datalist id="nac-claim-object-list">
+                  ${entityDatalistOptions}
+                </datalist>
                 <span class="nac-claim-sentence-label">object</span>
               </div>
+            </div>
+            <div class="nac-claim-form-row" style="margin-top: 8px;">
+              <label for="nac-claim-date">When:</label>
+              <input type="date" id="nac-claim-date" class="nac-form-input" aria-label="Claim date">
             </div>
           </div>
 
@@ -1922,18 +1922,6 @@
         confRange.addEventListener('input', () => { confLabel.textContent = confRange.value; });
       }
 
-      // --- Conditional quote date visibility ---
-      const attrSelect = popover.querySelector('#nac-claim-attribution');
-      const quoteDateField = popover.querySelector('#nac-claim-quote-date-field');
-      if (attrSelect && quoteDateField) {
-        const updateQuoteDateVisibility = () => {
-          const val = attrSelect.value;
-          quoteDateField.style.display = (val === 'direct_quote' || val === 'paraphrase') ? '' : 'none';
-        };
-        attrSelect.addEventListener('change', updateQuoteDateVisibility);
-        updateQuoteDateVisibility();
-      }
-
       // --- Save handler ---
       popover.querySelector('#nac-claim-save').addEventListener('click', async () => {
         const type = document.getElementById('nac-claim-type').value;
@@ -1941,15 +1929,40 @@
         const confidence = isCrux ? parseInt(document.getElementById('nac-claim-confidence')?.value) : null;
         const attribution = document.getElementById('nac-claim-attribution')?.value || 'editorial';
         const claimantId = document.getElementById('nac-claim-claimant')?.value || null;
-        const quoteDate = document.getElementById('nac-claim-quote-date')?.value || null;
-        const subjectId = document.getElementById('nac-claim-subject')?.value || null;
+        const claimDate = document.getElementById('nac-claim-date')?.value || null;
         const predicate = document.getElementById('nac-claim-predicate')?.value || null;
-        const objectId = document.getElementById('nac-claim-object')?.value || null;
 
-        const subjectEntityIds = subjectId ? [subjectId] : [];
-        const objectEntityIds = objectId ? [objectId] : [];
+        // Resolve subject: entity match or freetext
+        const subjectInput = document.getElementById('nac-claim-subject')?.value?.trim() || '';
+        let subjectEntityIds = [];
+        let subjectText = null;
+        if (subjectInput) {
+          const matchedSubject = entityOptions.find(e =>
+            subjectInput === `${e.emoji} ${e.name}` || subjectInput === e.name || subjectInput.includes(e.name)
+          );
+          if (matchedSubject) {
+            subjectEntityIds = [matchedSubject.id];
+          } else {
+            subjectText = subjectInput;
+          }
+        }
 
-        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantId, subjectEntityIds, objectEntityIds, predicate, quoteDate);
+        // Resolve object: entity match or freetext
+        const objectInput = document.getElementById('nac-claim-object')?.value?.trim() || '';
+        let objectEntityIds = [];
+        let objectText = null;
+        if (objectInput) {
+          const matchedObject = entityOptions.find(e =>
+            objectInput === `${e.emoji} ${e.name}` || objectInput === e.name || objectInput.includes(e.name)
+          );
+          if (matchedObject) {
+            objectEntityIds = [matchedObject.id];
+          } else {
+            objectText = objectInput;
+          }
+        }
+
+        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantId, subjectEntityIds, objectEntityIds, predicate, claimDate, subjectText, objectText);
         EntityTagger.hide();
       });
 
@@ -1959,7 +1972,7 @@
     },
 
     // Save a claim for the current article
-    saveClaim: async (text, type, isCrux, confidence = null, attribution = 'editorial', claimantEntityId = null, subjectEntityIds = [], objectEntityIds = [], predicate = null, quoteDate = null) => {
+    saveClaim: async (text, type, isCrux, confidence = null, attribution = 'editorial', claimantEntityId = null, subjectEntityIds = [], objectEntityIds = [], predicate = null, quoteDate = null, subjectText = null, objectText = null) => {
       if (!ReaderView.article) return;
 
       const claimId = 'claim_' + await Crypto.sha256(ReaderView.article.url + text);
@@ -1992,6 +2005,8 @@
         claimant_entity_id: claimantEntityId || null,
         subject_entity_ids: Array.isArray(subjectEntityIds) ? subjectEntityIds : [],
         object_entity_ids: Array.isArray(objectEntityIds) ? objectEntityIds : [],
+        subject_text: subjectText || null,
+        object_text: objectText || null,
         predicate: predicate || null,
         quote_date: quoteDate || null,
         attribution: attribution || 'editorial',
@@ -2146,7 +2161,29 @@
         const attrBadge = attrLabel ? `<span class="nac-claim-attribution-badge">${attrLabel}</span>` : '';
 
         // Structured triple line (subject → predicate → object)
-        const hasStructure = (claim.subject_entity_ids?.length > 0 || claim.object_entity_ids?.length > 0) && claim.predicate;
+        // Resolve subject display: entity name or freetext
+        let subjectDisplay = '';
+        for (const sid of (claim.subject_entity_ids || [])) {
+          if (entityNameCache[sid]) {
+            const emojiForType = (t) => t === 'person' ? '👤' : t === 'organization' ? '🏢' : t === 'place' ? '📍' : t === 'thing' ? '🔷' : '•';
+            const sEmoji = emojiForType(entityTypeCache[sid]);
+            subjectDisplay += `${sEmoji} ${entityNameCache[sid]}`;
+          }
+        }
+        if (!subjectDisplay && claim.subject_text) subjectDisplay = claim.subject_text;
+
+        // Resolve object display: entity name or freetext
+        let objectDisplay = '';
+        for (const oid of (claim.object_entity_ids || [])) {
+          if (entityNameCache[oid]) {
+            const emojiForType = (t) => t === 'person' ? '👤' : t === 'organization' ? '🏢' : t === 'place' ? '📍' : t === 'thing' ? '🔷' : '•';
+            const oEmoji = emojiForType(entityTypeCache[oid]);
+            objectDisplay += `${oEmoji} ${entityNameCache[oid]}`;
+          }
+        }
+        if (!objectDisplay && claim.object_text) objectDisplay = claim.object_text;
+
+        const hasStructure = (subjectDisplay || objectDisplay) && claim.predicate;
         let tripleLine = '';
         if (hasStructure) {
           const emojiForType = (t) => t === 'person' ? '👤' : t === 'organization' ? '🏢' : t === 'place' ? '📍' : t === 'thing' ? '🔷' : '•';
@@ -2157,23 +2194,9 @@
             claimantPart = `<span class="nac-claim-triple-claimant">${cEmoji} ${Utils.escapeHtml(entityNameCache[claim.claimant_entity_id])} →</span> `;
           }
 
-          let subjectPart = '';
-          for (const sid of (claim.subject_entity_ids || [])) {
-            if (entityNameCache[sid]) {
-              const sEmoji = emojiForType(entityTypeCache[sid]);
-              subjectPart += `<span class="nac-claim-triple-subject">${sEmoji} ${Utils.escapeHtml(entityNameCache[sid])}</span> `;
-            }
-          }
-
+          const subjectPart = subjectDisplay ? `<span class="nac-claim-triple-subject">${Utils.escapeHtml(subjectDisplay)}</span> ` : '';
           const predicatePart = `<span class="nac-claim-triple-predicate">${Utils.escapeHtml(claim.predicate)}</span> `;
-
-          let objectPart = '';
-          for (const oid of (claim.object_entity_ids || [])) {
-            if (entityNameCache[oid]) {
-              const oEmoji = emojiForType(entityTypeCache[oid]);
-              objectPart += `<span class="nac-claim-triple-object">${oEmoji} ${Utils.escapeHtml(entityNameCache[oid])}</span> `;
-            }
-          }
+          const objectPart = objectDisplay ? `<span class="nac-claim-triple-object">${Utils.escapeHtml(objectDisplay)}</span> ` : '';
 
           let datePart = '';
           if (claim.quote_date) {
@@ -3323,8 +3346,8 @@
           tags.push(['claimant', claimant.name]);
         }
       }
-      // Subject entities
-      if (Array.isArray(claim.subject_entity_ids) && entities) {
+      // Subject entities or freetext
+      if (Array.isArray(claim.subject_entity_ids) && claim.subject_entity_ids.length > 0 && entities) {
         for (const sid of claim.subject_entity_ids) {
           const subject = entities[sid];
           if (subject && subject.keypair) {
@@ -3332,9 +3355,11 @@
             tags.push(['subject', subject.name]);
           }
         }
+      } else if (claim.subject_text) {
+        tags.push(['subject', claim.subject_text]);
       }
-      // Object entities
-      if (Array.isArray(claim.object_entity_ids) && entities) {
+      // Object entities or freetext
+      if (Array.isArray(claim.object_entity_ids) && claim.object_entity_ids.length > 0 && entities) {
         for (const oid of claim.object_entity_ids) {
           const obj = entities[oid];
           if (obj && obj.keypair) {
@@ -3342,6 +3367,8 @@
             tags.push(['object', obj.name]);
           }
         }
+      } else if (claim.object_text) {
+        tags.push(['object', claim.object_text]);
       }
       // Predicate
       if (claim.predicate) {
