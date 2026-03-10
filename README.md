@@ -1,6 +1,6 @@
 # NOSTR Article Capture
 
-![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures web articles into a clean reader view wi
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.5.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Article_Capture-2.5.1-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Article Capture" />
   </a>
 </p>
 
@@ -69,7 +69,11 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Enriched claims** — each claim captures:
   - **Claimant** — who made the claim (linked to an entity from the registry)
   - **Subjects** — what the claim is about (one or more entities)
+  - **Objects** — what is asserted about the subject (e.g., "woke" in "Anthropic is woke")
+  - **Predicate** — relationship verb between subject and object ("is", "funds", "causes")
+  - **Quote date** — when the statement was made (distinct from article publish date)
   - **Attribution type** — direct quote, paraphrase, editorial assertion, or article thesis
+  - **Structured claim triples** — `[Subject] → [Predicate] → [Object]` with entity references
 - **Claims bar** — displays extracted claims with type badges, claimant labels, subject icons, and crux indicators below the article
 - **Click-to-toggle crux** — click any claim chip to toggle its crux status
 - **Per-URL persistence** — claims are stored per article URL and reloaded on revisit
@@ -221,7 +225,7 @@ The userscript is a single self-contained file (~7,722 lines) organized into 17 
 |------|------|-------|
 | **0** | Profile Metadata (NIP-01) | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
 | **30023** | Long-form Article (NIP-23) | Published article content in Markdown with entity `p` tags and summary `claim` tags |
-| **30040** | Claim Event | Individual claim with claimant/subject `p` tags, attribution type, confidence, crux flag |
+| **30040** | Claim Event | Individual claim with claimant/subject/object `p` tags, predicate, quote-date, attribution type, confidence, crux flag |
 | **30043** | Evidence Link | Cross-article claim relationship: supports, contradicts, or contextualizes |
 | **30078** | Application Data (NIP-78) | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
 | **32125** | Entity Relationship | Links an entity to an article with a typed relationship (author, mentioned, claimant, subject) |
@@ -243,6 +247,10 @@ Each claim is published as its own replaceable event with enriched metadata:
     ["claimant", "Larry Summers"],
     ["p", "<subject-entity-pubkey>", "", "subject"],
     ["subject", "Federal Reserve"],
+    ["p", "<object-entity-pubkey>", "", "object"],
+    ["object", "unemployment rate"],
+    ["predicate", "dropped to"],
+    ["quote-date", "2024-01-15"],
     ["client", "nostr-article-capture"]
   ],
   "content": "surrounding context text"
