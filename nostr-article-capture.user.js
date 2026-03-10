@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.5.1
+// @version      2.6.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -2102,7 +2102,7 @@
       const entityNameCache = {};
       const entityTypeCache = {};
       for (const claim of claims) {
-        const idsToLoad = [...(claim.subject_entity_ids || [])];
+        const idsToLoad = [...(claim.subject_entity_ids || []), ...(claim.object_entity_ids || [])];
         if (claim.claimant_entity_id) idsToLoad.push(claim.claimant_entity_id);
         for (const eid of idsToLoad) {
           if (!entityNameCache[eid]) {
@@ -2145,6 +2145,49 @@
         const attrLabel = attributionLabels[claim.attribution];
         const attrBadge = attrLabel ? `<span class="nac-claim-attribution-badge">${attrLabel}</span>` : '';
 
+        // Structured triple line (subject → predicate → object)
+        const hasStructure = (claim.subject_entity_ids?.length > 0 || claim.object_entity_ids?.length > 0) && claim.predicate;
+        let tripleLine = '';
+        if (hasStructure) {
+          const emojiForType = (t) => t === 'person' ? '👤' : t === 'organization' ? '🏢' : t === 'place' ? '📍' : t === 'thing' ? '🔷' : '•';
+
+          let claimantPart = '';
+          if (claim.claimant_entity_id && entityNameCache[claim.claimant_entity_id]) {
+            const cEmoji = emojiForType(entityTypeCache[claim.claimant_entity_id]);
+            claimantPart = `<span class="nac-claim-triple-claimant">${cEmoji} ${Utils.escapeHtml(entityNameCache[claim.claimant_entity_id])} →</span> `;
+          }
+
+          let subjectPart = '';
+          for (const sid of (claim.subject_entity_ids || [])) {
+            if (entityNameCache[sid]) {
+              const sEmoji = emojiForType(entityTypeCache[sid]);
+              subjectPart += `<span class="nac-claim-triple-subject">${sEmoji} ${Utils.escapeHtml(entityNameCache[sid])}</span> `;
+            }
+          }
+
+          const predicatePart = `<span class="nac-claim-triple-predicate">${Utils.escapeHtml(claim.predicate)}</span> `;
+
+          let objectPart = '';
+          for (const oid of (claim.object_entity_ids || [])) {
+            if (entityNameCache[oid]) {
+              const oEmoji = emojiForType(entityTypeCache[oid]);
+              objectPart += `<span class="nac-claim-triple-object">${oEmoji} ${Utils.escapeHtml(entityNameCache[oid])}</span> `;
+            }
+          }
+
+          let datePart = '';
+          if (claim.quote_date) {
+            try {
+              const d = new Date(claim.quote_date);
+              if (!isNaN(d.getTime())) {
+                datePart = `<span class="nac-claim-triple-date">• ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>`;
+              }
+            } catch (e) { /* skip */ }
+          }
+
+          tripleLine = `<div class="nac-claim-triple">${claimantPart}${subjectPart}${predicatePart}${objectPart}${datePart}</div>`;
+        }
+
         return `
           <div class="nac-claim-chip${claim.is_crux ? ' nac-claim-crux' : ''}" data-claim-id="${Utils.escapeHtml(claim.id)}" title="Click text to edit · Click 🔑 to toggle crux" tabindex="0" role="button" aria-label="Claim: ${Utils.escapeHtml(claim.text.substring(0, 60))}">
             <span class="nac-claim-text-display" data-claim-id="${Utils.escapeHtml(claim.id)}">${cruxIcon}${confDisplay}${truncatedText}${claimantName}</span>
@@ -2154,6 +2197,7 @@
             <button class="nac-claim-link-btn" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Link evidence" title="Link evidence to another claim">🔗</button>
             <button class="nac-claim-crux-toggle" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Toggle crux" title="Toggle crux">🔑</button>
             <button class="nac-claim-remove" data-claim-id="${Utils.escapeHtml(claim.id)}" aria-label="Remove claim">✕</button>
+            ${tripleLine}
           </div>
           ${claim.is_crux ? `<div class="nac-claim-confidence-row" data-claim-id="${Utils.escapeHtml(claim.id)}">
             <label class="nac-claim-confidence-label">Confidence: <span class="nac-claim-conf-val">${claim.confidence != null ? claim.confidence : 50}%</span></label>
@@ -6988,6 +7032,7 @@
     .nac-claim-chip {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
       padding: 8px 12px;
       border-radius: 8px;
@@ -7212,6 +7257,39 @@
       font-size: 11px;
       flex-shrink: 0;
       letter-spacing: 1px;
+    }
+
+    .nac-claim-triple {
+      width: 100%;
+      font-size: 0.85em;
+      color: var(--nac-text-muted);
+      padding-left: 20px;
+      line-height: 1.4;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .nac-claim-triple-claimant {
+      color: var(--nac-text);
+    }
+
+    .nac-claim-triple-subject {
+      color: var(--nac-text);
+    }
+
+    .nac-claim-triple-predicate {
+      font-style: italic;
+      color: var(--nac-text-muted);
+    }
+
+    .nac-claim-triple-object {
+      color: var(--nac-text);
+    }
+
+    .nac-claim-triple-date {
+      color: var(--nac-text-muted);
+      font-size: 0.9em;
     }
 
     .nac-claims-badge {
