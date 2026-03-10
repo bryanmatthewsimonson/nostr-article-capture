@@ -1828,6 +1828,10 @@
                 ${claimantOptionsHtml}
               </select>
             </div>
+            <div class="nac-claim-form-field" id="nac-claim-quote-date-field" style="display:none;">
+              <label for="nac-claim-quote-date">Quote date:</label>
+              <input type="date" id="nac-claim-quote-date" class="nac-form-input" aria-label="Date of quote or statement">
+            </div>
           </div>
 
           <!-- Collapsible: What It Says (sentence builder) -->
@@ -1866,10 +1870,6 @@
                 </datalist>
                 <span class="nac-claim-sentence-label">object</span>
               </div>
-            </div>
-            <div class="nac-claim-form-row" style="margin-top: 8px;">
-              <label for="nac-claim-date">When:</label>
-              <input type="date" id="nac-claim-date" class="nac-form-input" aria-label="Claim date">
             </div>
           </div>
 
@@ -1922,6 +1922,18 @@
         confRange.addEventListener('input', () => { confLabel.textContent = confRange.value; });
       }
 
+      // --- Conditional quote date visibility ---
+      const attrSelect = popover.querySelector('#nac-claim-attribution');
+      const quoteDateField = popover.querySelector('#nac-claim-quote-date-field');
+      if (attrSelect && quoteDateField) {
+        const updateQuoteDateVisibility = () => {
+          const val = attrSelect.value;
+          quoteDateField.style.display = (val === 'direct_quote' || val === 'paraphrase') ? '' : 'none';
+        };
+        attrSelect.addEventListener('change', updateQuoteDateVisibility);
+        updateQuoteDateVisibility();
+      }
+
       // --- Save handler ---
       popover.querySelector('#nac-claim-save').addEventListener('click', async () => {
         const type = document.getElementById('nac-claim-type').value;
@@ -1929,7 +1941,7 @@
         const confidence = isCrux ? parseInt(document.getElementById('nac-claim-confidence')?.value) : null;
         const attribution = document.getElementById('nac-claim-attribution')?.value || 'editorial';
         const claimantId = document.getElementById('nac-claim-claimant')?.value || null;
-        const claimDate = document.getElementById('nac-claim-date')?.value || null;
+        const quoteDate = document.getElementById('nac-claim-quote-date')?.value || null;
         const predicate = document.getElementById('nac-claim-predicate')?.value || null;
 
         // Resolve subject: entity match or freetext
@@ -1962,7 +1974,7 @@
           }
         }
 
-        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantId, subjectEntityIds, objectEntityIds, predicate, claimDate, subjectText, objectText);
+        await ClaimExtractor.saveClaim(text, type, isCrux, confidence, attribution, claimantId, subjectEntityIds, objectEntityIds, predicate, quoteDate, subjectText, objectText);
         EntityTagger.hide();
       });
 
