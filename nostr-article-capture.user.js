@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.6.1
+// @version      2.7.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.6.1',
+    version: '2.7.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -943,6 +943,42 @@
     // Extract article using Readability (if available via @require)
     extractArticle: () => {
       try {
+        // Pre-process lazy-loaded images before cloning
+        document.querySelectorAll('img[data-src], img[data-lazy-src], img[data-original], img[data-lazy]').forEach(img => {
+            const lazySrc = img.dataset.src || img.dataset.lazySrc || img.dataset.original || img.dataset.lazy;
+            if (lazySrc && (!img.src || img.src.includes('data:') || img.src.includes('placeholder') || img.src.includes('blank'))) {
+                img.src = lazySrc;
+            }
+        });
+
+        // Handle srcset fallback for images without proper src
+        document.querySelectorAll('img[srcset]:not([src]), img[data-srcset]').forEach(img => {
+            const srcset = img.srcset || img.dataset.srcset;
+            if (srcset) {
+                const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+                if (firstUrl && (!img.src || img.src.includes('data:') || img.src.includes('placeholder'))) {
+                    img.src = firstUrl;
+                }
+            }
+        });
+
+        // Handle noscript image fallbacks (many sites put real images in noscript tags)
+        document.querySelectorAll('noscript').forEach(noscript => {
+            const temp = document.createElement('div');
+            temp.innerHTML = noscript.textContent || noscript.innerHTML;
+            const noscriptImgs = temp.querySelectorAll('img[src]');
+            noscriptImgs.forEach(nImg => {
+                const parent = noscript.parentElement;
+                if (parent) {
+                    const existingImg = parent.querySelector('img');
+                    if (existingImg && (!existingImg.src || existingImg.src.includes('data:') || existingImg.src.includes('placeholder'))) {
+                        existingImg.src = nImg.src;
+                        if (nImg.alt) existingImg.alt = nImg.alt;
+                    }
+                }
+            });
+        });
+
         // Clone document for Readability
         const documentClone = document.cloneNode(true);
         
@@ -970,6 +1006,9 @@
           
           // Extract featured image
           article.featuredImage = ContentExtractor.extractFeaturedImage();
+          
+          // Extract publication icon (favicon)
+          article.publicationIcon = ContentExtractor.extractPublicationIcon();
           
           return article;
         } else {
@@ -1169,27 +1208,39 @@
             turndown.use(turndownPluginGfm.gfm);
           }
 
-          // Preserve images with alt text and src
+          // Preserve images with alt text and src (with lazy-load fallback)
           turndown.addRule('images', {
             filter: 'img',
             replacement: (content, node) => {
-              const alt = node.getAttribute('alt') || '';
-              const src = node.getAttribute('src') || '';
-              const title = node.getAttribute('title');
-              if (!src) return '';
-              // Resolve relative URLs to absolute
-              let absoluteSrc = src;
-              try {
-                absoluteSrc = new URL(src, window.location.href).href;
-              } catch (e) { /* keep original */ }
-              if (title) {
-                return `![${alt}](${absoluteSrc} "${title}")`;
+              let src = node.getAttribute('src') || '';
+              
+              // Fallback to data-src, data-lazy-src, srcset
+              if (!src || src.includes('data:') || src.includes('placeholder') || src.includes('blank')) {
+                const dataSrc = node.getAttribute('data-src') || node.getAttribute('data-lazy-src') || node.getAttribute('data-original') || '';
+                const srcset = node.getAttribute('srcset') || node.getAttribute('data-srcset') || '';
+                
+                if (dataSrc) {
+                  src = dataSrc;
+                } else if (srcset) {
+                  src = srcset.split(',')[0].trim().split(/\s+/)[0];
+                }
               }
-              return `![${alt}](${absoluteSrc})`;
+              
+              if (!src) return '';
+              
+              // Resolve relative URL
+              try { src = new URL(src, window.location.href).href; } catch(e) {}
+              
+              const alt = node.getAttribute('alt') || '';
+              const title = node.getAttribute('title');
+              if (title) {
+                return `![${alt}](${src} "${title}")`;
+              }
+              return `![${alt}](${src})`;
             }
           });
 
-          // Preserve figure/figcaption as image + italic caption
+          // Preserve figure/figcaption as image + italic caption (with lazy-load fallback)
           turndown.addRule('figure', {
             filter: 'figure',
             replacement: (content, node) => {
@@ -1199,8 +1250,21 @@
               if (img) {
                 const alt = img.getAttribute('alt') || caption?.textContent?.trim() || '';
                 let src = img.getAttribute('src') || '';
+                
+                // Fallback to data-src, data-lazy-src, srcset
+                if (!src || src.includes('data:') || src.includes('placeholder') || src.includes('blank')) {
+                  const dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original') || '';
+                  const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
+                  
+                  if (dataSrc) {
+                    src = dataSrc;
+                  } else if (srcset) {
+                    src = srcset.split(',')[0].trim().split(/\s+/)[0];
+                  }
+                }
+                
                 try { src = new URL(src, window.location.href).href; } catch (e) { /* keep original */ }
-                result += `![${alt}](${src})`;
+                if (src) result += `![${alt}](${src})`;
               }
               if (caption) {
                 result += '\n*' + caption.textContent.trim() + '*';
@@ -1412,55 +1476,26 @@
       return html;
     },
 
-    // Convert image URL to base64
-    imageToBase64: async (imageUrl) => {
-      return new Promise((resolve) => {
-        try {
-          const absoluteUrl = new URL(imageUrl, window.location.href).href;
-          
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: absoluteUrl,
-            responseType: 'blob',
-            timeout: 30000,
-            onload: (response) => {
-              if (response.status >= 200 && response.status < 300) {
-                const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result);
-                reader.onerror = () => resolve(absoluteUrl);
-                reader.readAsDataURL(response.response);
-              } else {
-                resolve(absoluteUrl);
-              }
-            },
-            onerror: () => resolve(absoluteUrl),
-            ontimeout: () => resolve(absoluteUrl)
-          });
-        } catch (e) {
-          resolve(imageUrl);
-        }
-      });
-    },
-
-    // Embed images in markdown as base64
-    embedImagesInMarkdown: async (markdown) => {
-      const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-      const matches = [...markdown.matchAll(imageRegex)];
-      
-      if (matches.length === 0) return markdown;
-      
-      let result = markdown;
-      for (const match of matches) {
-        const [fullMatch, alt, url] = match;
-        if (url.startsWith('data:')) continue;
-        
-        const base64 = await ContentExtractor.imageToBase64(url);
-        if (base64 && base64.startsWith('data:')) {
-          result = result.replace(fullMatch, `![${alt}](${base64})`);
+    // Extract publication favicon/icon
+    extractPublicationIcon: () => {
+      const selectors = [
+        'link[rel="apple-touch-icon"][sizes="180x180"]',
+        'link[rel="apple-touch-icon"]',
+        'link[rel="icon"][sizes="192x192"]',
+        'link[rel="icon"][sizes="128x128"]',
+        'link[rel="icon"][type="image/png"]',
+        'link[rel="icon"]',
+        'link[rel="shortcut icon"]'
+      ];
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.href) {
+          try { return new URL(el.href, window.location.href).href; } catch(e) {}
         }
       }
-      
-      return result;
+      // Fallback to /favicon.ico
+      try { return new URL('/favicon.ico', window.location.href).href; } catch(e) {}
+      return null;
     }
   };
 
@@ -3283,6 +3318,14 @@
         }
       }
       
+      // Add publication branding tags
+      if (article.siteName) {
+        tags.push(['site_name', article.siteName]);
+      }
+      if (article.publicationIcon) {
+        tags.push(['icon', article.publicationIcon]);
+      }
+      
       // Add claim tags
       if (Array.isArray(claims)) {
         for (const claim of claims) {
@@ -3728,6 +3771,7 @@
               <div class="nac-article-meta">
                 <span class="nac-meta-author nac-editable-field" id="nac-author" data-field="byline" title="Click to edit author" role="button" tabindex="0" aria-label="Edit author — click to change">${Utils.escapeHtml(article.byline || 'Unknown Author')}</span>
                 <span class="nac-meta-separator">•</span>
+                <img class="nac-meta-icon" src="${Utils.escapeHtml(article.publicationIcon || '')}" onerror="this.style.display='none'" width="20" height="20" alt="">
                 <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication" role="button" tabindex="0" aria-label="Edit publication — click to change">${Utils.escapeHtml(article.siteName || article.domain || '')}</span>
                 <span class="nac-meta-separator">•</span>
                 <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date — click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
@@ -5721,6 +5765,15 @@
     
     .nac-meta-separator {
       opacity: 0.5;
+    }
+    
+    .nac-meta-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 3px;
+      margin-right: 6px;
+      vertical-align: middle;
+      object-fit: contain;
     }
     
     .nac-editable-field {
