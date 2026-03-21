@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.7.0
+// @version      2.7.1
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.7.0',
+    version: '2.7.1',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -61,6 +61,9 @@
       max_claim_length: 500
     }
   };
+
+  // Module-level FAB reference (FAB lives in Shadow DOM, so document.querySelector won't find it)
+  let _nacFabRef = null;
 
   // ============================================
   // SECTION 2: CRYPTO - secp256k1, bech32, BIP-340
@@ -4152,9 +4155,8 @@
       EntityAutoSuggest.destroy();
       RelayClient.disconnectAll();
 
-      // Return focus to the FAB button
-      const fab = document.querySelector('.nac-fab');
-      if (fab) fab.focus();
+      // Return focus to the FAB button (lives in Shadow DOM, use module-level ref)
+      if (_nacFabRef) _nacFabRef.focus();
     },
 
     // Toggle edit mode
@@ -5626,31 +5628,7 @@
       }
     }
     
-    /* FAB Button */
-    .nac-fab {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      background: var(--nac-primary);
-      border: none;
-      cursor: pointer;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 999999;
-      font-size: 24px;
-      color: white;
-      transition: all 0.3s ease;
-    }
-    
-    .nac-fab:hover {
-      background: var(--nac-primary-hover);
-      transform: scale(1.05);
-    }
+    /* FAB Button styles are inside Shadow DOM — see init() */
     
     /* Reader Container */
     .nac-reader-container {
@@ -5661,7 +5639,7 @@
       bottom: 0;
       background: var(--nac-bg);
       color: var(--nac-text);
-      z-index: 999998;
+      z-index: 2147483646;
       display: flex;
       flex-direction: column;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -7033,7 +7011,7 @@
     }
     
     /* Focus-visible styles for keyboard accessibility */
-    .nac-fab:focus-visible,
+    /* Note: .nac-fab:focus-visible is handled inside Shadow DOM */
     .nac-btn-back:focus-visible,
     .nac-btn-toolbar:focus-visible,
     .nac-btn:focus-visible,
@@ -8054,13 +8032,59 @@
     // Add styles
     GM_addStyle(STYLES);
     
-    // Create FAB button
+    // Create Shadow DOM host for FAB (isolates from page CSS, prevents overlays from hiding it)
+    const fabHost = document.createElement('div');
+    fabHost.id = 'nac-fab-host';
+    document.body.appendChild(fabHost);
+    const fabShadow = fabHost.attachShadow({ mode: 'closed' });
+
+    // FAB styles inside Shadow DOM (isolated from page styles)
+    const fabStyle = document.createElement('style');
+    fabStyle.textContent = `
+      .nac-fab {
+        position: fixed !important;
+        bottom: 20px !important;
+        right: 20px !important;
+        width: 56px !important;
+        height: 56px !important;
+        border-radius: 50% !important;
+        background: var(--nac-primary, #6366f1) !important;
+        border: none !important;
+        cursor: pointer !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        z-index: 2147483647 !important;
+        font-size: 24px !important;
+        color: white !important;
+        transition: all 0.3s ease !important;
+        pointer-events: auto !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        transform: none !important;
+        clip: auto !important;
+        clip-path: none !important;
+        overflow: visible !important;
+      }
+      .nac-fab:hover {
+        background: var(--nac-primary-hover, #4f46e5) !important;
+        transform: scale(1.05) !important;
+      }
+      .nac-fab:focus-visible {
+        outline: 2px solid var(--nac-primary, #6366f1);
+        outline-offset: 2px;
+      }
+    `;
+    fabShadow.appendChild(fabStyle);
+
+    // Create FAB button inside Shadow DOM
     const fab = document.createElement('button');
     fab.className = 'nac-fab';
     fab.innerHTML = '📰';
     fab.title = 'NOSTR Article Capture';
     fab.setAttribute('aria-label', 'Capture Article');
-    
+
     fab.addEventListener('click', async () => {
       Utils.log('FAB clicked');
       
@@ -8075,8 +8099,21 @@
       // Show reader view
       await ReaderView.show(article);
     });
-    
-    document.body.appendChild(fab);
+
+    fabShadow.appendChild(fab);
+    _nacFabRef = fab;
+
+    // Periodically verify FAB host is still in DOM and visible
+    // Guards against dynamic overlays removing or hiding the host element
+    setInterval(() => {
+      if (!document.body.contains(fabHost)) {
+        document.body.appendChild(fabHost);
+      }
+      fabHost.style.setProperty('display', 'block', 'important');
+      fabHost.style.setProperty('visibility', 'visible', 'important');
+      fabHost.style.setProperty('opacity', '1', 'important');
+      fabHost.style.setProperty('pointer-events', 'none', 'important');
+    }, 3000);
     
     // Register menu commands
     GM_registerMenuCommand('Open Settings', async () => {
