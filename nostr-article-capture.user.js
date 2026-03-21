@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.7.1
+// @version      2.8.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.7.1',
+    version: '2.8.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -982,6 +982,35 @@
             });
         });
 
+        // Pre-process embedded tweets before cloning
+        document.querySelectorAll('blockquote.twitter-tweet, [data-tweet-id], .tweet-embed, .twitter-tweet').forEach(tweet => {
+            // Extract tweet text, author, and URL from the blockquote
+            const tweetText = tweet.querySelector('p')?.textContent?.trim() || tweet.textContent?.trim() || '';
+            const tweetLink = tweet.querySelector('a[href*="twitter.com"], a[href*="x.com"]');
+            const tweetUrl = tweetLink?.href || '';
+            const authorEl = tweet.querySelector('a:not([href*="/status/"])') || tweet.querySelector('a');
+            const authorName = authorEl?.textContent?.trim() || '';
+
+            // Replace complex tweet HTML with clean blockquote
+            const cleanTweet = document.createElement('blockquote');
+            cleanTweet.className = 'nac-tweet-embed';
+            cleanTweet.setAttribute('data-tweet-url', tweetUrl);
+            cleanTweet.innerHTML = `<p>${tweetText}</p>` +
+                (authorName ? `<footer>— ${authorName}</footer>` : '') +
+                (tweetUrl ? `<cite><a href="${tweetUrl}">${tweetUrl}</a></cite>` : '');
+
+            tweet.parentNode?.replaceChild(cleanTweet, tweet);
+        });
+
+        // Also handle Twitter avatar/profile images - constrain their size
+        document.querySelectorAll('img[src*="pbs.twimg.com/profile_images"], img[src*="twimg.com/profile"]').forEach(img => {
+            img.style.width = '48px';
+            img.style.height = '48px';
+            img.style.borderRadius = '50%';
+            img.setAttribute('width', '48');
+            img.setAttribute('height', '48');
+        });
+
         // Clone document for Readability
         const documentClone = document.cloneNode(true);
         
@@ -1292,6 +1321,42 @@
           turndown.addRule('lineBreak', {
             filter: 'br',
             replacement: () => '  \n'
+          });
+
+          // Handle embedded tweet blockquotes
+          turndown.addRule('tweetEmbed', {
+            filter: function(node) {
+              return (node.nodeName === 'BLOCKQUOTE' &&
+                      (node.classList.contains('twitter-tweet') ||
+                       node.classList.contains('nac-tweet-embed') ||
+                       node.getAttribute('data-tweet-url')));
+            },
+            replacement: function(content, node) {
+              const tweetUrl = node.getAttribute('data-tweet-url') || '';
+              const paragraphs = node.querySelectorAll('p');
+              const tweetText = Array.from(paragraphs).map(p => p.textContent.trim()).filter(t => t).join('\n');
+              const footer = node.querySelector('footer');
+              const authorName = footer?.textContent?.replace(/^—\s*/, '').trim() || '';
+
+              let md = '> 🐦 **Tweet';
+              if (authorName) md += ` by ${authorName}`;
+              md += '**\n';
+              md += '> \n';
+
+              // Add tweet text as blockquote lines
+              if (tweetText) {
+                tweetText.split('\n').forEach(line => {
+                  md += `> ${line}\n`;
+                });
+              }
+
+              if (tweetUrl) {
+                md += '> \n';
+                md += `> [View on Twitter/X](${tweetUrl})\n`;
+              }
+
+              return '\n' + md + '\n';
+            }
           });
 
           return turndown.turndown(html);
@@ -3265,10 +3330,31 @@
     // Build NIP-23 article event (kind 30023)
     buildArticleEvent: async (article, entities, userPubkey, claims = []) => {
       // Convert content to markdown, preserving formatting and images
-      let content = article.content;
-      if (content && content.includes('<')) {
-        content = ContentExtractor.htmlToMarkdown(content);
+      let markdownContent = article.content;
+      if (markdownContent && markdownContent.includes('<')) {
+        markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
       }
+
+      // Build metadata header for published content
+      let metadataHeader = '---\n';
+      metadataHeader += `**Source**: [${article.title}](${article.url})\n`;
+
+      const metaParts = [];
+      if (article.siteName) metaParts.push(`**Publisher**: ${article.siteName}`);
+      if (article.byline) metaParts.push(`**Author**: ${article.byline}`);
+      if (metaParts.length) metadataHeader += metaParts.join(' | ') + '\n';
+
+      const dateParts = [];
+      if (article.publishedAt) {
+        dateParts.push(`**Published**: ${new Date(article.publishedAt * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`);
+      }
+      dateParts.push(`**Archived**: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`);
+      metadataHeader += dateParts.join(' | ') + '\n';
+
+      metadataHeader += '---\n\n';
+
+      // Prepend metadata header to content
+      const content = metadataHeader + markdownContent;
 
       // Note: Images are kept as original URLs to avoid exceeding relay event size limits
       // (base64 embedding can inflate events to megabytes, causing universal relay rejection).
@@ -5899,7 +5985,32 @@
       margin: 1em 0;
       color: var(--nac-text-muted);
     }
-    
+
+    .nac-article-body blockquote.twitter-tweet,
+    .nac-article-body blockquote.nac-tweet-embed {
+      border-left: 4px solid #1da1f2;
+      padding: 12px 16px;
+      margin: 1.5em 0;
+      background: rgba(29, 161, 242, 0.05);
+      border-radius: 0 8px 8px 0;
+    }
+
+    .nac-article-body blockquote.twitter-tweet img,
+    .nac-article-body blockquote.nac-tweet-embed img {
+      max-width: 48px !important;
+      height: 48px !important;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .nac-article-body img[src*="twimg.com/profile"],
+    .nac-article-body img[src*="pbs.twimg.com/profile_images"] {
+      max-width: 48px !important;
+      max-height: 48px !important;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
     /* Entity Bar */
     .nac-entity-bar {
       max-width: var(--reader-max-width, 680px);
