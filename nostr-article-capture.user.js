@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.8.0
+// @version      2.8.1
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.8.0',
+    version: '2.8.1',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -982,8 +982,31 @@
             });
         });
 
-        // Pre-process embedded tweets before cloning
-        document.querySelectorAll('blockquote.twitter-tweet, [data-tweet-id], .tweet-embed, .twitter-tweet').forEach(tweet => {
+        // Fix A: Preserve original image dimensions before cloning
+        // Small images (avatars, icons, emoji) get enlarged by max-width:100% in reader view
+        document.querySelectorAll('img').forEach(img => {
+            const naturalWidth = img.naturalWidth || parseInt(img.getAttribute('width')) || img.offsetWidth;
+            const naturalHeight = img.naturalHeight || parseInt(img.getAttribute('height')) || img.offsetHeight;
+            // Only tag small images (< 100px) to prevent enlargement in reader view
+            if (naturalWidth > 0 && naturalWidth < 100) {
+                img.classList.add('nac-inline-img');
+                img.setAttribute('width', naturalWidth);
+                img.setAttribute('height', naturalHeight || naturalWidth);
+            }
+        });
+
+        // Pre-process embedded tweets before cloning (expanded selectors for NYT, etc.)
+        document.querySelectorAll([
+            'blockquote.twitter-tweet',
+            'blockquote[cite*="twitter.com"]',
+            'blockquote[cite*="x.com"]',
+            '[data-tweet-id]',
+            '[data-component="tweet-embed"]',
+            '.tweet-embed',
+            '.twitter-tweet',
+            'div[class*="tweet-embed"]',
+            'div[class*="twitter-tweet"]'
+        ].join(', ')).forEach(tweet => {
             // Extract tweet text, author, and URL from the blockquote
             const tweetText = tweet.querySelector('p')?.textContent?.trim() || tweet.textContent?.trim() || '';
             const tweetLink = tweet.querySelector('a[href*="twitter.com"], a[href*="x.com"]');
@@ -1004,6 +1027,7 @@
 
         // Also handle Twitter avatar/profile images - constrain their size
         document.querySelectorAll('img[src*="pbs.twimg.com/profile_images"], img[src*="twimg.com/profile"]').forEach(img => {
+            img.classList.add('nac-inline-img');
             img.style.width = '48px';
             img.style.height = '48px';
             img.style.borderRadius = '50%';
@@ -1265,6 +1289,15 @@
               
               const alt = node.getAttribute('alt') || '';
               const title = node.getAttribute('title');
+              const width = parseInt(node.getAttribute('width')) || 0;
+              const height = parseInt(node.getAttribute('height')) || width;
+
+              // Fix D: Keep small images as inline HTML to preserve dimensions
+              if (width > 0 && width < 100) {
+                const radius = width < 60 ? '50%' : '4px';
+                return `<img src="${src}" alt="${alt}" width="${width}" height="${height}" style="display:inline-block;vertical-align:middle;border-radius:${radius}">`;
+              }
+
               if (title) {
                 return `![${alt}](${src} "${title}")`;
               }
@@ -5977,6 +6010,15 @@
       height: auto;
       border-radius: 8px;
       margin: 1.5em 0;
+    }
+
+    /* Fix B: Don't enlarge small inline images (avatars, icons, emoji) */
+    .nac-article-body img.nac-inline-img {
+      max-width: none !important;
+      display: inline-block !important;
+      vertical-align: middle;
+      border-radius: 0;
+      margin: 0 4px;
     }
     
     .nac-article-body blockquote {
