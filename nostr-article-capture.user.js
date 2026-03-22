@@ -6134,7 +6134,7 @@
       border-radius: 8px;
       padding: 16px;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-      z-index: 1000000;
+      z-index: 2147483647;
       min-width: 280px;
     }
     
@@ -6510,7 +6510,7 @@
       color: var(--nac-text);
       font-size: 14px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-      z-index: 1000002;
+      z-index: 2147483647;
       opacity: 0;
       transform: translateY(20px);
       transition: all 0.3s;
@@ -7714,7 +7714,7 @@
       right: 0;
       bottom: 0;
       background: rgba(0, 0, 0, 0.6);
-      z-index: 1000000;
+      z-index: 2147483647;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -7883,7 +7883,7 @@
       max-width: 400px;
       font-size: 12px;
       color: var(--nac-text);
-      z-index: 1000001;
+      z-index: 2147483647;
     }
 
     .nac-evidence-tooltip-title {
