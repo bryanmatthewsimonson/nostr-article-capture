@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.9.0
+// @version      2.9.1
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.9.0',
+    version: '2.9.1',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -688,10 +688,64 @@
         await GM_setValue(key, JSON.stringify(value));
         return true;
       } catch (e) {
-        console.error('[NAC Storage] Set error:', e);
-        Utils.showToast('Failed to save data. Storage may be full.', 'error');
+        console.error('[NAC Storage] Set error:', key, e);
+
+        // Attempt compression fallback: strip large optional fields
+        if (typeof value === 'object' && value !== null) {
+          try {
+            const compressed = Storage._compressForSave(key, value);
+            await GM_setValue(key, JSON.stringify(compressed));
+            console.log('[NAC Storage] Saved with compression fallback for key:', key);
+            Utils.showToast('Saved with reduced data (storage constrained)', 'info');
+            return true;
+          } catch (e2) {
+            console.error('[NAC Storage] Compression fallback also failed:', key, e2);
+          }
+        }
+
+        // Show detailed error with storage size info
+        try {
+          const usage = await Storage.getUsageEstimate();
+          const totalKB = (usage.totalBytes / 1024).toFixed(1);
+          const dataSize = (JSON.stringify(value).length / 1024).toFixed(1);
+          Utils.showToast(`Storage save failed for "${key}" (${dataSize} KB). Total storage: ${totalKB} KB. Error: ${e.message || 'Unknown'}`, 'error');
+        } catch (_) {
+          Utils.showToast(`Failed to save "${key}". ${e.message || 'Storage may be full.'}`, 'error');
+        }
         return false;
       }
+    },
+
+    // Compress data by stripping optional/large fields to fit storage constraints
+    _compressForSave: (key, value) => {
+      if (key === 'entity_registry' && typeof value === 'object') {
+        // Strip articles arrays (can be rebuilt) and limit metadata
+        const compressed = {};
+        for (const [id, entity] of Object.entries(value)) {
+          compressed[id] = { ...entity };
+          // Limit articles array to most recent 10 per entity
+          if (Array.isArray(compressed[id].articles) && compressed[id].articles.length > 10) {
+            compressed[id].articles = compressed[id].articles
+              .sort((a, b) => (b.tagged_at || 0) - (a.tagged_at || 0))
+              .slice(0, 10);
+          }
+        }
+        return compressed;
+      }
+
+      if (key === 'article_claims' && typeof value === 'object') {
+        // Trim context fields in claims
+        const compressed = {};
+        for (const [id, claim] of Object.entries(value)) {
+          compressed[id] = { ...claim };
+          if (compressed[id].context && compressed[id].context.length > 150) {
+            compressed[id].context = compressed[id].context.substring(0, 150) + '…';
+          }
+        }
+        return compressed;
+      }
+
+      return value; // No compression available for this key
     },
 
     delete: async (key) => {
@@ -3311,15 +3365,22 @@
     },
 
     // Subscribe to relay events (REQ/EOSE pattern)
+    // options.onProgress(info) — optional callback for connection-level progress
     subscribe: async (filter, relayUrls, options = {}) => {
       const timeout = options.timeout || 15000;
       const idleTimeout = options.idleTimeout || 10000;
+      const onProgress = options.onProgress || (() => {});
       const events = [];
       const subId = Crypto.bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+      const connectionStats = { attempted: 0, connected: 0, failed: 0, errors: [] };
 
       for (const url of relayUrls) {
+        connectionStats.attempted++;
+        onProgress({ phase: 'connecting', url, ...connectionStats });
         try {
           const ws = await RelayClient.connect(url);
+          connectionStats.connected++;
+          onProgress({ phase: 'connected', url, ...connectionStats });
           ws.send(JSON.stringify(['REQ', subId, filter]));
 
           await new Promise((resolve) => {
@@ -3348,9 +3409,15 @@
 
           try { ws.send(JSON.stringify(['CLOSE', subId])); } catch(e) {}
         } catch (e) {
+          connectionStats.failed++;
+          const errMsg = e.message || 'Connection failed';
+          connectionStats.errors.push({ url, error: errMsg });
           console.error('[NAC RelayClient] Subscribe error:', url, e);
+          onProgress({ phase: 'relay_error', url, error: errMsg, ...connectionStats });
         }
       }
+      // Attach connection stats to the returned array for caller inspection
+      events._connectionStats = connectionStats;
       return events;
     }
   };
@@ -3768,11 +3835,32 @@
         '#L': ['nac/entity-sync']
       };
 
-      const rawEvents = await RelayClient.subscribe(filter, readRelays, { timeout: 15000, idleTimeout: 10000 });
+      // Pass relay connection progress through to UI
+      const rawEvents = await RelayClient.subscribe(filter, readRelays, {
+        timeout: 15000,
+        idleTimeout: 10000,
+        onProgress: (p) => {
+          if (p.phase === 'connecting') {
+            onProgress({ phase: 'fetching', detail: `Connecting to ${p.url} (${p.attempted}/${readRelays.length})…` });
+          } else if (p.phase === 'relay_error') {
+            onProgress({ phase: 'fetching', detail: `⚠ ${p.url}: ${p.error} (${p.connected}/${p.attempted} connected)` });
+          }
+        }
+      });
+
+      // Report connection stats even on empty results
+      const connStats = rawEvents._connectionStats || { attempted: 0, connected: 0, failed: 0, errors: [] };
+      const decryptErrors = [];
 
       if (rawEvents.length === 0) {
-        onProgress({ phase: 'complete', stats: { imported: 0, updated: 0, unchanged: 0, keptLocal: 0, total: 0 } });
-        return { stats: { imported: 0, updated: 0, unchanged: 0, keptLocal: 0, total: 0 }, merged: {} };
+        const noDataStats = { imported: 0, updated: 0, unchanged: 0, keptLocal: 0, total: 0 };
+        onProgress({
+          phase: 'complete',
+          stats: noDataStats,
+          connectionStats: connStats,
+          decryptErrors
+        });
+        return { stats: noDataStats, merged: {}, connectionStats: connStats };
       }
 
       const byDTag = new Map();
@@ -3806,9 +3894,11 @@
             remoteEntities.push(entity);
           } else {
             console.warn('[NAC EntitySync] Invalid entity structure, skipping:', entity?.id);
+            decryptErrors.push('Invalid structure: ' + (entity?.id || 'unknown'));
           }
         } catch (e) {
           console.error('[NAC EntitySync] Decrypt/parse error:', e);
+          decryptErrors.push(e.message || 'Decrypt failed');
         }
       }
 
@@ -3817,17 +3907,16 @@
       const localRegistry = await Storage.entities.getAll();
       const { merged, stats } = EntitySync.mergeEntities(localRegistry, remoteEntities);
 
-      try {
-        GM_setValue('entity_registry', JSON.stringify(merged));
-      } catch (e) {
-        console.error('[NAC Storage] Failed to save merged entity registry:', e);
-        Utils.showToast('Failed to save synced entities. Storage may be full.', 'error');
+      // Use Storage.set() instead of raw GM_setValue for compression fallback
+      const saveResult = await Storage.set('entity_registry', merged);
+      if (!saveResult) {
+        console.error('[NAC Storage] Failed to save merged entity registry');
       }
 
       await Storage.entities.setLastSyncTime(Math.floor(Date.now() / 1000));
       stats.total = remoteEntities.length;
-      onProgress({ phase: 'complete', stats });
-      return { stats, merged };
+      onProgress({ phase: 'complete', stats, connectionStats: connStats, decryptErrors });
+      return { stats, merged, connectionStats: connStats };
     }
   };
 
@@ -4978,6 +5067,9 @@
           <div id="nac-storage-usage" style="margin-top: 16px; padding: 10px; background: #1a1a2e; border: 1px solid #333; border-radius: 6px; font-size: 11px; color: #aaa;">
             <span style="color: #888;">Calculating storage usage...</span>
           </div>
+          <div style="margin-top: 8px;">
+            <button class="nac-btn" id="nac-storage-cleanup" style="font-size: 11px; padding: 4px 10px;">🧹 Storage Cleanup</button>
+          </div>
           
           <div class="nac-version">Version ${CONFIG.version}</div>
         </div>
@@ -5131,7 +5223,8 @@
         const usage = await Storage.getUsageEstimate();
         const formatSize = (bytes) => {
           if (bytes < 1024) return bytes + ' B';
-          return (bytes / 1024).toFixed(1) + ' KB';
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+          return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
         };
         const totalKB = usage.totalBytes / 1024;
         let color = '#4caf50'; // green
@@ -5146,13 +5239,91 @@
         const el = document.getElementById('nac-storage-usage');
         if (el) {
           el.innerHTML = `<strong style="color: ${color};">Storage: ~${formatSize(usage.totalBytes)}</strong>${label}<br>` +
-            `<span style="font-size: 10px;">Entities: ${formatSize(usage.breakdown.entities)}, ` +
+            `<span style="font-size: 10px;">` +
+            `Entities: ${formatSize(usage.breakdown.entities)}, ` +
+            `Claims: ${formatSize(usage.breakdown.claims)}, ` +
+            `Evidence: ${formatSize(usage.breakdown.evidenceLinks)}, ` +
             `Identity: ${formatSize(usage.breakdown.identity)}, ` +
             `Relays: ${formatSize(usage.breakdown.relays)}</span>`;
         }
       } catch (e) {
         console.error('[NAC] Failed to calculate storage usage:', e);
       }
+
+      // Storage cleanup button
+      document.getElementById('nac-storage-cleanup')?.addEventListener('click', async () => {
+        const usage = await Storage.getUsageEstimate();
+        const formatSize = (bytes) => {
+          if (bytes < 1024) return bytes + ' B';
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+          return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        };
+
+        const claims = await Storage.claims.getAll();
+        const claimCount = Object.keys(claims).length;
+        const evidence = await Storage.evidenceLinks.getAll();
+        const evidenceCount = Object.keys(evidence).length;
+        const entities = await Storage.entities.getAll();
+        const entityCount = Object.keys(entities).length;
+
+        // Count article references across all entities
+        let totalArticleRefs = 0;
+        for (const entity of Object.values(entities)) {
+          if (Array.isArray(entity.articles)) totalArticleRefs += entity.articles.length;
+        }
+
+        const msg = `Storage Cleanup\n\n` +
+          `Total: ${formatSize(usage.totalBytes)}\n` +
+          `• Entities: ${entityCount} (${formatSize(usage.breakdown.entities)})\n` +
+          `  - ${totalArticleRefs} article references\n` +
+          `• Claims: ${claimCount} (${formatSize(usage.breakdown.claims)})\n` +
+          `• Evidence Links: ${evidenceCount} (${formatSize(usage.breakdown.evidenceLinks)})\n\n` +
+          `Options:\n` +
+          `1. Compact entities (trim article lists to 10 per entity)\n` +
+          `2. Clear all claims\n` +
+          `3. Clear all evidence links\n` +
+          `4. Cancel\n\n` +
+          `Enter option (1-4):`;
+
+        const choice = prompt(msg);
+        if (!choice) return;
+
+        switch (choice.trim()) {
+          case '1': {
+            let trimmed = 0;
+            for (const [id, entity] of Object.entries(entities)) {
+              if (Array.isArray(entity.articles) && entity.articles.length > 10) {
+                const before = entity.articles.length;
+                entity.articles = entity.articles
+                  .sort((a, b) => (b.tagged_at || 0) - (a.tagged_at || 0))
+                  .slice(0, 10);
+                trimmed += before - entity.articles.length;
+              }
+            }
+            await Storage.set('entity_registry', entities);
+            Utils.showToast(`Compacted entities: removed ${trimmed} old article references`, 'success');
+            break;
+          }
+          case '2': {
+            if (confirm(`Delete all ${claimCount} claims? This cannot be undone.`)) {
+              await Storage.set('article_claims', {});
+              Utils.showToast(`Cleared ${claimCount} claims`, 'success');
+            }
+            break;
+          }
+          case '3': {
+            if (confirm(`Delete all ${evidenceCount} evidence links? This cannot be undone.`)) {
+              await Storage.set('evidence_links', {});
+              Utils.showToast(`Cleared ${evidenceCount} evidence links`, 'success');
+            }
+            break;
+          }
+          default:
+            break;
+        }
+        // Refresh storage display
+        ReaderView.showSettings();
+      });
     }
   };
 
@@ -5380,23 +5551,40 @@
         try {
           await EntitySync.pull({
             onProgress: (p) => {
-              if (p.phase === 'fetching') statusEl.textContent = '⏳ Fetching from relays...';
+              if (p.phase === 'fetching') {
+                const detail = p.detail || 'Connecting to relays...';
+                statusEl.textContent = `⏳ ${detail}`;
+              }
               else if (p.phase === 'decrypting') statusEl.textContent = `⏳ Received ${p.total} events, decrypting...`;
               else if (p.phase === 'merging') statusEl.textContent = `⏳ Merging ${p.remote} entities...`;
               else if (p.phase === 'complete') {
+                const cs = p.connectionStats || {};
+                const connInfo = cs.attempted
+                  ? `<br><span style="font-size: 10px; color: #888;">Relays: ${cs.connected}/${cs.attempted} connected` +
+                    (cs.failed > 0 ? `, ${cs.failed} failed` : '') + '</span>'
+                  : '';
+                const decryptInfo = (p.decryptErrors && p.decryptErrors.length > 0)
+                  ? `<br><span style="font-size: 10px; color: #ff9800;">⚠ ${p.decryptErrors.length} decrypt error(s)</span>`
+                  : '';
+
                 if (p.stats.total === 0) {
-                  statusEl.textContent = 'ℹ️ No entity sync events found on relays for this identity.';
+                  statusEl.innerHTML = 'ℹ️ No entity sync events found on relays for this identity.' +
+                    connInfo + decryptInfo;
                 } else {
                   statusEl.innerHTML = `✅ Sync complete:<br>` +
                     `&nbsp;&nbsp;${p.stats.imported} new entities imported<br>` +
                     `&nbsp;&nbsp;${p.stats.updated} entities updated (newer remote)<br>` +
                     `&nbsp;&nbsp;${p.stats.unchanged} entities unchanged<br>` +
-                    `&nbsp;&nbsp;${p.stats.keptLocal} entities kept (newer local)`;
+                    `&nbsp;&nbsp;${p.stats.keptLocal} entities kept (newer local)` +
+                    connInfo + decryptInfo;
                 }
               }
             }
           });
-          await EntityBrowser.init(panel, identity); // Refresh after pull
+          // Delay refresh so user can read the status message
+          setTimeout(async () => {
+            await EntityBrowser.init(panel, identity);
+          }, 3000);
         } catch (e) {
           statusEl.innerHTML = `<span style="color: var(--nac-error);">❌ ${Utils.escapeHtml(e.message)}</span>`;
         } finally {
