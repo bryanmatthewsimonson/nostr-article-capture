@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.8.1
+// @version      2.9.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.8.1',
+    version: '2.9.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -3853,6 +3853,16 @@
       ReaderView.entities = [];
       ReaderView.claims = [];
       
+      // Viewport meta tag injection for mobile
+      ReaderView._originalViewport = document.querySelector('meta[name="viewport"]');
+      if (!ReaderView._originalViewport) {
+        const meta = document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = 'width=device-width, initial-scale=1, maximum-scale=1';
+        document.head.appendChild(meta);
+        ReaderView._injectedViewport = meta;
+      }
+      
       // Hide original page content by hiding each child element,
       // rather than hiding the body itself (which would also hide our reader view)
       ReaderView._hiddenElements = [];
@@ -4000,6 +4010,7 @@
       // Enable text selection for entity tagging
       const contentEl = document.getElementById('nac-content');
       contentEl.addEventListener('mouseup', ReaderView.handleTextSelection);
+      contentEl.addEventListener('touchend', ReaderView.handleTextSelection);
       
       // Keyboard shortcuts
       document.addEventListener('keydown', ReaderView.handleKeyboard);
@@ -4260,6 +4271,12 @@
       ReaderView.claims = [];
       ReaderView._originalContentHtml = null;
       ReaderView._remoteClaimsCache = null;
+
+      // Restore viewport meta tag
+      if (ReaderView._injectedViewport) {
+        ReaderView._injectedViewport.remove();
+        ReaderView._injectedViewport = null;
+      }
 
       if (ReaderView.container) {
         ReaderView.container.remove();
@@ -8086,6 +8103,135 @@
       outline: 2px solid var(--nac-primary);
       outline-offset: 2px;
     }
+
+    /* ==========================================
+       MOBILE RESPONSIVE STYLES
+       ========================================== */
+    @media (max-width: 768px) {
+      /* Reader View — Mobile Layout */
+      .nac-reader-container {
+        padding: 0 !important;
+      }
+      .nac-reader-content {
+        max-width: 100% !important;
+        padding: 12px !important;
+        margin: 0 !important;
+      }
+      .nac-article-title {
+        font-size: 1.5em !important;
+      }
+      .nac-article-body {
+        font-size: 1em !important;
+        line-height: 1.6 !important;
+      }
+
+      /* Toolbar — Mobile Responsive */
+      .nac-toolbar {
+        flex-wrap: wrap !important;
+        gap: 4px !important;
+        padding: 8px !important;
+      }
+      .nac-toolbar button,
+      .nac-btn-toolbar {
+        font-size: 12px !important;
+        padding: 6px 8px !important;
+        min-height: 36px !important;
+      }
+
+      /* Entity/Claims Bars — Horizontal Scroll */
+      .nac-entity-bar,
+      .nac-claims-bar {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+        flex-wrap: nowrap !important;
+      }
+      .nac-entity-chip,
+      .nac-claim-chip {
+        flex-shrink: 0 !important;
+        font-size: 12px !important;
+      }
+
+      /* Entity Tagger Popover — Bottom Sheet */
+      .nac-entity-popover {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        top: auto !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        border-radius: 12px 12px 0 0 !important;
+        box-shadow: 0 -4px 20px rgba(0,0,0,0.3) !important;
+      }
+      .nac-btn-entity-type,
+      .nac-btn-claim-type {
+        min-height: 44px !important;
+        font-size: 14px !important;
+      }
+
+      /* Claim Extraction Form — Stacked Layout */
+      .nac-claim-sentence-builder {
+        flex-direction: column !important;
+        gap: 8px !important;
+      }
+      .nac-claim-sentence-slot {
+        width: 100% !important;
+      }
+      .nac-claim-form select,
+      .nac-claim-form input {
+        font-size: 16px !important;
+        min-height: 40px !important;
+      }
+
+      /* Settings / Publish Panels — Full Screen */
+      .nac-settings-panel,
+      .nac-publish-panel {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 100% !important;
+        max-height: 100% !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
+      }
+
+      /* Evidence Modal — Bottom Sheet */
+      .nac-evidence-modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 80vh !important;
+        bottom: 0 !important;
+        top: auto !important;
+        left: 0 !important;
+        border-radius: 12px 12px 0 0 !important;
+      }
+
+      /* Touch-Friendly Targets */
+      button,
+      [role="button"],
+      .nac-editable-field,
+      input[type="checkbox"],
+      select {
+        min-height: 44px !important;
+        min-width: 44px !important;
+      }
+
+      /* Metadata Header — Stack Vertically */
+      .nac-meta-info {
+        flex-direction: column !important;
+        gap: 4px !important;
+      }
+      .nac-meta-separator {
+        display: none !important;
+      }
+
+      /* Remote Claims Section — Compact */
+      .nac-remote-claims-section {
+        max-height: 40vh !important;
+      }
+      .nac-remote-claim-chip {
+        font-size: 12px !important;
+      }
+    }
   `;
 
   // ============================================
@@ -8227,6 +8373,15 @@
       .nac-fab:focus-visible {
         outline: 2px solid var(--nac-primary, #6366f1);
         outline-offset: 2px;
+      }
+      @media (max-width: 768px) {
+        .nac-fab {
+          bottom: 80px !important;
+          right: 16px !important;
+          width: 60px !important;
+          height: 60px !important;
+          font-size: 28px !important;
+        }
       }
     `;
     fabShadow.appendChild(fabStyle);
