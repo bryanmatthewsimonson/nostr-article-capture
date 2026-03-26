@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.9.1
+// @version      2.9.2
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -31,7 +31,7 @@
   // ============================================
   
   const CONFIG = {
-    version: '2.9.1',
+    version: '2.9.2',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
@@ -667,50 +667,118 @@
   }
 
   // ============================================
-  // SECTION 3: STORAGE - GM backed with entity registry
+  // SECTION 3: STORAGE - GM backed with localStorage fallback
   // ============================================
   
   const Storage = {
-    // Low-level GM wrappers
-    get: async (key, defaultValue = null) => {
+    // GM API availability flag — set by checkGMAvailability() at init
+    _gmAvailable: true,
+    // Error toast throttle — only show once per session
+    _errorShown: false,
+
+    // Check if GM storage API is functional (called at init)
+    checkGMAvailability: () => {
       try {
-        const value = await GM_getValue(key, null);
-        if (value === null) return defaultValue;
-        return typeof value === 'string' ? JSON.parse(value) : value;
+        GM_setValue('_nac_test', 'ok');
+        const test = GM_getValue('_nac_test', null);
+        if (test !== 'ok') throw new Error('GM read-back failed');
+        GM_deleteValue('_nac_test');
+        Storage._gmAvailable = true;
+        console.log('[NAC] GM storage: OK');
       } catch (e) {
-        console.error('[NAC Storage] Get error:', e);
-        return defaultValue;
+        Storage._gmAvailable = false;
+        console.warn('[NAC] GM storage NOT available:', e.message, '— falling back to localStorage');
       }
     },
 
-    set: async (key, value) => {
-      try {
-        await GM_setValue(key, JSON.stringify(value));
-        return true;
-      } catch (e) {
-        console.error('[NAC Storage] Set error:', key, e);
-
-        // Attempt compression fallback: strip large optional fields
-        if (typeof value === 'object' && value !== null) {
-          try {
-            const compressed = Storage._compressForSave(key, value);
-            await GM_setValue(key, JSON.stringify(compressed));
-            console.log('[NAC Storage] Saved with compression fallback for key:', key);
-            Utils.showToast('Saved with reduced data (storage constrained)', 'info');
-            return true;
-          } catch (e2) {
-            console.error('[NAC Storage] Compression fallback also failed:', key, e2);
-          }
-        }
-
-        // Show detailed error with storage size info
+    // Low-level wrappers with localStorage fallback
+    get: async (key, defaultValue = null) => {
+      // Try GM storage first (if available)
+      if (Storage._gmAvailable) {
         try {
-          const usage = await Storage.getUsageEstimate();
-          const totalKB = (usage.totalBytes / 1024).toFixed(1);
-          const dataSize = (JSON.stringify(value).length / 1024).toFixed(1);
-          Utils.showToast(`Storage save failed for "${key}" (${dataSize} KB). Total storage: ${totalKB} KB. Error: ${e.message || 'Unknown'}`, 'error');
-        } catch (_) {
-          Utils.showToast(`Failed to save "${key}". ${e.message || 'Storage may be full.'}`, 'error');
+          const value = await GM_getValue(key, null);
+          if (value !== null) {
+            return typeof value === 'string' ? JSON.parse(value) : value;
+          }
+        } catch (e) {
+          console.error('[NAC Storage] GM get error:', key, e);
+        }
+      }
+      // Fallback to localStorage
+      try {
+        const val = localStorage.getItem('nac_' + key);
+        if (val !== null) {
+          console.log('[NAC Storage] Read from localStorage fallback:', key);
+          return JSON.parse(val);
+        }
+      } catch (e) {
+        console.error('[NAC Storage] localStorage get error:', key, e);
+      }
+      return defaultValue;
+    },
+
+    set: async (key, value) => {
+      const json = JSON.stringify(value);
+
+      // Try GM storage first (if available)
+      if (Storage._gmAvailable) {
+        try {
+          await GM_setValue(key, json);
+          return true;
+        } catch (e) {
+          // Log detailed error info
+          console.error('[NAC Storage] GM_setValue failed:', {
+            key,
+            dataSize: json.length,
+            error: e,
+            errorType: e?.constructor?.name,
+            errorMessage: e?.message,
+            gmAvailable: Storage._gmAvailable
+          });
+
+          // Attempt compression fallback with GM
+          if (typeof value === 'object' && value !== null) {
+            try {
+              const compressed = Storage._compressForSave(key, value);
+              const compressedJson = JSON.stringify(compressed);
+              await GM_setValue(key, compressedJson);
+              console.log('[NAC Storage] Saved with GM compression fallback for key:', key);
+              return true;
+            } catch (e2) {
+              console.error('[NAC Storage] GM compression fallback also failed:', key, e2);
+            }
+          }
+
+          // Fall through to localStorage below
+        }
+      }
+
+      // Fallback: try localStorage
+      try {
+        localStorage.setItem('nac_' + key, json);
+        console.log('[NAC Storage] Fell back to localStorage for:', key, '(' + (json.length / 1024).toFixed(1) + ' KB)');
+        return true;
+      } catch (e2) {
+        console.error('[NAC Storage] localStorage fallback also failed:', {
+          key,
+          dataSize: json.length,
+          error: e2,
+          errorType: e2?.constructor?.name,
+          errorMessage: e2?.message,
+          localStorageAvailable: typeof localStorage !== 'undefined'
+        });
+
+        // Show toast only once per session to avoid mobile spam
+        if (!Storage._errorShown) {
+          Storage._errorShown = true;
+          try {
+            const dataSize = (json.length / 1024).toFixed(1);
+            Utils.showToast(`Storage save failed for "${key}" (${dataSize} KB). ${e2.message || 'Storage may be full.'}`, 'error');
+          } catch (_) {
+            Utils.showToast('Failed to save data. Storage may be full.', 'error');
+          }
+        } else {
+          console.warn('[NAC Storage] Suppressed repeated error toast for:', key);
         }
         return false;
       }
@@ -749,13 +817,24 @@
     },
 
     delete: async (key) => {
-      try {
-        await GM_deleteValue(key);
-        return true;
-      } catch (e) {
-        console.error('[NAC Storage] Delete error:', e);
-        return false;
+      let success = false;
+      // Try GM delete
+      if (Storage._gmAvailable) {
+        try {
+          await GM_deleteValue(key);
+          success = true;
+        } catch (e) {
+          console.error('[NAC Storage] GM delete error:', e);
+        }
       }
+      // Also clean up localStorage fallback entry
+      try {
+        localStorage.removeItem('nac_' + key);
+        success = true;
+      } catch (e) {
+        console.error('[NAC Storage] localStorage delete error:', e);
+      }
+      return success;
     },
 
     // User identity management
@@ -8508,6 +8587,9 @@
   
   async function init() {
     Utils.log('Initializing NOSTR Article Capture v' + CONFIG.version);
+    
+    // Check GM storage availability (must be first — sets fallback flag)
+    Storage.checkGMAvailability();
     
     // Run migrations before anything else
     try {
