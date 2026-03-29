@@ -2494,4 +2494,85 @@ export const STYLES = `
       font-size: 12px !important;
     }
   }
+
+  /* ===== Phase 1: Enhanced Metadata Display ===== */
+
+  /* Word count / reading time line */
+  .nac-meta-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-size: 13px;
+    color: var(--nac-text-muted);
+    margin-top: 6px;
+  }
+
+  .nac-meta-modified {
+    font-style: italic;
+  }
+
+  .nac-meta-lang {
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--nac-bg);
+    border: 1px solid var(--nac-border);
+  }
+
+  /* Section / category badge */
+  .nac-meta-section-row {
+    margin-top: 8px;
+  }
+
+  .nac-meta-section-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 12px;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+  }
+
+  /* Keyword tag pills */
+  .nac-meta-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .nac-meta-keyword-pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--nac-bg);
+    color: var(--nac-text-muted);
+    border: 1px solid var(--nac-border);
+    white-space: nowrap;
+  }
+
+  /* Paywall indicator */
+  .nac-meta-paywall {
+    font-size: 14px;
+    margin-left: 4px;
+    cursor: help;
+  }
+
+  @media (max-width: 768px) {
+    .nac-meta-stats {
+      font-size: 12px;
+    }
+    .nac-meta-section-badge {
+      font-size: 11px;
+    }
+    .nac-meta-keyword-pill {
+      font-size: 10px;
+    }
+  }
 `;

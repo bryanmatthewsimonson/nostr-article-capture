@@ -1,6 +1,6 @@
 {
   "name": "nostr-article-capture",
-  "version": "2.9.2",
+  "version": "3.0.0",
   "description": "Capture articles with clean reader view, entity tagging, and NOSTR publishing",
   "main": "dist/nostr-article-capture.user.js",
   "directories": {

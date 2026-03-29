@@ -102,6 +102,15 @@ export const EventBuilder = {
       }
     }
 
+    // Add enhanced metadata tags (Phase 1)
+    if (article.wordCount) tags.push(['word_count', String(article.wordCount)]);
+    if (article.section) tags.push(['section', article.section]);
+    if (article.keywords?.length) article.keywords.forEach(kw => tags.push(['t', kw.toLowerCase()]));
+    if (article.language) tags.push(['lang', article.language]);
+    if (article.dateModified) tags.push(['modified_at', String(Math.floor(new Date(article.dateModified).getTime() / 1000))]);
+    if (article.isPaywalled) tags.push(['paywalled', 'true']);
+    if (article.structuredData?.type) tags.push(['content_type', article.structuredData.type]);
+
     // Add topic tags
     tags.push(['t', 'article']);
     if (article.domain) {

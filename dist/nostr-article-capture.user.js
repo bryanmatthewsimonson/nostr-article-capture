@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.9.2
+// @version      3.0.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -37,7 +37,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "2.9.2",
+        version: "3.0.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -1080,6 +1080,14 @@
               }
               article.featuredImage = ContentExtractor.extractFeaturedImage();
               article.publicationIcon = ContentExtractor.extractPublicationIcon();
+              article.structuredData = ContentExtractor.extractStructuredData();
+              article.wordCount = (article.textContent || "").split(/\s+/).filter((w) => w.length > 0).length;
+              article.readingTimeMinutes = Math.ceil(article.wordCount / 225);
+              article.dateModified = ContentExtractor.extractDateModified();
+              article.section = article.structuredData.section || null;
+              article.keywords = article.structuredData.keywords || [];
+              article.language = article.structuredData.language || null;
+              article.isPaywalled = article.structuredData.isAccessibleForFree === false || !!document.querySelector('[class*="paywall"], [class*="subscriber"], [data-paywall]');
               return article;
             } else {
               return ContentExtractor.extractSimple();
@@ -1548,6 +1556,95 @@ ${items}
           try {
             return new URL("/favicon.ico", window.location.href).href;
           } catch (e) {
+          }
+          return null;
+        },
+        // Extract structured data from JSON-LD and meta tags
+        extractStructuredData: () => {
+          const data = {};
+          document.querySelectorAll('script[type="application/ld+json"]').forEach((script) => {
+            try {
+              const json = JSON.parse(script.textContent);
+              const candidates = json["@graph"] ? json["@graph"] : Array.isArray(json) ? json : [json];
+              const article = candidates.find(
+                (item) => ["NewsArticle", "Article", "BlogPosting", "OpinionPiece", "Report", "ScholarlyArticle", "TechArticle", "AnalysisNewsArticle", "ReportageNewsArticle"].includes(item["@type"])
+              );
+              if (article) {
+                data.type = article["@type"];
+                data.dateModified = article.dateModified || null;
+                data.section = article.articleSection || null;
+                data.keywords = article.keywords || [];
+                if (typeof data.keywords === "string") {
+                  data.keywords = data.keywords.split(",").map((k) => k.trim()).filter((k) => k);
+                }
+                data.wordCount = article.wordCount || null;
+                data.language = article.inLanguage || null;
+                data.isAccessibleForFree = article.isAccessibleForFree != null ? article.isAccessibleForFree : null;
+                data.isPartOf = article.isPartOf?.name || null;
+                if (article.publisher) {
+                  data.publisher = {
+                    name: article.publisher.name || null,
+                    logo: article.publisher.logo?.url || article.publisher.logo || null,
+                    url: article.publisher.url || null
+                  };
+                }
+              }
+            } catch (e) {
+            }
+          });
+          if (!data.section) {
+            data.section = document.querySelector('meta[property="article:section"]')?.content || document.querySelector('meta[name="article:section"]')?.content || null;
+          }
+          if (!data.keywords?.length) {
+            const kw = document.querySelector('meta[name="keywords"]')?.content || document.querySelector('meta[property="article:tag"]')?.content;
+            if (kw) data.keywords = kw.split(",").map((k) => k.trim()).filter((k) => k);
+          }
+          if (!data.keywords) data.keywords = [];
+          if (!data.language) {
+            data.language = document.documentElement.lang || document.querySelector('meta[http-equiv="content-language"]')?.content || null;
+          }
+          return data;
+        },
+        // Extract date modified from JSON-LD, meta tags, or time elements
+        extractDateModified: () => {
+          const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+          for (const script of jsonLdScripts) {
+            try {
+              const json = JSON.parse(script.textContent);
+              const candidates = json["@graph"] ? json["@graph"] : Array.isArray(json) ? json : [json];
+              for (const item of candidates) {
+                if (item.dateModified) {
+                  const date = new Date(item.dateModified);
+                  if (!isNaN(date.getTime())) {
+                    return item.dateModified;
+                  }
+                }
+              }
+            } catch (e) {
+            }
+          }
+          const metaSelectors = [
+            'meta[property="article:modified_time"]',
+            'meta[name="last-modified"]',
+            'meta[name="dcterms.modified"]',
+            'meta[property="og:updated_time"]'
+          ];
+          for (const selector of metaSelectors) {
+            const meta = document.querySelector(selector);
+            if (meta?.content) {
+              const date = new Date(meta.content);
+              if (!isNaN(date.getTime())) {
+                return meta.content;
+              }
+            }
+          }
+          const timeEl = document.querySelector('time[itemprop="dateModified"], time.updated, time.modified');
+          if (timeEl) {
+            const dt = timeEl.getAttribute("datetime");
+            if (dt) {
+              const date = new Date(dt);
+              if (!isNaN(date.getTime())) return dt;
+            }
           }
           return null;
         }
@@ -2028,6 +2125,13 @@ ${items}
               }
             }
           }
+          if (article.wordCount) tags.push(["word_count", String(article.wordCount)]);
+          if (article.section) tags.push(["section", article.section]);
+          if (article.keywords?.length) article.keywords.forEach((kw) => tags.push(["t", kw.toLowerCase()]));
+          if (article.language) tags.push(["lang", article.language]);
+          if (article.dateModified) tags.push(["modified_at", String(Math.floor(new Date(article.dateModified).getTime() / 1e3))]);
+          if (article.isPaywalled) tags.push(["paywalled", "true"]);
+          if (article.structuredData?.type) tags.push(["content_type", article.structuredData.type]);
           tags.push(["t", "article"]);
           if (article.domain) {
             tags.push(["t", article.domain.replace(/\./g, "-")]);
@@ -2970,7 +3074,30 @@ Enter number:`);
               <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication" role="button" tabindex="0" aria-label="Edit publication \u2014 click to change">${Utils.escapeHtml(article.siteName || article.domain || "")}</span>
               <span class="nac-meta-separator">\u2022</span>
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date \u2014 click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : "Unknown Date"}</span>
+              ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">\u{1F512}</span>' : ""}
             </div>
+            ${article.wordCount ? `
+            <div class="nac-meta-stats">
+              <span>${article.wordCount.toLocaleString()} words</span>
+              <span class="nac-meta-separator">\xB7</span>
+              <span>${article.readingTimeMinutes} min read</span>
+              ${article.dateModified && article.dateModified !== (article.publishedAt ? new Date(article.publishedAt * 1e3).toISOString() : null) ? `
+                <span class="nac-meta-separator">\xB7</span>
+                <span class="nac-meta-modified" title="Last modified date">Modified: ${ReaderView._formatDateStr(article.dateModified)}</span>
+              ` : ""}
+              ${article.language && article.language !== "en" && !article.language.startsWith("en-") ? `
+                <span class="nac-meta-separator">\xB7</span>
+                <span class="nac-meta-lang" title="Content language">${article.language}</span>
+              ` : ""}
+            </div>` : ""}
+            ${article.section ? `
+            <div class="nac-meta-section-row">
+              <span class="nac-meta-section-badge">${Utils.escapeHtml(article.section)}</span>
+            </div>` : ""}
+            ${article.keywords?.length ? `
+            <div class="nac-meta-keywords">
+              ${article.keywords.slice(0, 5).map((kw) => `<span class="nac-meta-keyword-pill">${Utils.escapeHtml(kw)}</span>`).join("")}
+            </div>` : ""}
             <div class="nac-article-source">
               <span class="nac-source-label">Source:</span>
               <span class="nac-source-url nac-editable-field" id="nac-url" data-field="url" title="${Utils.escapeHtml(article.url)} \u2014 Click to edit URL" role="button" tabindex="0" aria-label="Edit article URL \u2014 click to change">${Utils.escapeHtml(article.url)}</span>
@@ -3186,6 +3313,16 @@ Enter number:`);
         _formatDate: (timestamp) => {
           const date = new Date(timestamp * 1e3);
           return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+        },
+        // Format an ISO date string as a readable date
+        _formatDateStr: (dateStr) => {
+          try {
+            const date = new Date(dateStr);
+            if (isNaN(date.getTime())) return dateStr;
+            return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+          } catch (e) {
+            return dateStr;
+          }
         },
         // Start inline editing of a metadata field
         _startInlineEdit: (element, fieldKey) => {
@@ -7722,6 +7859,87 @@ Enter option (1-4):`;
     }
     .nac-remote-claim-chip {
       font-size: 12px !important;
+    }
+  }
+
+  /* ===== Phase 1: Enhanced Metadata Display ===== */
+
+  /* Word count / reading time line */
+  .nac-meta-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-size: 13px;
+    color: var(--nac-text-muted);
+    margin-top: 6px;
+  }
+
+  .nac-meta-modified {
+    font-style: italic;
+  }
+
+  .nac-meta-lang {
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--nac-bg);
+    border: 1px solid var(--nac-border);
+  }
+
+  /* Section / category badge */
+  .nac-meta-section-row {
+    margin-top: 8px;
+  }
+
+  .nac-meta-section-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 12px;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+  }
+
+  /* Keyword tag pills */
+  .nac-meta-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .nac-meta-keyword-pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--nac-bg);
+    color: var(--nac-text-muted);
+    border: 1px solid var(--nac-border);
+    white-space: nowrap;
+  }
+
+  /* Paywall indicator */
+  .nac-meta-paywall {
+    font-size: 14px;
+    margin-left: 4px;
+    cursor: help;
+  }
+
+  @media (max-width: 768px) {
+    .nac-meta-stats {
+      font-size: 12px;
+    }
+    .nac-meta-section-badge {
+      font-size: 11px;
+    }
+    .nac-meta-keyword-pill {
+      font-size: 10px;
     }
   }
 `;

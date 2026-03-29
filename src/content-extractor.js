@@ -123,7 +123,34 @@ export const ContentExtractor = {
         
         // Extract publication icon (favicon)
         article.publicationIcon = ContentExtractor.extractPublicationIcon();
-        
+
+        // --- Phase 1: Enhanced article metadata ---
+
+        // Structured data (JSON-LD / Schema.org + meta tag fallbacks)
+        article.structuredData = ContentExtractor.extractStructuredData();
+
+        // Word count
+        article.wordCount = (article.textContent || '').split(/\s+/).filter(w => w.length > 0).length;
+
+        // Reading time estimate (225 wpm average)
+        article.readingTimeMinutes = Math.ceil(article.wordCount / 225);
+
+        // Date modified
+        article.dateModified = ContentExtractor.extractDateModified();
+
+        // Section / category
+        article.section = article.structuredData.section || null;
+
+        // Keywords / tags
+        article.keywords = article.structuredData.keywords || [];
+
+        // Content language
+        article.language = article.structuredData.language || null;
+
+        // Paywall detection
+        article.isPaywalled = article.structuredData.isAccessibleForFree === false ||
+                              !!document.querySelector('[class*="paywall"], [class*="subscriber"], [data-paywall]');
+
         return article;
       } else {
         // Fallback: simple extraction
@@ -654,6 +681,110 @@ export const ContentExtractor = {
     }
     // Fallback to /favicon.ico
     try { return new URL('/favicon.ico', window.location.href).href; } catch(e) {}
+    return null;
+  },
+
+  // Extract structured data from JSON-LD and meta tags
+  extractStructuredData: () => {
+    const data = {};
+
+    // Try JSON-LD first
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+      try {
+        const json = JSON.parse(script.textContent);
+        // Handle @graph arrays and top-level objects
+        const candidates = json['@graph'] ? json['@graph'] : (Array.isArray(json) ? json : [json]);
+        const article = candidates.find(item =>
+          ['NewsArticle', 'Article', 'BlogPosting', 'OpinionPiece', 'Report', 'ScholarlyArticle', 'TechArticle', 'AnalysisNewsArticle', 'ReportageNewsArticle'].includes(item['@type'])
+        );
+        if (article) {
+          data.type = article['@type'];
+          data.dateModified = article.dateModified || null;
+          data.section = article.articleSection || null;
+          data.keywords = article.keywords || [];
+          if (typeof data.keywords === 'string') {
+            data.keywords = data.keywords.split(',').map(k => k.trim()).filter(k => k);
+          }
+          data.wordCount = article.wordCount || null;
+          data.language = article.inLanguage || null;
+          data.isAccessibleForFree = article.isAccessibleForFree != null ? article.isAccessibleForFree : null;
+          data.isPartOf = article.isPartOf?.name || null;
+          if (article.publisher) {
+            data.publisher = {
+              name: article.publisher.name || null,
+              logo: article.publisher.logo?.url || article.publisher.logo || null,
+              url: article.publisher.url || null
+            };
+          }
+        }
+      } catch (e) { /* malformed JSON-LD, skip */ }
+    });
+
+    // Fallback to meta tags for missing fields
+    if (!data.section) {
+      data.section = document.querySelector('meta[property="article:section"]')?.content ||
+                     document.querySelector('meta[name="article:section"]')?.content || null;
+    }
+    if (!data.keywords?.length) {
+      const kw = document.querySelector('meta[name="keywords"]')?.content ||
+                 document.querySelector('meta[property="article:tag"]')?.content;
+      if (kw) data.keywords = kw.split(',').map(k => k.trim()).filter(k => k);
+    }
+    if (!data.keywords) data.keywords = [];
+    if (!data.language) {
+      data.language = document.documentElement.lang ||
+                      document.querySelector('meta[http-equiv="content-language"]')?.content || null;
+    }
+
+    return data;
+  },
+
+  // Extract date modified from JSON-LD, meta tags, or time elements
+  extractDateModified: () => {
+    // Try JSON-LD
+    const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const script of jsonLdScripts) {
+      try {
+        const json = JSON.parse(script.textContent);
+        const candidates = json['@graph'] ? json['@graph'] : (Array.isArray(json) ? json : [json]);
+        for (const item of candidates) {
+          if (item.dateModified) {
+            const date = new Date(item.dateModified);
+            if (!isNaN(date.getTime())) {
+              return item.dateModified;
+            }
+          }
+        }
+      } catch (e) { /* skip */ }
+    }
+
+    // Try meta tags
+    const metaSelectors = [
+      'meta[property="article:modified_time"]',
+      'meta[name="last-modified"]',
+      'meta[name="dcterms.modified"]',
+      'meta[property="og:updated_time"]'
+    ];
+    for (const selector of metaSelectors) {
+      const meta = document.querySelector(selector);
+      if (meta?.content) {
+        const date = new Date(meta.content);
+        if (!isNaN(date.getTime())) {
+          return meta.content;
+        }
+      }
+    }
+
+    // Try time elements with specific attributes
+    const timeEl = document.querySelector('time[itemprop="dateModified"], time.updated, time.modified');
+    if (timeEl) {
+      const dt = timeEl.getAttribute('datetime');
+      if (dt) {
+        const date = new Date(dt);
+        if (!isNaN(date.getTime())) return dt;
+      }
+    }
+
     return null;
   }
 };

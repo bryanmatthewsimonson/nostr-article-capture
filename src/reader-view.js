@@ -82,7 +82,30 @@ export const ReaderView = {
               <span class="nac-meta-publication nac-editable-field" id="nac-publication" data-field="siteName" title="Click to edit publication" role="button" tabindex="0" aria-label="Edit publication — click to change">${Utils.escapeHtml(article.siteName || article.domain || '')}</span>
               <span class="nac-meta-separator">•</span>
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date — click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
+              ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">🔒</span>' : ''}
             </div>
+            ${article.wordCount ? `
+            <div class="nac-meta-stats">
+              <span>${article.wordCount.toLocaleString()} words</span>
+              <span class="nac-meta-separator">·</span>
+              <span>${article.readingTimeMinutes} min read</span>
+              ${article.dateModified && article.dateModified !== (article.publishedAt ? new Date(article.publishedAt * 1000).toISOString() : null) ? `
+                <span class="nac-meta-separator">·</span>
+                <span class="nac-meta-modified" title="Last modified date">Modified: ${ReaderView._formatDateStr(article.dateModified)}</span>
+              ` : ''}
+              ${article.language && article.language !== 'en' && !article.language.startsWith('en-') ? `
+                <span class="nac-meta-separator">·</span>
+                <span class="nac-meta-lang" title="Content language">${article.language}</span>
+              ` : ''}
+            </div>` : ''}
+            ${article.section ? `
+            <div class="nac-meta-section-row">
+              <span class="nac-meta-section-badge">${Utils.escapeHtml(article.section)}</span>
+            </div>` : ''}
+            ${article.keywords?.length ? `
+            <div class="nac-meta-keywords">
+              ${article.keywords.slice(0, 5).map(kw => `<span class="nac-meta-keyword-pill">${Utils.escapeHtml(kw)}</span>`).join('')}
+            </div>` : ''}
             <div class="nac-article-source">
               <span class="nac-source-label">Source:</span>
               <span class="nac-source-url nac-editable-field" id="nac-url" data-field="url" title="${Utils.escapeHtml(article.url)} — Click to edit URL" role="button" tabindex="0" aria-label="Edit article URL — click to change">${Utils.escapeHtml(article.url)}</span>
@@ -334,6 +357,17 @@ export const ReaderView = {
   _formatDate: (timestamp) => {
     const date = new Date(timestamp * 1000);
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  },
+
+  // Format an ISO date string as a readable date
+  _formatDateStr: (dateStr) => {
+    try {
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) return dateStr;
+      return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    } catch (e) {
+      return dateStr;
+    }
   },
 
   // Start inline editing of a metadata field
