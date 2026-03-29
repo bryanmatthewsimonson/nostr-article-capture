@@ -3,6 +3,7 @@ import { Storage } from './storage.js';
 import { Utils } from './utils.js';
 import { Crypto } from './crypto.js';
 import { ContentExtractor } from './content-extractor.js';
+import { ContentDetector } from './content-detector.js';
 import { EntityTagger } from './entity-tagger.js';
 import { ClaimExtractor } from './claim-extractor.js';
 import { EntityAutoSuggest } from './entity-auto-suggest.js';
@@ -83,6 +84,10 @@ export const ReaderView = {
               <span class="nac-meta-separator">•</span>
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date — click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
               ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">🔒</span>' : ''}
+            </div>
+            <div class="nac-meta-detection-row">
+              <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
+              ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">💬 Comments</span>' : ''}
             </div>
             ${article.wordCount ? `
             <div class="nac-meta-stats">

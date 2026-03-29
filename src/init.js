@@ -2,6 +2,7 @@ import { CONFIG, _state } from './config.js';
 import { Storage } from './storage.js';
 import { Utils } from './utils.js';
 import { ContentExtractor } from './content-extractor.js';
+import { ContentDetector } from './content-detector.js';
 import { ReaderView } from './reader-view.js';
 import { EntityMigration } from './entity-migration.js';
 import { STYLES } from './styles.js';
@@ -87,6 +88,10 @@ async function init() {
   fab.addEventListener('click', async () => {
     Utils.log('FAB clicked');
     
+    // Detect content type
+    const detection = ContentDetector.detect();
+    Utils.log('Content detected:', detection);
+    
     // Extract article
     const article = ContentExtractor.extractArticle();
     
@@ -94,6 +99,13 @@ async function init() {
       Utils.showToast('No article content found on this page', 'error');
       return;
     }
+    
+    // Attach content detection metadata to article
+    article.contentType = detection.type;
+    article.platform = detection.platform;
+    article.platformMetadata = detection.metadata;
+    article.contentConfidence = detection.confidence;
+    article.hasComments = ContentDetector.hasComments();
     
     // Show reader view
     await ReaderView.show(article);

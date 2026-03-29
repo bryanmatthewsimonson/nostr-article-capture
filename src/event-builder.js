@@ -111,6 +111,10 @@ export const EventBuilder = {
     if (article.isPaywalled) tags.push(['paywalled', 'true']);
     if (article.structuredData?.type) tags.push(['content_type', article.structuredData.type]);
 
+    // Add content detection tags (Phase 2)
+    if (article.contentType) tags.push(['content_format', article.contentType]);
+    if (article.platform) tags.push(['platform', article.platform]);
+
     // Add topic tags
     tags.push(['t', 'article']);
     if (article.domain) {

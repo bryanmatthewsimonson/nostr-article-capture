@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.0.0
+// @version      3.1.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -24,6 +24,7 @@
 // ==/UserScript==
 
 (() => {
+  var __defProp = Object.defineProperty;
   var __getOwnPropNames = Object.getOwnPropertyNames;
   var __esm = (fn, res) => function __init() {
     return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
@@ -31,13 +32,17 @@
   var __commonJS = (cb, mod) => function __require() {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
   };
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
 
   // src/config.js
   var CONFIG, _state;
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.0.0",
+        version: "3.1.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -985,6 +990,10 @@
   });
 
   // src/content-extractor.js
+  var content_extractor_exports = {};
+  __export(content_extractor_exports, {
+    ContentExtractor: () => ContentExtractor
+  });
   var ContentExtractor;
   var init_content_extractor = __esm({
     "src/content-extractor.js"() {
@@ -1652,6 +1661,165 @@ ${items}
     }
   });
 
+  // src/content-detector.js
+  function detectYouTube() {
+    return {
+      videoId: new URLSearchParams(window.location.search).get("v") || window.location.pathname.split("/").pop(),
+      isLive: !!document.querySelector(".ytp-live-badge-text"),
+      hasChat: !!document.querySelector('#chat-container, iframe[src*="live_chat"]'),
+      channelName: document.querySelector('#channel-name a, [itemprop="author"] [itemprop="name"]')?.textContent?.trim(),
+      videoTitle: document.querySelector('h1.ytd-watch-metadata yt-formatted-string, meta[name="title"]')?.textContent?.trim()
+    };
+  }
+  function detectTwitter() {
+    return {
+      isTweet: /\/status\/\d+/.test(window.location.pathname),
+      isProfile: !window.location.pathname.includes("/status/"),
+      username: window.location.pathname.split("/")[1] || null
+    };
+  }
+  function detectFacebook() {
+    return {
+      isPost: /\/(posts|videos|photos)\//.test(window.location.pathname) || window.location.pathname.includes("/permalink/"),
+      isProfile: !window.location.pathname.includes("/posts/")
+    };
+  }
+  function detectInstagram() {
+    return {
+      isPost: /\/p\//.test(window.location.pathname),
+      isReel: /\/reel\//.test(window.location.pathname),
+      isProfile: !window.location.pathname.includes("/p/") && !window.location.pathname.includes("/reel/")
+    };
+  }
+  function detectTikTok() {
+    return {
+      isVideo: /\/video\/\d+/.test(window.location.pathname),
+      username: window.location.pathname.match(/@([^/]+)/)?.[1] || null
+    };
+  }
+  function isSubstack() {
+    return !!document.querySelector('meta[content*="substack"]') || !!document.querySelector('script[src*="substack"]') || !!document.querySelector(".post-content, .available-content");
+  }
+  function hasArticleContent() {
+    return !!(document.querySelector('article, [role="article"]') || document.querySelector('meta[property="og:type"][content="article"]') || document.querySelector(".post-content, .article-body, .story-body") || document.querySelector("h1") && document.querySelectorAll("p").length > 3);
+  }
+  var ContentDetector;
+  var init_content_detector = __esm({
+    "src/content-detector.js"() {
+      ContentDetector = {
+        /**
+         * Analyze current page and return content type info
+         * @returns {{ type: string, platform: string|null, confidence: number, metadata: object }}
+         */
+        detect: () => {
+          const url = window.location.href;
+          const hostname = window.location.hostname;
+          if (hostname.includes("youtube.com") || hostname.includes("youtu.be")) {
+            return { type: "video", platform: "youtube", confidence: 1, metadata: detectYouTube() };
+          }
+          if (hostname.includes("twitter.com") || hostname.includes("x.com")) {
+            return { type: "social_post", platform: "twitter", confidence: 1, metadata: detectTwitter() };
+          }
+          if (hostname.includes("facebook.com") || hostname.includes("fb.com")) {
+            return { type: "social_post", platform: "facebook", confidence: 1, metadata: detectFacebook() };
+          }
+          if (hostname.includes("instagram.com")) {
+            return { type: "social_post", platform: "instagram", confidence: 1, metadata: detectInstagram() };
+          }
+          if (hostname.includes("tiktok.com")) {
+            return { type: "video", platform: "tiktok", confidence: 1, metadata: detectTikTok() };
+          }
+          if (hostname.includes("substack.com") || isSubstack()) {
+            return { type: "article", platform: "substack", confidence: 0.9, metadata: {} };
+          }
+          if (hostname.includes("reddit.com")) {
+            return { type: "social_post", platform: "reddit", confidence: 1, metadata: {} };
+          }
+          if (hasArticleContent()) {
+            return { type: "article", platform: null, confidence: 0.8, metadata: {} };
+          }
+          return { type: "unknown", platform: null, confidence: 0, metadata: {} };
+        },
+        /**
+         * Check if the page has comments that can be captured
+         */
+        hasComments: () => {
+          return !!(document.querySelector('[class*="comment"], [id*="comment"], [data-component="comments"]') || document.querySelector("section.comments, .comments-section, #comments") || document.querySelector('[class*="disqus"], #disqus_thread'));
+        },
+        /**
+         * Get the content type label for display
+         */
+        getTypeLabel: (type) => {
+          const labels = {
+            "article": "\u{1F4F0} Article",
+            "video": "\u{1F3AC} Video",
+            "social_post": "\u{1F4AC} Social Post",
+            "audio": "\u{1F3A7} Audio",
+            "unknown": "\u{1F4C4} Page"
+          };
+          return labels[type] || labels.unknown;
+        },
+        /**
+         * Get platform icon/emoji
+         */
+        getPlatformIcon: (platform) => {
+          const icons = {
+            "youtube": "\u25B6\uFE0F",
+            "twitter": "\u{1D54F}",
+            "facebook": "f",
+            "instagram": "\u{1F4F7}",
+            "tiktok": "\u266A",
+            "substack": "\u2709\uFE0F",
+            "reddit": "\u{1F534}"
+          };
+          return icons[platform] || "\u{1F310}";
+        }
+      };
+    }
+  });
+
+  // src/platform-handler.js
+  var PlatformHandler;
+  var init_platform_handler = __esm({
+    "src/platform-handler.js"() {
+      PlatformHandler = {
+        _handlers: {},
+        /**
+         * Register a platform handler
+         */
+        register: (platform, handler) => {
+          PlatformHandler._handlers[platform] = handler;
+        },
+        /**
+         * Get handler for a platform
+         */
+        get: (platform) => {
+          return PlatformHandler._handlers[platform] || PlatformHandler._handlers["generic"];
+        },
+        /**
+         * Check if a platform has a registered handler
+         */
+        has: (platform) => {
+          return !!PlatformHandler._handlers[platform];
+        }
+      };
+      PlatformHandler.register("generic", {
+        type: "article",
+        canCapture: () => true,
+        extract: async () => {
+          const { ContentExtractor: ContentExtractor2 } = await Promise.resolve().then(() => (init_content_extractor(), content_extractor_exports));
+          return ContentExtractor2.extractArticle();
+        },
+        getReaderViewConfig: () => ({
+          showEditor: true,
+          showEntityBar: true,
+          showClaimsBar: true,
+          showComments: false
+        })
+      });
+    }
+  });
+
   // src/entity-auto-suggest.js
   var EntityAutoSuggest;
   var init_entity_auto_suggest = __esm({
@@ -2132,6 +2300,8 @@ ${items}
           if (article.dateModified) tags.push(["modified_at", String(Math.floor(new Date(article.dateModified).getTime() / 1e3))]);
           if (article.isPaywalled) tags.push(["paywalled", "true"]);
           if (article.structuredData?.type) tags.push(["content_type", article.structuredData.type]);
+          if (article.contentType) tags.push(["content_format", article.contentType]);
+          if (article.platform) tags.push(["platform", article.platform]);
           tags.push(["t", "article"]);
           if (article.domain) {
             tags.push(["t", article.domain.replace(/\./g, "-")]);
@@ -3006,6 +3176,7 @@ Enter number:`);
       init_utils();
       init_crypto();
       init_content_extractor();
+      init_content_detector();
       init_entity_tagger();
       init_claim_extractor();
       init_entity_auto_suggest();
@@ -3075,6 +3246,10 @@ Enter number:`);
               <span class="nac-meta-separator">\u2022</span>
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date \u2014 click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : "Unknown Date"}</span>
               ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">\u{1F512}</span>' : ""}
+            </div>
+            <div class="nac-meta-detection-row">
+              <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
+              ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">\u{1F4AC} Comments</span>' : ""}
             </div>
             ${article.wordCount ? `
             <div class="nac-meta-stats">
@@ -7942,6 +8117,43 @@ Enter option (1-4):`;
       font-size: 10px;
     }
   }
+
+  /* Content Type Detection (Phase 2) */
+  .nac-meta-detection-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+    margin-bottom: 4px;
+  }
+
+  .nac-meta-content-type {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+  }
+
+  .nac-meta-comments-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+    cursor: pointer;
+  }
+
+  .nac-meta-comments-indicator:hover {
+    background: rgba(34, 197, 94, 0.18);
+  }
 `;
     }
   });
@@ -8014,11 +8226,18 @@ Enter option (1-4):`;
     fab.setAttribute("aria-label", "Capture Article");
     fab.addEventListener("click", async () => {
       Utils.log("FAB clicked");
+      const detection = ContentDetector.detect();
+      Utils.log("Content detected:", detection);
       const article = ContentExtractor.extractArticle();
       if (!article) {
         Utils.showToast("No article content found on this page", "error");
         return;
       }
+      article.contentType = detection.type;
+      article.platform = detection.platform;
+      article.platformMetadata = detection.metadata;
+      article.contentConfidence = detection.confidence;
+      article.hasComments = ContentDetector.hasComments();
       await ReaderView.show(article);
     });
     fabShadow.appendChild(fab);
@@ -8055,6 +8274,7 @@ Enter option (1-4):`;
       init_storage();
       init_utils();
       init_content_extractor();
+      init_content_detector();
       init_reader_view();
       init_entity_migration();
       init_styles();
@@ -8068,6 +8288,8 @@ Enter option (1-4):`;
       init_crypto();
       init_storage();
       init_content_extractor();
+      init_content_detector();
+      init_platform_handler();
       init_utils();
       init_entity_tagger();
       init_entity_auto_suggest();

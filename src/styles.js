@@ -2575,4 +2575,41 @@ export const STYLES = `
       font-size: 10px;
     }
   }
+
+  /* Content Type Detection (Phase 2) */
+  .nac-meta-detection-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+    margin-bottom: 4px;
+  }
+
+  .nac-meta-content-type {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+  }
+
+  .nac-meta-comments-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+    cursor: pointer;
+  }
+
+  .nac-meta-comments-indicator:hover {
+    background: rgba(34, 197, 94, 0.18);
+  }
 `;

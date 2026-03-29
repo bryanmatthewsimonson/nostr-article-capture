@@ -3,6 +3,8 @@ import { CONFIG, _state } from './config.js';
 import { Crypto } from './crypto.js';
 import { Storage } from './storage.js';
 import { ContentExtractor } from './content-extractor.js';
+import { ContentDetector } from './content-detector.js';
+import { PlatformHandler } from './platform-handler.js';
 import { Utils } from './utils.js';
 import { EntityTagger } from './entity-tagger.js';
 import { EntityAutoSuggest } from './entity-auto-suggest.js';
