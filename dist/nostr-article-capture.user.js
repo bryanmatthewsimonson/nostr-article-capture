@@ -8880,121 +8880,216 @@ Enter option (1-4):`;
   });
 
   // src/init.js
-  async function init() {
-    Utils.log("Initializing NOSTR Article Capture v" + CONFIG.version);
-    Storage.checkGMAvailability();
-    try {
-      await EntityMigration.migrateAliasesToEntities();
-    } catch (e) {
-      console.error("[NAC] Entity migration failed:", e);
+  function waitForBody() {
+    return new Promise((resolve) => {
+      if (document.body) return resolve();
+      console.log("[NAC] document.body not ready, waiting...");
+      const observer = new MutationObserver((_mutations, obs) => {
+        if (document.body) {
+          obs.disconnect();
+          resolve();
+        }
+      });
+      observer.observe(document.documentElement, { childList: true });
+      setTimeout(() => {
+        console.warn("[NAC] waitForBody timed out after 5s, proceeding anyway");
+        resolve();
+      }, 5e3);
+    });
+  }
+  function ensureFABExists() {
+    if (_fabHost && document.body && document.body.contains(_fabHost)) {
+      return;
     }
-    GM_addStyle(STYLES);
-    const fabHost = document.createElement("div");
-    fabHost.id = "nac-fab-host";
-    fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
-    document.body.appendChild(fabHost);
-    const fabShadow = fabHost.attachShadow({ mode: "closed" });
-    const fabStyle = document.createElement("style");
-    fabStyle.textContent = `
-    .nac-fab {
-      position: fixed !important;
-      bottom: 20px !important;
-      right: 20px !important;
-      width: 56px !important;
-      height: 56px !important;
-      border-radius: 50% !important;
-      background: var(--nac-primary, #6366f1) !important;
-      border: none !important;
-      cursor: pointer !important;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      z-index: 2147483647 !important;
-      font-size: 24px !important;
-      color: white !important;
-      transition: all 0.3s ease !important;
-      pointer-events: auto !important;
-      opacity: 1 !important;
-      visibility: visible !important;
-      transform: none !important;
-      clip: auto !important;
-      clip-path: none !important;
-      overflow: visible !important;
+    if (_fabHost && document.body) {
+      console.log("[NAC] FAB host was removed from DOM, re-appending");
+      document.body.appendChild(_fabHost);
     }
-    .nac-fab:hover {
-      background: var(--nac-primary-hover, #4f46e5) !important;
-      transform: scale(1.05) !important;
-    }
-    .nac-fab:focus-visible {
-      outline: 2px solid var(--nac-primary, #6366f1);
-      outline-offset: 2px;
-    }
-    @media (max-width: 768px) {
-      .nac-fab {
-        bottom: 80px !important;
-        right: 16px !important;
-        width: 60px !important;
-        height: 60px !important;
-        font-size: 28px !important;
-      }
-    }
-  `;
-    fabShadow.appendChild(fabStyle);
+  }
+  function createFAB() {
     const detection = ContentDetector.detect();
     const fabIcon = detection.platform ? ContentDetector.getPlatformIcon(detection.platform) : "\u{1F4F0}";
-    const fab = document.createElement("button");
-    fab.className = "nac-fab";
-    fab.innerHTML = fabIcon;
-    fab.title = "NOSTR Article Capture";
-    fab.setAttribute("aria-label", "Capture Article");
-    fab.addEventListener("click", async () => {
-      Utils.log("FAB clicked");
-      const detection2 = ContentDetector.detect();
-      Utils.log("Content detected:", detection2);
-      let article;
-      if (detection2.platform && PlatformHandler.has(detection2.platform)) {
-        const handler = PlatformHandler.get(detection2.platform);
-        article = await handler.extract();
-      } else {
-        article = ContentExtractor.extractArticle();
+    let fab;
+    try {
+      const fabHost = document.createElement("div");
+      fabHost.id = "nac-fab-host";
+      fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
+      document.body.appendChild(fabHost);
+      const fabShadow = fabHost.attachShadow({ mode: "closed" });
+      const fabStyle = document.createElement("style");
+      fabStyle.textContent = `
+      .nac-fab {
+        position: fixed !important;
+        bottom: 20px !important;
+        right: 20px !important;
+        width: 56px !important;
+        height: 56px !important;
+        border-radius: 50% !important;
+        background: var(--nac-primary, #6366f1) !important;
+        border: none !important;
+        cursor: pointer !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        z-index: 2147483647 !important;
+        font-size: 24px !important;
+        color: white !important;
+        transition: all 0.3s ease !important;
+        pointer-events: auto !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        transform: none !important;
+        clip: auto !important;
+        clip-path: none !important;
+        overflow: visible !important;
       }
-      if (!article) {
-        Utils.showToast("No article content found on this page", "error");
+      .nac-fab:hover {
+        background: var(--nac-primary-hover, #4f46e5) !important;
+        transform: scale(1.05) !important;
+      }
+      .nac-fab:focus-visible {
+        outline: 2px solid var(--nac-primary, #6366f1);
+        outline-offset: 2px;
+      }
+      @media (max-width: 768px) {
+        .nac-fab {
+          bottom: 80px !important;
+          right: 16px !important;
+          width: 60px !important;
+          height: 60px !important;
+          font-size: 28px !important;
+        }
+      }
+    `;
+      fabShadow.appendChild(fabStyle);
+      fab = document.createElement("button");
+      fab.className = "nac-fab";
+      fab.innerHTML = fabIcon;
+      fab.title = "NOSTR Article Capture";
+      fab.setAttribute("aria-label", "Capture Article");
+      fabShadow.appendChild(fab);
+      _fabHost = fabHost;
+      console.log("[NAC] FAB created via Shadow DOM");
+    } catch (shadowError) {
+      console.warn("[NAC] Shadow DOM FAB failed:", shadowError.message, "\u2014 falling back to regular DOM");
+      fab = document.createElement("button");
+      fab.className = "nac-fab";
+      fab.style.cssText = "position:fixed!important;bottom:20px!important;right:20px!important;z-index:2147483647!important;width:56px!important;height:56px!important;border-radius:50%!important;background:#6366f1!important;color:white!important;border:none!important;cursor:pointer!important;font-size:24px!important;box-shadow:0 4px 12px rgba(0,0,0,0.3)!important;display:flex!important;align-items:center!important;justify-content:center!important;pointer-events:auto!important;opacity:1!important;visibility:visible!important;";
+      fab.innerHTML = fabIcon;
+      fab.title = "NOSTR Article Capture";
+      fab.setAttribute("aria-label", "Capture Article");
+      document.body.appendChild(fab);
+      _fabHost = fab;
+      console.log("[NAC] FAB created via regular DOM fallback");
+    }
+    fab.addEventListener("click", async () => {
+      try {
+        Utils.log("FAB clicked");
+        const detection2 = ContentDetector.detect();
+        Utils.log("Content detected:", detection2);
+        let article;
+        if (detection2.platform && PlatformHandler.has(detection2.platform)) {
+          const handler = PlatformHandler.get(detection2.platform);
+          article = await handler.extract();
+        } else {
+          article = ContentExtractor.extractArticle();
+        }
+        if (!article) {
+          Utils.showToast("No article content found on this page", "error");
+          return;
+        }
+        article.contentType = detection2.type;
+        article.platform = detection2.platform;
+        article.platformMetadata = detection2.metadata;
+        article.contentConfidence = detection2.confidence;
+        article.hasComments = ContentDetector.hasComments();
+        await ReaderView.show(article);
+      } catch (clickError) {
+        console.error("[NAC] FAB click handler error:", clickError);
+      }
+    });
+    _fab = fab;
+    _state.nacFabRef = fab;
+    return fab;
+  }
+  async function init() {
+    try {
+      console.log("[NAC] Init starting on", window.location.hostname);
+      Utils.log("Initializing NOSTR Article Capture v" + CONFIG.version);
+      Storage.checkGMAvailability();
+      try {
+        await EntityMigration.migrateAliasesToEntities();
+      } catch (e) {
+        console.error("[NAC] Entity migration failed:", e);
+      }
+      try {
+        GM_addStyle(STYLES);
+      } catch (styleError) {
+        console.warn("[NAC] GM_addStyle failed:", styleError.message, "\u2014 injecting via <style> tag");
+        const styleEl = document.createElement("style");
+        styleEl.textContent = STYLES;
+        (document.head || document.documentElement).appendChild(styleEl);
+      }
+      await waitForBody();
+      console.log("[NAC] document.body available:", !!document.body);
+      if (!document.body) {
+        console.error("[NAC] FATAL: document.body still null after waiting. Cannot create FAB.");
         return;
       }
-      article.contentType = detection2.type;
-      article.platform = detection2.platform;
-      article.platformMetadata = detection2.metadata;
-      article.contentConfidence = detection2.confidence;
-      article.hasComments = ContentDetector.hasComments();
-      await ReaderView.show(article);
-    });
-    fabShadow.appendChild(fab);
-    _state.nacFabRef = fab;
-    setInterval(() => {
-      if (!document.body.contains(fabHost)) {
-        document.body.appendChild(fabHost);
+      createFAB();
+      console.log("[NAC] FAB created successfully");
+      setInterval(() => {
+        try {
+          ensureFABExists();
+          if (_fabHost && _fabHost.id === "nac-fab-host") {
+            _fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
+          }
+        } catch (e) {
+        }
+      }, 3e3);
+      let lastUrl = window.location.href;
+      const urlObserver = new MutationObserver(() => {
+        try {
+          if (window.location.href !== lastUrl) {
+            lastUrl = window.location.href;
+            console.log("[NAC] SPA navigation detected:", lastUrl);
+            ensureFABExists();
+          }
+        } catch (e) {
+        }
+      });
+      urlObserver.observe(document.body, { childList: true, subtree: true });
+      window.addEventListener("yt-navigate-finish", () => {
+        console.log("[NAC] YouTube navigation event detected");
+        ensureFABExists();
+      });
+      try {
+        GM_registerMenuCommand("Open Settings", async () => {
+          const article = ContentExtractor.extractArticle() || { url: window.location.href };
+          await ReaderView.show(article);
+          await ReaderView.showSettings();
+        });
+        GM_registerMenuCommand("Export Entities", async () => {
+          const json = await Storage.entities.exportAll();
+          const blob = new Blob([json], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "nostr-entities-" + Date.now() + ".json";
+          a.click();
+          Utils.showToast("Entities exported");
+        });
+      } catch (menuError) {
+        console.warn("[NAC] Menu command registration failed:", menuError.message);
       }
-      fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
-    }, 3e3);
-    GM_registerMenuCommand("Open Settings", async () => {
-      const article = ContentExtractor.extractArticle() || { url: window.location.href };
-      await ReaderView.show(article);
-      await ReaderView.showSettings();
-    });
-    GM_registerMenuCommand("Export Entities", async () => {
-      const json = await Storage.entities.exportAll();
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "nostr-entities-" + Date.now() + ".json";
-      a.click();
-      Utils.showToast("Entities exported");
-    });
-    Utils.log("Initialization complete");
+      console.log("[NAC] Initialization complete on", window.location.hostname);
+      Utils.log("Initialization complete");
+    } catch (e) {
+      console.error("[NAC] Init FAILED:", e);
+    }
   }
+  var _fabHost, _fab;
   var init_init = __esm({
     "src/init.js"() {
       init_config();
@@ -9006,6 +9101,8 @@ Enter option (1-4):`;
       init_reader_view();
       init_entity_migration();
       init_styles();
+      _fabHost = null;
+      _fab = null;
     }
   });
 
@@ -9924,9 +10021,11 @@ ${extractDescription()}`;
       init_instagram();
       init_tiktok();
       if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", init);
+        document.addEventListener("DOMContentLoaded", () => {
+          init().catch((e) => console.error("[NAC] Init promise rejected:", e));
+        });
       } else {
-        init();
+        init().catch((e) => console.error("[NAC] Init promise rejected:", e));
       }
     }
   });

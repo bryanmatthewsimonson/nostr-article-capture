@@ -29,7 +29,9 @@ import './platforms/tiktok.js';    // Self-registering
 
 // Run init when DOM is ready
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('DOMContentLoaded', () => {
+    init().catch(e => console.error('[NAC] Init promise rejected:', e));
+  });
 } else {
-  init();
+  init().catch(e => console.error('[NAC] Init promise rejected:', e));
 }
