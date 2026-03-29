@@ -1,6 +1,6 @@
 # NOSTR NIPs Analysis for Content Metadata System
 
-> **Note**: This document was written during early v1 planning and analyzes NIPs for a broader annotation/verification system. The v2 implementation (NOSTR Article Capture) uses a focused subset of these NIPs. See the [NIPs Currently Used](#nips-currently-used-in-v2) section below for the actual implementation status.
+> **Note**: This document was written during early v1 planning and analyzes NIPs for a broader annotation/verification system. The v3 implementation (NOSTR Content Capture) uses a focused subset of these NIPs. See the [NIPs Currently Used](#nips-currently-used-in-v3) section below for the actual implementation status.
 
 ## Overview
 This document analyzes existing NOSTR Implementation Possibilities (NIPs) and recommends which to leverage for a decentralized content metadata and annotation system.
@@ -164,7 +164,7 @@ This document analyzes existing NOSTR Implementation Possibilities (NIPs) and re
 ---
 
 #### NIP-78: Application-Specific Data
-**Status:** ✅ IMPLEMENTED in v2
+**Status:** ✅ IMPLEMENTED in v3
 **Relevance:** Critical — used for entity sync
 **Description:** Defines kind 30078 for arbitrary application data that's queryable.
 
@@ -173,7 +173,7 @@ This document analyzes existing NOSTR Implementation Possibilities (NIPs) and re
 ---
 
 #### NIP-04: Encrypted Direct Messages (Legacy)
-**Status:** ✅ IMPLEMENTED in v2 (fallback only)
+**Status:** ✅ IMPLEMENTED in v3 (fallback only)
 **Relevance:** Medium — backward compatibility
 **Description:** Defines AES-256-CBC encryption with ECDH shared secret for encrypted content.
 
@@ -182,7 +182,7 @@ This document analyzes existing NOSTR Implementation Possibilities (NIPs) and re
 ---
 
 #### NIP-44: Versioned Encrypted Payloads
-**Status:** ✅ IMPLEMENTED in v2
+**Status:** ✅ IMPLEMENTED in v3
 **Relevance:** Critical — primary encryption for entity sync
 **Description:** Defines v2 encrypted payloads using ChaCha20-Poly1305 with HKDF-SHA256 key derivation, NIP-44 padding, and HMAC authentication.
 
@@ -310,11 +310,12 @@ Based on the analysis, we need to define custom event kinds in the range 30000-3
 |------|------|------|---------|--------|
 | 30003 | Bookmark List | Existing (NIP-51) | URL bookmarks with tags | Proposed |
 | 30040 | Claim Event | Parameterized Replaceable | Individual claim with claimant/subject p-tags, attribution, crux, confidence | ✅ Implemented |
-| 30043 | Evidence Link | Parameterized Replaceable | Cross-article claim relationships (supports/contradicts/contextualizes) | ✅ Implemented |
+| 30041 | Comment/Statement | Parameterized Replaceable | Individual captured comment with author, platform, thread structure | ✅ Implemented (v3) |
+| 30043 | Evidence Link | Parameterized Replaceable | Cross-content claim relationships (supports/contradicts/contextualizes) | ✅ Implemented |
 | 32123 | URL Annotation | Parameterized Replaceable | Inline annotations with position | Proposed |
 | 32124 | Content Rating | Parameterized Replaceable | Multi-dimensional content ratings | Proposed |
-| 32125 | Entity Relationship | Parameterized Replaceable | Entity-to-article relationship with type (author/mentioned/claimant/subject) | ✅ Implemented |
-| 32126 | Rating Aggregate | Parameterized Replaceable | Computed aggregate ratings | Proposed |
+| 32125 | Entity Relationship | Parameterized Replaceable | Entity-to-content relationship with type (author/mentioned/claimant/subject) | ✅ Implemented |
+| 32126 | Platform Account | Parameterized Replaceable | Published platform identity fragment with username, platform, entity linkage | ✅ Implemented (v3) |
 | 32127 | Fact Check | Parameterized Replaceable | Structured fact-checking results | Proposed |
 | 1063 | File Metadata | Existing (NIP-94) | Can extend for URL metadata | Proposed |
 
@@ -377,43 +378,50 @@ For maximum adoption:
 
 ---
 
-## NIPs Currently Used in v2
+## NIPs Currently Used in v3
 
-The v2 NOSTR Article Capture implementation uses the following NIPs:
+The v3 NOSTR Content Capture implementation uses the following NIPs:
 
-| NIP | Name | Usage in v2 |
+| NIP | Name | Usage in v3 |
 |-----|------|-------------|
 | **NIP-01** | Basic Protocol | Event structure, relay communication (REQ/EVENT/EOSE/OK/NOTICE/CLOSE) |
 | **NIP-04** | Encrypted DMs (Legacy) | AES-256-CBC decryption fallback for older entity sync events |
 | **NIP-07** | Browser Extension | Optional signing via browser extensions (nos2x, Alby) |
 | **NIP-19** | Bech32 Encoding | `npub` / `nsec` key encoding and decoding |
-| **NIP-23** | Long-form Content | Kind 30023 article events with Markdown body and summary `claim` tags |
+| **NIP-23** | Long-form Content | Kind 30023 for articles, videos, and social posts with Markdown body, platform tags, engagement tags, and summary `claim` tags |
 | **NIP-32** | Labels | Label tags (`L`/`l`) on entity sync events for app-specific categorization |
-| **NIP-33** | Parameterized Replaceable | Kinds 30023, 30040, 30043, 30078, 32125 — all replaceable by `d` tag |
+| **NIP-33** | Parameterized Replaceable | Kinds 30023, 30040, 30041, 30043, 30078, 32125, 32126 — all replaceable by `d` tag |
 | **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
 | **NIP-78** | Application Data | Kind 30078 for encrypted entity storage and cross-browser sync |
 
-### Event Kinds Used in v2
+### Event Kinds Used in v3
 
 | Kind | Name | Usage |
 |------|------|-------|
 | **0** | Profile Metadata | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
-| **30023** | Long-form Article | Published article content in Markdown with entity `p` tags and summary `claim` tags |
-| **30040** | Claim Event | Individual claim with claimant/subject `p` tags, attribution type, confidence, crux flag |
-| **30043** | Evidence Link | Cross-article claim relationship: supports, contradicts, or contextualizes |
+| **30023** | Long-form Content | Published content (articles, videos, social posts) in Markdown with entity `p` tags, platform/engagement tags, and summary `claim` tags |
+| **30040** | Claim Event | Individual claim with claimant/subject/object `p` tags, attribution type, confidence, crux flag, predicate, quote-date |
+| **30041** | Comment/Statement | Individual captured comment with author, platform, thread structure, engagement (new in v3) |
+| **30043** | Evidence Link | Cross-content claim relationship: supports, contradicts, or contextualizes |
 | **30078** | Application Data | Encrypted entity sync (NIP-44 v2 encrypt-to-self; NIP-04 fallback on read) |
-| **32125** | Entity Relationship | Links an entity to an article with a typed relationship (author, mentioned, claimant, subject) |
+| **32125** | Entity Relationship | Links an entity to content with a typed relationship (author, mentioned, claimant, subject, object) |
+| **32126** | Platform Account | Published platform identity fragment with username, platform, keypair, entity linkage (new in v3) |
 
 ---
 
 ## Summary
 
-**NIPs used in v2:** NIP-01, NIP-04, NIP-07, NIP-19, NIP-23, NIP-32, NIP-33, NIP-44, NIP-78
+**NIPs used in v3:** NIP-01, NIP-04, NIP-07, NIP-19, NIP-23, NIP-32, NIP-33, NIP-44, NIP-78
 
-**Event kinds implemented in v2:** 0, 30023, 30040, 30043, 30078, 32125
+**Event kinds implemented in v3:** 0, 30023, 30040, 30041, 30043, 30078, 32125, 32126
+
+**New in v3 (vs. v2):**
+- Kind 30041: Comment/Statement events — individual captured comments as addressable NOSTR events
+- Kind 32126: Platform Account events — platform identity fragments (previously proposed as "Rating Aggregates")
+- Extended kind 30023 with `content_format`, `platform`, video/tweet metadata, and engagement metric tags
+- Extended kind 30040 with `subject_text`, `object_text` freetext fields
 
 **v1 proposed event kinds (not implemented):**
 - 32123: URL Annotations
 - 32124: Content Ratings
-- 32126: Rating Aggregates
 - 32127: Fact Checks

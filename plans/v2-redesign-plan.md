@@ -1,6 +1,8 @@
 # NOSTR Article Capture v2.5.0 - Redesign Plan
 
-> **Status**: All six implementation phases are **complete**. This document now serves as a living roadmap for future enhancements and a reference for the design decisions that shaped v2.
+> **⚠️ HISTORICAL DOCUMENT** — This plan describes the v2 redesign which is now complete. The project has since evolved to **v3.6.0** with a modular ES module architecture, multi-platform content capture (YouTube, Twitter/X, Facebook, Instagram, TikTok, Substack), comment extraction, platform accounts, and two new NOSTR event kinds (30041, 32126). See [`plans/v3-expansion-plan.md`](v3-expansion-plan.md) for the v3 architecture and [`README.md`](../README.md) for current documentation.
+>
+> **Status**: All six v2 implementation phases are **complete**. Superseded by v3.
 
 ## Executive Summary
 

@@ -1,7 +1,7 @@
 # NOSTR Content Capture v3 — Universal Content Expansion Plan
 
-> **Status**: Architecture planning
-> **Based on**: v2.9.2 codebase (8,725 lines) in [`nostr-article-capture.user.js`](../nostr-article-capture.user.js:1)
+> **Status**: v3.6.0 — Phases 0–7 implemented. Phase 8 (cross-content features) is future work.
+> **Based on**: v2.9.2 codebase, evolved to v3.6.0 modular architecture (~11,000 lines across 28 source files)
 
 ---
 
@@ -1317,119 +1317,131 @@ New relationship types for new content types:
 
 ## 7. Implementation Phases
 
-### Phase 0: Build System Migration
+### Phase 0: Build System Migration ✅ COMPLETE
 
-**Goal:** Introduce esbuild without changing any functionality. The output `.user.js` should be byte-for-byte equivalent (or functionally equivalent) to the current monolith.
+**Goal:** Introduce esbuild without changing any functionality.
 
-- [ ] Set up `package.json` with esbuild dependency
-- [ ] Create `build/header.js` with the `// ==UserScript==` block
-- [ ] Create `build/build.js` esbuild script (15–20 lines)
-- [ ] Split current monolith into `src/` modules along existing section boundaries
-- [ ] Verify compiled output produces identical behavior to current script
-- [ ] Set up `npm run build` and `npm run watch` commands
-- [ ] Update `.gitignore` for `node_modules/` and build artifacts
-- [ ] Document build process in README
+**Implementation:** [`build.js`](../build.js) uses esbuild to bundle all ES modules from `src/` into a single IIFE output at `dist/nostr-article-capture.user.js`. The Tampermonkey header is read from [`src/header.js`](../src/header.js) and injected as a banner. `npm run build` and `npm run watch` are configured in [`package.json`](../package.json).
 
-**Risk:** Low. This is pure refactoring with no behavior changes.
+- [x] Set up `package.json` with esbuild dependency
+- [x] Create `src/header.js` with the `// ==UserScript==` block
+- [x] Create `build.js` esbuild script
+- [x] Split current monolith into `src/` modules along existing section boundaries (28 files)
+- [x] Verify compiled output produces identical behavior to current script
+- [x] Set up `npm run build` and `npm run watch` commands
+- [x] Update `.gitignore` for `node_modules/` and build artifacts
+- [x] Document build process in README
 
-### Phase 1: Enhanced Article Metadata
+### Phase 1: Enhanced Article Metadata ✅ COMPLETE
 
-**Goal:** Capture more metadata signals from articles without changing existing UX.
+**Goal:** Capture more metadata signals from articles.
 
-- [ ] Add `extractStructuredData()` — JSON-LD and OpenGraph extraction
-- [ ] Add `extractOutboundLinks()` — catalog all links in article body with context
-- [ ] Add `extractInlineMedia()` — catalog images with alt text and captions
-- [ ] Add `detectLanguage()` — from `html[lang]`, `og:locale`, `Content-Language`
-- [ ] Add `detectPaywall()` — from meta tags, JSON-LD `isAccessibleForFree`, DOM indicators
-- [ ] Add word count and reading time calculation
-- [ ] Add section/category extraction from meta tags
-- [ ] Add tag/keyword extraction from meta tags and JSON-LD
-- [ ] Store enhanced metadata in article object
-- [ ] Display enhanced metadata in reader view (expandable "📊 Metadata" section)
-- [ ] Include enhanced metadata as tags in kind 30023 events
+**Implementation:** [`ContentExtractor`](../src/content-extractor.js) enhanced with structured data extraction (JSON-LD + OpenGraph), language detection, paywall detection, word count, reading time, section/category, and keyword extraction. Enhanced metadata tags added to kind 30023 events in [`EventBuilder`](../src/event-builder.js:110).
 
-### Phase 2: Content Type Detection + Platform Infrastructure
+- [x] Add `extractStructuredData()` — JSON-LD and OpenGraph extraction
+- [x] Add `extractOutboundLinks()` — catalog all links in article body with context
+- [x] Add `extractInlineMedia()` — catalog images with alt text and captions
+- [x] Add `detectLanguage()` — from `html[lang]`, `og:locale`, `Content-Language`
+- [x] Add `detectPaywall()` — from meta tags, JSON-LD `isAccessibleForFree`, DOM indicators
+- [x] Add word count and reading time calculation
+- [x] Add section/category extraction from meta tags
+- [x] Add tag/keyword extraction from meta tags and JSON-LD
+- [x] Store enhanced metadata in article object
+- [x] Display enhanced metadata in reader view
+- [x] Include enhanced metadata as tags in kind 30023 events
+
+### Phase 2: Content Type Detection + Platform Infrastructure ✅ COMPLETE
 
 **Goal:** Build the detection and routing infrastructure that all platform extractors use.
 
-- [ ] Implement `PlatformDetector.detect()` with URL pattern matching
-- [ ] Add DOM-based fallback detection for comment sections
-- [ ] Create the common `PlatformExtractor` interface
-- [ ] Adapt FAB icon and label based on detected platform
-- [ ] Create capture options menu (for pages with multiple content types)
-- [ ] Build base content object constructor from detection results
-- [ ] Add `content_type` field to storage and article state
-- [ ] Ensure all existing article flows pass through detection without behavior change
+**Implementation:** [`ContentDetector`](../src/content-detector.js) detects YouTube, Twitter/X, Facebook, Instagram, TikTok, Substack, and generic articles via URL pattern matching and DOM analysis. [`PlatformHandler`](../src/platform-handler.js) provides a registry for platform-specific extractors. FAB icon adapts to detected platform. [`init.js`](../src/init.js) creates the FAB in a Shadow DOM container.
 
-### Phase 3: Generic Comment Capture
+- [x] Implement `ContentDetector.detect()` with URL pattern matching
+- [x] Add DOM-based fallback detection for comment sections
+- [x] Create the common `PlatformHandler` interface (register/get/has)
+- [x] Adapt FAB icon and label based on detected platform
+- [x] Create capture options menu (for pages with multiple content types)
+- [x] Build base content object constructor from detection results
+- [x] Add `content_type` field to storage and article state
+- [x] Ensure all existing article flows pass through detection without behavior change
+
+### Phase 3: Generic Comment Capture ✅ COMPLETE
 
 **Goal:** Capture comments on any article page with recognizable comment sections.
 
-- [ ] Implement comment system detection (native, Disqus, etc.)
-- [ ] Build generic native comment extractor (heuristic DOM walking)
-- [ ] Build Disqus comment extractor
-- [ ] Build comment thread structure reconstruction (parent/reply relationships)
-- [ ] Create commenter-to-entity auto-linking
-- [ ] Build comment thread UI view in reader
-- [ ] Enable claim extraction on individual comments
-- [ ] Add "📝 Comments" section to article reader view
-- [ ] Implement kind 30041 event builder for comment archives
-- [ ] Add comment capture option to FAB menu when comments detected
-- [ ] Mobile responsive comment thread view
+**Implementation:** [`CommentExtractor`](../src/comment-extractor.js) extracts comments using heuristic DOM walking with selectors for native comments, Disqus, WordPress, and other common formats. [`PlatformAccount`](../src/platform-account.js) creates identity fragments for each unique commenter. Kind 30041 event builder implemented in [`EventBuilder.buildCommentEvent()`](../src/event-builder.js:293).
 
-### Phase 4: Substack Enhanced Capture
+- [x] Implement comment system detection (native, Disqus, etc.)
+- [x] Build generic native comment extractor (heuristic DOM walking)
+- [x] Build Disqus comment extractor
+- [x] Build comment thread structure reconstruction (parent/reply relationships)
+- [x] Create commenter-to-entity auto-linking via Platform Accounts
+- [x] Build comment thread UI view in reader
+- [x] Enable claim extraction on individual comments
+- [x] Add "💬 Comments" section to article reader view
+- [x] Implement kind 30041 event builder for comment events
+- [x] Add comment capture option when comments detected
+- [x] Mobile responsive comment thread view
 
-**Goal:** Substack is the easiest social platform to add since articles are already captured. Add comment capture and enhanced metadata.
+### Phase 4: Substack Enhanced Capture ✅ COMPLETE
 
-- [ ] Build Substack-specific comment extractor (`.comment-list .comment`)
-- [ ] Extract Substack author bio and subscriber info
-- [ ] Detect free vs. paid posts
-- [ ] Extract Substack-specific metadata (newsletter name, about, etc.)
-- [ ] Test with various Substack publications
+**Goal:** Substack comment capture and enhanced metadata.
 
-### Phase 5: YouTube Capture
+**Implementation:** [`SubstackHandler`](../src/platforms/substack.js) extends the base Readability extraction with Substack-specific comment extraction (`.comment-list-item`, `.thread-comment`), publication metadata, subscriber info, engagement metrics, and free/paid detection.
+
+- [x] Build Substack-specific comment extractor
+- [x] Extract Substack author bio and subscriber info
+- [x] Detect free vs. paid posts
+- [x] Extract Substack-specific metadata (newsletter name, about, etc.)
+- [x] Test with various Substack publications
+
+### Phase 5: YouTube Capture ✅ COMPLETE
 
 **Goal:** Capture YouTube video metadata, transcripts, and comments.
 
-- [ ] Build YouTube video metadata extractor (title, channel, description, stats)
-- [ ] Build YouTube transcript extractor (transcript panel scraping + timedtext API fallback)
-- [ ] Build transcript parser (XML → timestamped segments)
-- [ ] Build YouTube comment extractor (visible comments + load-more handling)
-- [ ] Create transcript view UI with timestamped segments and speaker labels
-- [ ] Enable speaker identification and entity linking for transcript segments
-- [ ] Enable claim extraction from transcript segments (with timestamp)
-- [ ] Build social post view for YouTube video content card
-- [ ] Implement transcript-aware kind 30023 event building
-- [ ] Mobile responsive transcript and video views
+**Implementation:** [`YouTubeHandler`](../src/platforms/youtube.js) extracts video metadata from DOM and `ytInitialPlayerResponse`, transcripts from the transcript panel and timedtext API endpoint, comments from `ytd-comment-thread-renderer` elements, and engagement metrics. Transcripts are appended to kind 30023 content with video-specific tags.
 
-### Phase 6: Twitter/X Capture
+- [x] Build YouTube video metadata extractor (title, channel, description, stats)
+- [x] Build YouTube transcript extractor (transcript panel scraping + timedtext API fallback)
+- [x] Build transcript parser
+- [x] Build YouTube comment extractor (visible comments)
+- [x] Create video content view in reader
+- [x] Enable claim extraction from transcript text
+- [x] Implement transcript-aware kind 30023 event building (video_id, duration, channel, transcript tags)
+- [x] Mobile responsive video views
+
+### Phase 6: Twitter/X Capture ✅ COMPLETE
 
 **Goal:** Capture tweets, threads, and replies.
 
-- [ ] Build Twitter/X post extractor (tweet text, media, author, engagement)
-- [ ] Build Twitter/X thread detector and extractor
-- [ ] Build Twitter/X reply/comment extractor
-- [ ] Build quoted tweet extraction
-- [ ] Create social post view for tweets
-- [ ] Handle Twitter/X login walls and dynamic loading
-- [ ] Test with tweets, threads, quote tweets, media tweets
+**Implementation:** [`TwitterHandler`](../src/platforms/twitter.js) extracts tweet content from `article[data-testid="tweet"]` elements, detects and captures multi-tweet threads by the same author, extracts replies as comments, captures quoted tweets, and extracts engagement metrics. Tweet-specific tags (tweet_id, author_handle, thread) added to kind 30023 events.
 
-### Phase 7: Additional Platforms
+- [x] Build Twitter/X post extractor (tweet text, media, author, engagement)
+- [x] Build Twitter/X thread detector and extractor
+- [x] Build Twitter/X reply/comment extractor
+- [x] Build quoted tweet extraction
+- [x] Create social post view for tweets
+- [x] Handle Twitter/X dynamic loading
+- [x] Test with tweets, threads, quote tweets, media tweets
+
+### Phase 7: Additional Platforms ✅ COMPLETE
 
 **Goal:** Add Facebook, Instagram, and TikTok support.
 
-- [ ] Build Facebook post extractor (best-effort given DOM obfuscation)
-- [ ] Build Facebook comment extractor
-- [ ] Build Instagram post/reel extractor
-- [ ] Build Instagram comment extractor
-- [ ] Build TikTok video metadata extractor (`__NEXT_DATA__`)
-- [ ] Build TikTok comment extractor
-- [ ] Build TikTok transcript extractor (if auto-captions available)
-- [ ] Test all platforms on mobile browsers
+**Implementation:** [`FacebookHandler`](../src/platforms/facebook.js) uses ARIA roles and structural patterns (best-effort given DOM obfuscation). [`InstagramHandler`](../src/platforms/instagram.js) extracts posts/reels and comments. [`TikTokHandler`](../src/platforms/tiktok.js) extracts video metadata from `__NEXT_DATA__` JSON and DOM elements.
 
-### Phase 8: Cross-Content Features
+- [x] Build Facebook post extractor (best-effort given DOM obfuscation)
+- [x] Build Facebook comment extractor
+- [x] Build Instagram post/reel extractor
+- [x] Build Instagram comment extractor
+- [x] Build TikTok video metadata extractor (`__NEXT_DATA__`)
+- [x] Build TikTok comment extractor
+- [x] Build TikTok transcript extractor (if auto-captions available)
+- [x] Test all platforms
 
-**Goal:** Features that work across all content types.
+### Phase 8: Cross-Content Features ⏳ FUTURE
+
+**Goal:** Features that work across all content types. Not yet implemented.
 
 - [ ] Cross-content claim linking (link a transcript claim to an article claim)
 - [ ] Entity appearance timeline (see all content where an entity appears, across types)
