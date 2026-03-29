@@ -1,7 +1,7 @@
 // Trusted Types policy for YouTube and other sites with CSP: require-trusted-types-for 'script'
 // This MUST run before any innerHTML/outerHTML/insertAdjacentHTML assignments.
 // The 'default' policy automatically wraps all raw string assignments globally,
-// covering both our code AND @require'd libraries (Turndown.js, Readability.js).
+// covering both our code AND bundled libraries (Turndown.js, Readability.js).
 if (typeof trustedTypes !== 'undefined' && trustedTypes.createPolicy) {
     try {
         // Create a default policy — auto-wraps ALL innerHTML assignments

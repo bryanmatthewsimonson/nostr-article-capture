@@ -7,9 +7,6 @@
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
 // @author       Decentralized News Network
 // @match        *://*/*
-// @require      https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/Readability.js
-// @require      https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js
-// @require      https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue

@@ -14,8 +14,7 @@ const buildOptions = {
   target: ['es2020'],
   minify: false,  // Keep readable for debugging
   banner: { js: header },
-  // Don't bundle @require'd libraries (Readability, Turndown)
-  external: [],
+  // Libraries (Readability, Turndown, turndown-plugin-gfm) are bundled via npm
 };
 
 if (isWatch) {

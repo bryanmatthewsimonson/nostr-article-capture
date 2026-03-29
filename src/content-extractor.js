@@ -1,7 +1,10 @@
 import { CONFIG } from './config.js';
+import { Readability } from '@mozilla/readability';
+import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
 
 export const ContentExtractor = {
-  // Extract article using Readability (if available via @require)
+  // Extract article using Readability (bundled via npm)
   extractArticle: () => {
     try {
       // Pre-process lazy-loaded images before cloning
@@ -96,8 +99,8 @@ export const ContentExtractor = {
       // Clone document for Readability
       const documentClone = document.cloneNode(true);
       
-      // Check if Readability is available
-      if (typeof Readability !== 'undefined') {
+      // Readability is now bundled via npm import
+      {
         const reader = new Readability(documentClone);
         const article = reader.parse();
         
@@ -152,9 +155,6 @@ export const ContentExtractor = {
                               !!document.querySelector('[class*="paywall"], [class*="subscriber"], [data-paywall]');
 
         return article;
-      } else {
-        // Fallback: simple extraction
-        return ContentExtractor.extractSimple();
       }
     } catch (e) {
       console.error('[NAC] Article extraction failed:', e);
@@ -332,22 +332,19 @@ export const ContentExtractor = {
     return null;
   },
 
-  // Convert HTML to Markdown (if Turndown is available)
+  // Convert HTML to Markdown (Turndown bundled via npm)
   htmlToMarkdown: (html) => {
     try {
-      if (typeof TurndownService !== 'undefined') {
-        const turndown = new TurndownService({
-          headingStyle: 'atx',
-          hr: '---',
-          bulletListMarker: '-',
-          codeBlockStyle: 'fenced',
-          emDelimiter: '*'
-        });
+      const turndown = new TurndownService({
+        headingStyle: 'atx',
+        hr: '---',
+        bulletListMarker: '-',
+        codeBlockStyle: 'fenced',
+        emDelimiter: '*'
+      });
 
-        // Use GFM plugin for tables, strikethrough, task lists if available
-        if (typeof turndownPluginGfm !== 'undefined') {
-          turndown.use(turndownPluginGfm.gfm);
-        }
+      // Use GFM plugin for tables, strikethrough, task lists
+      turndown.use(gfm);
 
         // Preserve images with alt text and src (with lazy-load fallback)
         turndown.addRule('images', {
@@ -477,11 +474,7 @@ export const ContentExtractor = {
           }
         });
 
-        return turndown.turndown(html);
-      } else {
-        // Fallback: preserve structure without Turndown
-        return ContentExtractor._fallbackHtmlToMarkdown(html);
-      }
+      return turndown.turndown(html);
     } catch (e) {
       console.error('[NAC] Markdown conversion failed:', e);
       return ContentExtractor._fallbackHtmlToMarkdown(html);
