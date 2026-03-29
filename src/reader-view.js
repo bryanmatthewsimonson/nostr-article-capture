@@ -12,6 +12,7 @@ import { EventBuilder } from './event-builder.js';
 import { EntityBrowser } from './entity-browser.js';
 import { CommentExtractor } from './comment-extractor.js';
 import { PlatformAccount } from './platform-account.js';
+import { youtubeExtractTranscript } from './platforms/youtube.js';
 
 export const ReaderView = {
   container: null,
@@ -145,6 +146,15 @@ export const ReaderView = {
             </div>
             <div class="nac-transcript-body" id="nac-transcript-body" style="display:none">
               <pre class="nac-transcript-text">${Utils.escapeHtml(article.transcript)}</pre>
+            </div>
+          </div>` : (article.contentType === 'video' || article.platform === 'youtube') ? `
+          <div class="nac-transcript-section">
+            <div class="nac-transcript-header" style="display:flex;align-items:center;gap:8px;">
+              <span>📝 Transcript</span>
+              <button class="nac-transcript-load-btn" id="nac-transcript-load-btn">No transcript available — click to try loading</button>
+            </div>
+            <div class="nac-transcript-body" id="nac-transcript-body" style="display:none">
+              <pre class="nac-transcript-text" id="nac-transcript-text"></pre>
             </div>
           </div>` : ''}
         </div>
@@ -302,6 +312,47 @@ export const ReaderView = {
       transcriptToggle.addEventListener('click', toggleTranscript);
       transcriptToggle.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTranscript(); }
+      });
+    }
+
+    // "Try loading transcript" button — on-demand extraction for YouTube
+    const transcriptLoadBtn = document.getElementById('nac-transcript-load-btn');
+    if (transcriptLoadBtn) {
+      transcriptLoadBtn.addEventListener('click', async () => {
+        transcriptLoadBtn.disabled = true;
+        transcriptLoadBtn.textContent = '⏳ Loading transcript...';
+        try {
+          const transcript = await youtubeExtractTranscript();
+          if (transcript) {
+            ReaderView.article.transcript = transcript;
+            ReaderView.article.wordCount = transcript.split(/\s+/).filter(w => w).length;
+            ReaderView.article.readingTimeMinutes = Math.ceil(ReaderView.article.wordCount / 225);
+            // Show the transcript body
+            const body = document.getElementById('nac-transcript-body');
+            const textEl = document.getElementById('nac-transcript-text');
+            if (body && textEl) {
+              textEl.textContent = transcript;
+              body.style.display = '';
+            }
+            transcriptLoadBtn.textContent = '✓ Transcript loaded';
+            Utils.showToast(`Transcript loaded (${ReaderView.article.wordCount} words)`, 'success');
+          } else {
+            transcriptLoadBtn.textContent = 'No transcript found';
+            Utils.showToast('No transcript available for this video', 'error');
+            setTimeout(() => {
+              transcriptLoadBtn.textContent = 'Click to retry';
+              transcriptLoadBtn.disabled = false;
+            }, 3000);
+          }
+        } catch (e) {
+          console.error('[NAC] Transcript load error:', e);
+          transcriptLoadBtn.textContent = 'Failed to load';
+          Utils.showToast('Transcript extraction failed: ' + e.message, 'error');
+          setTimeout(() => {
+            transcriptLoadBtn.textContent = 'Click to retry';
+            transcriptLoadBtn.disabled = false;
+          }, 3000);
+        }
       });
     }
 

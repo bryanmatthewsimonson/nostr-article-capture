@@ -94,14 +94,29 @@ const YouTubeHandler = {
 // --- Private extraction functions ---
 
 function extractVideoTitle() {
-    return document.querySelector('h1.ytd-watch-metadata yt-formatted-string, meta[name="title"]')?.textContent?.trim() ||
-           document.querySelector('meta[property="og:title"]')?.content ||
-           document.title.replace(' - YouTube', '');
+    // Most reliable: og:title meta tag (always present, always the video title)
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content;
+    if (ogTitle) return ogTitle;
+
+    // Fallback to various DOM locations (YouTube's DOM changes frequently)
+    return document.querySelector(
+        'h1.ytd-watch-metadata yt-formatted-string, ' +
+        'h1.title yt-formatted-string, ' +
+        '#title h1 yt-formatted-string, ' +
+        'h1[class*="title"], ' +
+        '#info-contents h1'
+    )?.textContent?.trim() || document.title.replace(' - YouTube', '').trim();
 }
 
 function extractChannelName() {
-    return document.querySelector('#channel-name a, ytd-channel-name a, [itemprop="author"] [itemprop="name"]')?.textContent?.trim() ||
-           document.querySelector('meta[itemprop="name"]')?.content || '';
+    // Channel name is separate from video title — target channel-specific elements
+    return document.querySelector(
+        'ytd-channel-name yt-formatted-string a, ' +
+        '#channel-name a, ' +
+        '#owner #channel-name a, ' +
+        'a.yt-simple-endpoint[href*="/@"]'
+    )?.textContent?.trim() ||
+    document.querySelector('link[itemprop="name"]')?.content || '';
 }
 
 function getCanonicalVideoUrl() {
@@ -202,86 +217,121 @@ function extractStructuredData() {
 }
 
 async function extractTranscript() {
-    // Method 1: Check if YouTube has transcript panel open in the DOM
-    const transcriptSegments = document.querySelectorAll(
-        'ytd-transcript-segment-renderer, ' +
-        'ytd-transcript-body-renderer .segment, ' +
-        '.ytd-transcript-segment-renderer'
-    );
+    // Method 1: Try ytInitialPlayerResponse global variable (most reliable)
+    try {
+        // YouTube stores this as a global — use unsafeWindow for Tampermonkey access
+        const playerResponse = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window)?.ytInitialPlayerResponse ||
+                              window.ytInitialPlayerResponse;
 
-    if (transcriptSegments.length > 0) {
-        const segments = [];
-        transcriptSegments.forEach(seg => {
-            const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]');
-            const textEl = seg.querySelector('.segment-text, [class*="text"]');
-            const time = timeEl?.textContent?.trim() || '';
-            const text = textEl?.textContent?.trim() || '';
-            if (text) segments.push(`[${time}] ${text}`);
-        });
-        return segments.join('\n');
+        if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+            const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
+            // Prefer English, fallback to first track
+            const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
+            if (track?.baseUrl) {
+                const response = await fetch(track.baseUrl + '&fmt=json3');
+                const json = await response.json();
+                if (json.events) {
+                    return json.events
+                        .filter(e => e.segs)
+                        .map(e => {
+                            const ms = e.tStartMs || 0;
+                            const mins = Math.floor(ms / 60000);
+                            const secs = Math.floor((ms % 60000) / 1000);
+                            const text = e.segs.map(s => s.utf8).join('');
+                            return `[${mins}:${String(secs).padStart(2, '0')}] ${text.trim()}`;
+                        })
+                        .filter(line => line.match(/\] .+/))
+                        .join('\n');
+                }
+            }
+        }
+    } catch(e) {
+        console.log('[NAC YouTube] Method 1 transcript failed:', e.message);
     }
 
-    // Method 2: Try to get transcript via YouTube's internal data
-    // YouTube stores video data in ytInitialPlayerResponse
+    // Method 2: Try parsing captionTracks from script tags (legacy / fallback)
     try {
         const scripts = document.querySelectorAll('script');
         for (const script of scripts) {
             const text = script.textContent;
-            if (text.includes('captionTracks')) {
-                const match = text.match(/"captionTracks":\s*(\[.*?\])/);
+            if (text.includes('"captionTracks"')) {
+                const match = text.match(/"captionTracks":\s*(\[.*?\])/s);
                 if (match) {
                     const tracks = JSON.parse(match[1]);
-                    if (tracks.length > 0) {
-                        // Prefer English, fallback to first track
-                        const englishTrack = tracks.find(t => t.languageCode === 'en') || tracks[0];
-                        if (englishTrack?.baseUrl) {
-                            // Fetch the transcript XML
-                            const response = await fetch(englishTrack.baseUrl);
-                            const xml = await response.text();
-                            // Parse XML transcript
-                            const parser = new DOMParser();
-                            const doc = parser.parseFromString(xml, 'text/xml');
-                            const textNodes = doc.querySelectorAll('text');
-                            const lines = [];
-                            textNodes.forEach(node => {
+                    const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
+                    if (track?.baseUrl) {
+                        // Fetch XML transcript
+                        const resp = await fetch(track.baseUrl);
+                        const xml = await resp.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(xml, 'text/xml');
+                        return Array.from(doc.querySelectorAll('text'))
+                            .map(node => {
                                 const start = parseFloat(node.getAttribute('start') || '0');
-                                const minutes = Math.floor(start / 60);
-                                const seconds = Math.floor(start % 60);
-                                const timestamp = `${minutes}:${String(seconds).padStart(2, '0')}`;
-                                const decoded = node.textContent
-                                    .replace(/&#39;/g, "'")
-                                    .replace(/&amp;/g, '&')
-                                    .replace(/&quot;/g, '"')
-                                    .replace(/&lt;/g, '<')
-                                    .replace(/&gt;/g, '>');
-                                if (decoded.trim()) lines.push(`[${timestamp}] ${decoded.trim()}`);
-                            });
-                            return lines.join('\n');
-                        }
+                                const m = Math.floor(start / 60);
+                                const s = Math.floor(start % 60);
+                                return `[${m}:${String(s).padStart(2, '0')}] ${node.textContent.trim()}`;
+                            })
+                            .filter(l => l.match(/\] .+/))
+                            .join('\n');
                     }
                 }
             }
         }
     } catch(e) {
-        console.log('[NAC YouTube] Transcript extraction failed:', e.message);
+        console.log('[NAC YouTube] Method 2 transcript failed:', e.message);
     }
 
-    return null; // No transcript available
+    // Method 3: Check if transcript panel is already open in the DOM
+    const segments = document.querySelectorAll(
+        'ytd-transcript-segment-renderer .segment-text, ' +
+        '[class*="transcript"] [class*="segment-text"]'
+    );
+    if (segments.length > 0) {
+        return Array.from(segments).map((seg, i) => {
+            const timeEl = seg.previousElementSibling || seg.closest('[class*="segment"]')?.querySelector('[class*="timestamp"]');
+            const time = timeEl?.textContent?.trim() || `${Math.floor(i * 5 / 60)}:${String((i * 5) % 60).padStart(2, '0')}`;
+            return `[${time}] ${seg.textContent.trim()}`;
+        }).join('\n');
+    }
+
+    console.log('[NAC YouTube] No transcript available');
+    return null;
 }
 
 function buildVideoContent() {
-    const desc = extractDescription();
     const meta = extractVideoMeta();
+    const desc = extractDescription();
     const thumbnail = extractThumbnail();
 
     let html = '';
-    if (thumbnail) {
-        html += `<figure><img src="${thumbnail}" alt="Video thumbnail"><figcaption>${extractVideoTitle()}</figcaption></figure>`;
+
+    // Embed the actual video player via iframe
+    if (meta.videoId) {
+        html += `<div class="nac-video-embed" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;margin:1em 0;">
+            <iframe src="https://www.youtube.com/embed/${meta.videoId}"
+                    style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
+                    allowfullscreen loading="lazy"></iframe>
+        </div>`;
+    } else if (thumbnail) {
+        html += `<figure><img src="${thumbnail}" alt="Video thumbnail"></figure>`;
     }
-    html += `<p><strong>Channel:</strong> ${extractChannelName()}</p>`;
+
+    // Video metadata
+    html += '<div class="nac-video-meta">';
+    const channel = extractChannelName();
+    if (channel) html += `<p><strong>Channel:</strong> ${channel}</p>`;
     if (meta.duration) html += `<p><strong>Duration:</strong> ${meta.duration}</p>`;
-    if (meta.isLive) html += `<p><strong>🔴 Live Stream</strong></p>`;
-    if (desc) html += `<div class="video-description"><h3>Description</h3>${desc.split('\n').map(l => `<p>${l}</p>`).join('')}</div>`;
+    if (meta.isLive) html += `<p>🔴 <strong>Live Stream</strong></p>`;
+    html += '</div>';
+
+    // Description
+    if (desc) {
+        html += `<div class="nac-video-description">
+            <h3>Description</h3>
+            ${desc.split('\n').filter(l => l.trim()).map(l => `<p>${l}</p>`).join('')}
+        </div>`;
+    }
 
     return html;
 }
@@ -293,4 +343,4 @@ function buildTextContent() {
 // Register
 PlatformHandler.register('youtube', YouTubeHandler);
 
-export { YouTubeHandler };
+export { YouTubeHandler, extractTranscript as youtubeExtractTranscript };

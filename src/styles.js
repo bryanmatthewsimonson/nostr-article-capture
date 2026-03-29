@@ -2824,4 +2824,50 @@ export const STYLES = `
     color: var(--nac-text);
     margin: 0;
   }
+
+  /* YouTube Video Embed */
+  .nac-video-embed {
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1em 0;
+  }
+
+  .nac-video-meta {
+    padding: 8px 0;
+    font-size: 0.9em;
+    color: var(--nac-text-muted, #888);
+  }
+
+  .nac-video-description {
+    margin: 1em 0;
+    padding: 12px;
+    background: var(--nac-surface, #f5f5f5);
+    border-radius: 8px;
+  }
+
+  .nac-transcript-load-btn {
+    padding: 8px 16px;
+    background: var(--nac-primary, #6366f1);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    margin: 8px 0;
+    font-size: 13px;
+    transition: opacity 0.2s;
+  }
+
+  .nac-transcript-load-btn:hover {
+    opacity: 0.9;
+  }
+
+  .nac-transcript-load-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .nac-transcript-load-btn:focus-visible {
+    outline: 2px solid var(--nac-primary);
+    outline-offset: 2px;
+  }
 `;
