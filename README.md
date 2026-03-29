@@ -1,6 +1,6 @@
 # NOSTR Content Capture
 
-![Version](https://img.shields.io/badge/version-3.6.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.7.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,19 +12,19 @@ A Tampermonkey userscript that captures content from any website — articles, s
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.6.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.7.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
   </a>
 </p>
 
 **Prerequisites:** [Tampermonkey](https://www.tampermonkey.net/) browser extension.
 
-The script auto-updates via `@updateURL` / `@downloadURL` in the userscript header and bundles three `@require` dependencies automatically:
+The script auto-updates via `@updateURL` / `@downloadURL` in the userscript header. All dependencies are bundled via npm — no `@require` tags needed:
 
-| Dependency | Purpose |
-|-----------|---------|
-| [@mozilla/readability](https://github.com/mozilla/readability) 0.5.0 | Article content extraction |
-| [Turndown](https://github.com/mixmark-io/turndown) 7.2.0 | HTML → Markdown conversion |
-| [turndown-plugin-gfm](https://github.com/mixmark-io/turndown#gfm) 1.0.2 | GitHub-Flavored Markdown tables & strikethrough |
+| Dependency | Version | Purpose |
+|-----------|---------|---------|
+| [@mozilla/readability](https://github.com/mozilla/readability) | ^0.6.0 | Article content extraction |
+| [Turndown](https://github.com/mixmark-io/turndown) | ^7.2.2 | HTML → Markdown conversion |
+| [turndown-plugin-gfm](https://github.com/mixmark-io/turndown#gfm) | ^1.0.2 | GitHub-Flavored Markdown tables & strikethrough |
 
 ---
 
@@ -34,7 +34,7 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 |------|----------|---------------|
 | 📰 | **Articles** (any website via Readability) | Article text, metadata, comments |
 | ✉️ | **Substack** newsletters | Articles, author bios, subscriber info, comments |
-| ▶️ | **YouTube** videos | Video metadata, transcripts, comments, engagement |
+| ▶️ | **YouTube** videos | Video metadata, transcripts (3 methods), embedded player, comments, engagement |
 | 𝕏 | **Twitter/X** | Tweets, threads, profiles, replies |
 | f | **Facebook** posts | Post text, media, comments (best-effort) |
 | 📷 | **Instagram** posts and reels | Captions, media, comments |
@@ -46,15 +46,20 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 
 ### 📰 Content Capture
 
-- **One-click capture** via a floating action button (FAB) in a Shadow DOM container — immune to page CSS interference
+- **One-click capture** via a floating action button (FAB) in a Shadow DOM container (with regular DOM fallback) — immune to page CSS interference
 - **Platform-aware detection** — automatically identifies YouTube, Twitter/X, Facebook, Instagram, TikTok, Substack, or generic articles
 - **Mozilla Readability** extracts title, author, date, and body from any article
 - **Smart date detection** — JSON-LD, meta tags (`article:published_time`, `datePublished`), platform-specific selectors
 - **Enhanced metadata** — word count, reading time, language, section, keywords, structured data (JSON-LD + OpenGraph), paywall detection
 - **Platform-specific extractors** — each platform has its own handler with tailored DOM selectors and metadata extraction
-- **YouTube transcript capture** — extracts full video transcripts from the transcript panel or timedtext API
+- **YouTube transcript extraction** — three methods: player API `getTranscript()`, timedtext API, and DOM scraping with automatic fallback
+- **YouTube video embed** — embedded player in reader view with responsive iframe
+- **On-demand transcript loading** — "Load Transcript" button in reader view for deferred extraction
+- **YouTube SPA navigation** — detects `yt-navigate-finish` events for seamless page transition support
 - **Twitter/X thread detection** — captures multi-tweet threads by the same author as a single piece of content
 - **Engagement metrics** — likes, shares, views, comments captured as evidentiary signals
+- **Trusted Types CSP compatibility** — creates CSP-compliant Trusted Types policies for YouTube and Google domains
+- **Quality-hardened platform handlers** — comprehensive try/catch wrapping with XSS prevention (`escapeHtml`) across all extractors
 
 ### 📝 Reader View
 
@@ -174,7 +179,7 @@ All cryptographic operations implemented in pure JavaScript:
 
 - **Responsive design** — mobile-friendly FAB positioning and layout
 - **Dark mode** — full `prefers-color-scheme` support
-- **Shadow DOM FAB** — floating action button isolated from page CSS via closed shadow root, prevents overlays from hiding it
+- **Shadow DOM FAB** — floating action button isolated from page CSS via closed shadow root (with regular DOM fallback), prevents overlays from hiding it
 - **Platform-adaptive FAB icon** — 📰 for articles, 🎬 for videos, 🐦 for tweets, etc.
 - **ARIA labels** on interactive elements (buttons, dialogs, entity chips, cards, filters)
 - **Focus trap** within the reader view — Tab / Shift+Tab cycles through focusable elements
@@ -202,11 +207,12 @@ All cryptographic operations implemented in pure JavaScript:
 
 ## 🏗️ Architecture
 
-Modular ES modules compiled via esbuild into a single Tampermonkey userscript (~11,000 lines across 28 source files):
+Modular ES modules compiled via esbuild into a single Tampermonkey userscript (~11,400 lines across 30 source files):
 
 ```
 src/
 ├── config.js                  # Configuration constants and shared state
+├── trusted-types.js           # Trusted Types CSP policy creation
 ├── crypto.js                  # secp256k1, BIP-340, bech32, NIP-04, NIP-44
 ├── storage.js                 # GM_setValue/localStorage persistence, CRUD
 ├── utils.js                   # escapeHtml, showToast, log, accessibility
@@ -240,9 +246,10 @@ src/
 
 ### Build System
 
-[`build.js`](build.js) uses esbuild to bundle all ES modules into a single IIFE userscript:
+[`build.js`](build.js) uses esbuild to bundle all ES modules into a single IIFE userscript. Dependencies (Readability, Turndown, turndown-plugin-gfm) are installed via npm and bundled into the output — no external `@require` tags:
 
 ```bash
+npm install      # install bundled dependencies
 npm run build    # → dist/nostr-article-capture.user.js
 npm run watch    # → rebuild on file changes
 ```
@@ -434,11 +441,11 @@ npm test
 
 ```
 nostr-article-capture/
-├── src/                                   # ES module source (28 files, ~11,000 lines)
+├── src/                                   # ES module source (30 files, ~11,400 lines)
 │   ├── index.js                           # Entry point
 │   ├── header.js                          # Tampermonkey ==UserScript== block
 │   ├── init.js                            # FAB creation, Shadow DOM, startup
-│   ├── config.js, crypto.js, storage.js, utils.js
+│   ├── config.js, crypto.js, storage.js, utils.js, trusted-types.js
 │   ├── content-extractor.js, content-detector.js
 │   ├── platform-handler.js, platform-account.js
 │   ├── comment-extractor.js, claim-extractor.js
