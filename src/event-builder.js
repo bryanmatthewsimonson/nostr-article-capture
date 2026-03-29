@@ -257,6 +257,47 @@ export const EventBuilder = {
     };
   },
 
+  // Build kind 30041 comment event
+  buildCommentEvent: (comment, articleUrl, articleTitle, userPubkey, accountPubkey) => {
+    return {
+      kind: 30041,
+      pubkey: userPubkey,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', comment.id],
+        ['r', articleUrl],
+        ['title', articleTitle],
+        ['comment-text', comment.text],
+        ['comment-author', comment.authorName],
+        ['platform', comment.platform],
+        ...(accountPubkey ? [['p', accountPubkey, '', 'commenter']] : []),
+        ...(comment.timestamp ? [['comment-date', String(Math.floor(comment.timestamp / 1000))]] : []),
+        ...(comment.replyTo ? [['reply-to', comment.replyTo]] : []),
+        ['client', 'nostr-article-capture']
+      ],
+      content: comment.text
+    };
+  },
+
+  // Build kind 32126 platform account event
+  buildPlatformAccountEvent: (account, userPubkey) => {
+    return {
+      kind: 32126,
+      pubkey: userPubkey,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', account.id],
+        ['p', account.keypair.pubkey, '', 'account'],
+        ['account-username', account.username],
+        ['account-platform', account.platform],
+        ...(account.profileUrl ? [['r', account.profileUrl]] : []),
+        ...(account.linkedEntityId ? [['linked-entity', account.linkedEntityId]] : []),
+        ['client', 'nostr-article-capture']
+      ],
+      content: ''
+    };
+  },
+
   // Build kind 30043 evidence link event
   buildEvidenceLinkEvent: async (link, allClaims, userPubkey) => {
     const sourceClaim = allClaims[link.source_claim_id];

@@ -313,6 +313,56 @@ export const Storage = {
     }
   },
 
+  // Platform accounts storage
+  platformAccounts: {
+    getAll: async () => {
+        return await Storage.get('platform_accounts', {});
+    },
+    save: async (account) => {
+        const accounts = await Storage.get('platform_accounts', {});
+        accounts[account.id] = account;
+        return Storage.set('platform_accounts', accounts);
+    },
+    saveAll: async (accounts) => {
+        return Storage.set('platform_accounts', accounts);
+    },
+    delete: async (accountId) => {
+        const accounts = await Storage.get('platform_accounts', {});
+        delete accounts[accountId];
+        return Storage.set('platform_accounts', accounts);
+    },
+    getCount: async () => {
+        const accounts = await Storage.get('platform_accounts', {});
+        return Object.keys(accounts).length;
+    }
+  },
+
+  // Captured comments storage
+  comments: {
+    getAll: async () => {
+        return await Storage.get('captured_comments', {});
+    },
+    getForUrl: async (url) => {
+        const all = await Storage.get('captured_comments', {});
+        return Object.values(all).filter(c => c.sourceUrl === url);
+    },
+    save: async (comment) => {
+        const all = await Storage.get('captured_comments', {});
+        all[comment.id] = comment;
+        return Storage.set('captured_comments', all);
+    },
+    saveMany: async (comments) => {
+        const all = await Storage.get('captured_comments', {});
+        comments.forEach(c => { all[c.id] = c; });
+        return Storage.set('captured_comments', all);
+    },
+    delete: async (commentId) => {
+        const all = await Storage.get('captured_comments', {});
+        delete all[commentId];
+        return Storage.set('captured_comments', all);
+    }
+  },
+
   // Evidence links storage
   evidenceLinks: {
     getAll: async () => {
@@ -379,6 +429,8 @@ export const Storage = {
     const sync = await Storage.get('entity_last_sync', 0);
     const claims = await Storage.get('article_claims', {});
     const evidenceLinks = await Storage.get('evidence_links', {});
+    const platformAccounts = await Storage.get('platform_accounts', {});
+    const comments = await Storage.get('captured_comments', {});
 
     const identitySize = JSON.stringify(identity || '').length;
     const entitiesSize = JSON.stringify(entities || '').length;
@@ -386,7 +438,9 @@ export const Storage = {
     const syncSize = JSON.stringify(sync || '').length;
     const claimsSize = JSON.stringify(claims || '').length;
     const evidenceLinksSize = JSON.stringify(evidenceLinks || '').length;
-    const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize + evidenceLinksSize;
+    const platformAccountsSize = JSON.stringify(platformAccounts || '').length;
+    const commentsSize = JSON.stringify(comments || '').length;
+    const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize + evidenceLinksSize + platformAccountsSize + commentsSize;
 
     return {
       totalBytes,
@@ -396,7 +450,9 @@ export const Storage = {
         relays: relaysSize,
         sync: syncSize,
         claims: claimsSize,
-        evidenceLinks: evidenceLinksSize
+        evidenceLinks: evidenceLinksSize,
+        platformAccounts: platformAccountsSize,
+        comments: commentsSize
       }
     };
   }

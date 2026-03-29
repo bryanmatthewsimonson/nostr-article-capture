@@ -10,6 +10,8 @@ import { EntityTagger } from './entity-tagger.js';
 import { EntityAutoSuggest } from './entity-auto-suggest.js';
 import { ClaimExtractor } from './claim-extractor.js';
 import { EvidenceLinker } from './evidence-linker.js';
+import { PlatformAccount } from './platform-account.js';
+import { CommentExtractor } from './comment-extractor.js';
 import { RelayClient } from './relay-client.js';
 import { EventBuilder } from './event-builder.js';
 import { EntitySync } from './entity-sync.js';

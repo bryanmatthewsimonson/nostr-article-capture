@@ -10,12 +10,16 @@ import { EntityAutoSuggest } from './entity-auto-suggest.js';
 import { RelayClient } from './relay-client.js';
 import { EventBuilder } from './event-builder.js';
 import { EntityBrowser } from './entity-browser.js';
+import { CommentExtractor } from './comment-extractor.js';
+import { PlatformAccount } from './platform-account.js';
 
 export const ReaderView = {
   container: null,
   article: null,
   entities: [],
   claims: [],
+  capturedComments: [],
+  commentsCollapsed: true,
   editMode: false,
   markdownMode: false,
   previewMode: false,
@@ -127,6 +131,20 @@ export const ReaderView = {
           </div>
         </div>
         
+        <!-- Comments section (collapsible) -->
+        <div class="nac-comments-section" id="nac-comments-section" style="display: none;">
+          <div class="nac-comments-bar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <span class="nac-comments-bar-title" style="font-size: 14px; font-weight: 600; color: var(--nac-text-muted);">💬 Comments (<span id="nac-comments-count">0</span>)</span>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button class="nac-btn-capture-comments" id="nac-capture-comments-btn" aria-label="Capture comments from this page">💬 Capture Comments</button>
+              <button class="nac-comments-toggle" id="nac-comments-toggle-btn" aria-label="Toggle comments section">▼</button>
+            </div>
+          </div>
+          <div id="nac-comments-container" style="display: none;">
+            <p class="nac-comments-empty">No comments captured yet. Click "Capture Comments" to extract comments from this page.</p>
+          </div>
+        </div>
+        
         <!-- Suggestion bar will be injected here by EntityAutoSuggest -->
         <div id="nac-suggestion-bar" class="nac-suggestion-bar" style="display: none;"></div>
         
@@ -194,6 +212,82 @@ export const ReaderView = {
         EntityTagger.show(name.trim(), rect.left + window.scrollX, rect.top + window.scrollY);
       }
     });
+
+    // Show comments section if comments were detected
+    if (article.hasComments) {
+      const commentsSection = document.getElementById('nac-comments-section');
+      if (commentsSection) commentsSection.style.display = '';
+    }
+
+    // Capture Comments button handler
+    document.getElementById('nac-capture-comments-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('nac-capture-comments-btn');
+      btn.disabled = true;
+      btn.textContent = '⏳ Capturing...';
+      try {
+        const platform = ReaderView.article.platform || ReaderView.article.domain || 'unknown';
+        const comments = await CommentExtractor.extractComments(ReaderView.article.url, platform);
+        if (comments.length > 0) {
+          ReaderView.capturedComments = comments;
+          await CommentExtractor.saveComments(comments);
+          // Show the section and expand it
+          const commentsSection = document.getElementById('nac-comments-section');
+          if (commentsSection) commentsSection.style.display = '';
+          const container = document.getElementById('nac-comments-container');
+          if (container) {
+            container.style.display = '';
+            CommentExtractor.renderCommentsSection(container, comments, ReaderView.article.url);
+          }
+          const countEl = document.getElementById('nac-comments-count');
+          if (countEl) countEl.textContent = comments.length;
+          ReaderView.commentsCollapsed = false;
+          const toggleBtn = document.getElementById('nac-comments-toggle-btn');
+          if (toggleBtn) toggleBtn.textContent = '▲';
+          btn.textContent = `✓ ${comments.length} captured`;
+        } else {
+          btn.textContent = 'No comments found';
+          Utils.showToast('No comments found on this page', 'error');
+        }
+      } catch (e) {
+        console.error('[NAC] Comment capture error:', e);
+        btn.textContent = '💬 Capture Comments';
+        Utils.showToast('Failed to capture comments: ' + e.message, 'error');
+      }
+      setTimeout(() => {
+        btn.disabled = false;
+        if (!ReaderView.capturedComments.length) btn.textContent = '💬 Capture Comments';
+      }, 3000);
+    });
+
+    // Comments toggle (collapse/expand)
+    document.getElementById('nac-comments-toggle-btn').addEventListener('click', () => {
+      const container = document.getElementById('nac-comments-container');
+      const toggleBtn = document.getElementById('nac-comments-toggle-btn');
+      if (!container) return;
+      ReaderView.commentsCollapsed = !ReaderView.commentsCollapsed;
+      container.style.display = ReaderView.commentsCollapsed ? 'none' : '';
+      toggleBtn.textContent = ReaderView.commentsCollapsed ? '▼' : '▲';
+    });
+
+    // Load previously captured comments for this URL
+    try {
+      const existingComments = await Storage.comments.getForUrl(article.url);
+      if (existingComments.length > 0) {
+        ReaderView.capturedComments = existingComments;
+        const commentsSection = document.getElementById('nac-comments-section');
+        if (commentsSection) commentsSection.style.display = '';
+        const countEl = document.getElementById('nac-comments-count');
+        if (countEl) countEl.textContent = existingComments.length;
+        const container = document.getElementById('nac-comments-container');
+        if (container) {
+          CommentExtractor.renderCommentsSection(container, existingComments, article.url);
+        }
+        const captureBtn = document.getElementById('nac-capture-comments-btn');
+        if (captureBtn) captureBtn.textContent = `💬 Re-capture (${existingComments.length})`;
+      }
+    } catch (e) {
+      console.error('[NAC] Failed to load existing comments:', e);
+    }
     
     // Attach inline edit handlers for metadata fields (click + keyboard)
     document.querySelectorAll('#nac-reader-view .nac-editable-field').forEach(el => {
@@ -479,10 +573,12 @@ export const ReaderView = {
 
   // Hide reader view and restore original page
   hide: () => {
-    // Reset markdown/preview/claims state
+    // Reset markdown/preview/claims/comments state
     ReaderView.markdownMode = false;
     ReaderView.previewMode = false;
     ReaderView.claims = [];
+    ReaderView.capturedComments = [];
+    ReaderView.commentsCollapsed = true;
     ReaderView._originalContentHtml = null;
     ReaderView._remoteClaimsCache = null;
 
@@ -830,11 +926,13 @@ export const ReaderView = {
     } catch (e) { /* ignore */ }
     const infoEl = document.getElementById('nac-publish-info');
     if (infoEl) {
+      const commentCount = (ReaderView.capturedComments || []).length;
+      const commentMsg = commentCount > 0 ? ` + ${commentCount} comment${commentCount !== 1 ? 's' : ''}` : '';
       if (claimCount > 0) {
         const linkMsg = evidenceLinkCount > 0 ? ` + ${evidenceLinkCount} evidence link${evidenceLinkCount !== 1 ? 's' : ''}` : '';
-        infoEl.innerHTML = `📋 Article + ${claimCount} claim${claimCount !== 1 ? 's' : ''} (${cruxCount} crux${cruxCount !== 1 ? 'es' : ''})${linkMsg} will be published`;
+        infoEl.innerHTML = `📋 Article + ${claimCount} claim${claimCount !== 1 ? 's' : ''} (${cruxCount} crux${cruxCount !== 1 ? 'es' : ''})${linkMsg}${commentMsg} will be published`;
       } else {
-        infoEl.innerHTML = '📋 Article will be published (no claims)';
+        infoEl.innerHTML = `📋 Article will be published${commentMsg}${commentCount === 0 ? ' (no claims)' : ''}`;
       }
     }
     
@@ -1083,6 +1181,78 @@ export const ReaderView = {
       } catch (e) {
         console.error('[NAC] Entity relationships publish error:', e);
       }
+
+      // Publish captured comments as kind 30041 + platform accounts as kind 32126
+      const capturedComments = ReaderView.capturedComments || [];
+      let commentSuccessCount = 0;
+      let platformAccountSuccessCount = 0;
+      const publishedAccountIds = new Set();
+      
+      if (capturedComments.length > 0) {
+        try {
+          statusEl.innerHTML = html + `<div class="nac-spinner"></div> Publishing ${capturedComments.length} comment${capturedComments.length !== 1 ? 's' : ''}...`;
+          
+          for (const comment of capturedComments) {
+            try {
+              // Get the platform account for this comment's author
+              const account = await PlatformAccount.get(comment.authorAccountId);
+              const accountPubkey = account?.keypair?.pubkey || null;
+
+              // Publish platform account if not already published
+              if (account && !publishedAccountIds.has(account.id)) {
+                try {
+                  const acctEvent = EventBuilder.buildPlatformAccountEvent(account, identity.pubkey);
+                  let signedAcct;
+                  if (signingMethod === 'nip07') {
+                    signedAcct = await unsafeWindow.nostr.signEvent(acctEvent);
+                  } else {
+                    signedAcct = await Crypto.signEvent(acctEvent, identity.privkey);
+                  }
+                  if (signedAcct) {
+                    const acctResults = await RelayClient.publish(signedAcct, relayUrls);
+                    const acctOk = Object.values(acctResults).some(r => r.success);
+                    if (acctOk) platformAccountSuccessCount++;
+                    publishedAccountIds.add(account.id);
+                  }
+                } catch (ae) {
+                  console.error(`[NAC] Platform account publish error (${account.id}):`, ae);
+                }
+              }
+
+              // Publish comment event
+              const commentEvent = EventBuilder.buildCommentEvent(
+                comment,
+                ReaderView.article.url,
+                ReaderView.article.title || 'Untitled',
+                identity.pubkey,
+                accountPubkey
+              );
+              
+              let signedComment;
+              if (signingMethod === 'nip07') {
+                signedComment = await unsafeWindow.nostr.signEvent(commentEvent);
+              } else {
+                signedComment = await Crypto.signEvent(commentEvent, identity.privkey);
+              }
+              
+              if (signedComment) {
+                const commentResults = await RelayClient.publish(signedComment, relayUrls);
+                const commentOk = Object.values(commentResults).some(r => r.success);
+                if (commentOk) commentSuccessCount++;
+              }
+            } catch (ce) {
+              console.error(`[NAC] Comment publish error (${comment.id}):`, ce);
+            }
+          }
+          
+          html += `<div class="nac-publish-results"><strong>Comments:</strong> ${commentSuccessCount}/${capturedComments.length} published</div>`;
+          if (publishedAccountIds.size > 0) {
+            html += `<div class="nac-publish-results"><strong>Platform Accounts:</strong> ${platformAccountSuccessCount}/${publishedAccountIds.size} published</div>`;
+          }
+        } catch (e) {
+          console.error('[NAC] Comments publish error:', e);
+        }
+      }
       
       statusEl.innerHTML = html;
       
@@ -1090,8 +1260,9 @@ export const ReaderView = {
         const claimMsg = claims.length > 0 ? ` ${claimSuccessCount} claim${claimSuccessCount !== 1 ? 's' : ''} published.` : '';
         const linkMsg = evidenceLinksTotal > 0 ? ` ${evidenceLinkSuccessCount} evidence link${evidenceLinkSuccessCount !== 1 ? 's' : ''} published.` : '';
         const relMsg = entityRelTotal > 0 ? ` ${entityRelSuccessCount} entity relationship${entityRelSuccessCount !== 1 ? 's' : ''} published.` : '';
+        const commentMsg = capturedComments.length > 0 ? ` ${commentSuccessCount} comment${commentSuccessCount !== 1 ? 's' : ''} published.` : '';
         btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
-        Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}${relMsg}`, 'success');
+        Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}${relMsg}${commentMsg}`, 'success');
       } else {
         btn.textContent = 'Publish Failed';
         btn.disabled = false;
@@ -1368,6 +1539,8 @@ export const ReaderView = {
           `Entities: ${formatSize(usage.breakdown.entities)}, ` +
           `Claims: ${formatSize(usage.breakdown.claims)}, ` +
           `Evidence: ${formatSize(usage.breakdown.evidenceLinks)}, ` +
+          `Comments: ${formatSize(usage.breakdown.comments)}, ` +
+          `Accounts: ${formatSize(usage.breakdown.platformAccounts)}, ` +
           `Identity: ${formatSize(usage.breakdown.identity)}, ` +
           `Relays: ${formatSize(usage.breakdown.relays)}</span>`;
       }
