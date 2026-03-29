@@ -128,6 +128,18 @@ export const EventBuilder = {
       if (article.transcript) tags.push(['transcript', 'true']);
     }
 
+    // Add Twitter/X-specific tags (Phase 6)
+    if (article.tweetMeta) {
+      if (article.tweetMeta.tweetId) tags.push(['tweet_id', article.tweetMeta.tweetId]);
+      if (article.tweetMeta.authorHandle) tags.push(['author_handle', '@' + article.tweetMeta.authorHandle]);
+      if (article.tweetMeta.isThread) tags.push(['thread', 'true']);
+      if (article.tweetMeta.threadLength > 1) tags.push(['thread_length', String(article.tweetMeta.threadLength)]);
+    }
+    // Hashtags as topic tags
+    if (article.platform === 'twitter' && article.keywords?.length) {
+      article.keywords.forEach(kw => tags.push(['t', kw]));
+    }
+
     // Add engagement metrics tags (Phase 4)
     if (article.engagement) {
       if (article.engagement.likes) tags.push(['engagement_likes', String(article.engagement.likes)]);

@@ -22,6 +22,7 @@ import { STYLES } from './styles.js';
 import { init } from './init.js';
 import './platforms/substack.js';  // Self-registering
 import './platforms/youtube.js';   // Self-registering
+import './platforms/twitter.js';   // Self-registering
 
 // Run init when DOM is ready
 if (document.readyState === 'loading') {
