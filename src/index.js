@@ -1,0 +1,25 @@
+// Entry point — imports all modules and runs initialization
+import { CONFIG, _state } from './config.js';
+import { Crypto } from './crypto.js';
+import { Storage } from './storage.js';
+import { ContentExtractor } from './content-extractor.js';
+import { Utils } from './utils.js';
+import { EntityTagger } from './entity-tagger.js';
+import { EntityAutoSuggest } from './entity-auto-suggest.js';
+import { ClaimExtractor } from './claim-extractor.js';
+import { EvidenceLinker } from './evidence-linker.js';
+import { RelayClient } from './relay-client.js';
+import { EventBuilder } from './event-builder.js';
+import { EntitySync } from './entity-sync.js';
+import { EntityBrowser } from './entity-browser.js';
+import { ReaderView } from './reader-view.js';
+import { EntityMigration } from './entity-migration.js';
+import { STYLES } from './styles.js';
+import { init } from './init.js';
+
+// Run init when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

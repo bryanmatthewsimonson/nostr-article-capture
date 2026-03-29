@@ -1,0 +1,30 @@
+{
+  "name": "nostr-article-capture",
+  "version": "2.9.2",
+  "description": "Capture articles with clean reader view, entity tagging, and NOSTR publishing",
+  "main": "dist/nostr-article-capture.user.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "test": "node tests/crypto-tests.js && node tests/nip44-test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bryanmatthewsimonson/nostr-article-capture.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/bryanmatthewsimonson/nostr-article-capture/issues"
+  },
+  "homepage": "https://github.com/bryanmatthewsimonson/nostr-article-capture#readme",
+  "devDependencies": {
+    "esbuild": "^0.27.4"
+  }
+}
