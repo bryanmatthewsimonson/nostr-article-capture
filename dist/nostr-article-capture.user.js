@@ -24,8 +24,12 @@
 // ==/UserScript==
 
 (() => {
+  var __create = Object.create;
   var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
   var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __getProtoOf = Object.getPrototypeOf;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
   var __esm = (fn, res) => function __init() {
     return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
   };
@@ -36,6 +40,49 @@
     for (var name in all)
       __defProp(target, name, { get: all[name], enumerable: true });
   };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+    // If the importer is in node compatibility mode or this is not an ESM
+    // file that has been converted to a CommonJS file using a Babel-
+    // compatible transform (i.e. "__esModule" has not been set), then set
+    // "default" to the CommonJS "module.exports" for node compatibility.
+    isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+    mod
+  ));
+
+  // src/trusted-types.js
+  var require_trusted_types = __commonJS({
+    "src/trusted-types.js"() {
+      if (typeof trustedTypes !== "undefined" && trustedTypes.createPolicy) {
+        try {
+          if (!trustedTypes.defaultPolicy) {
+            trustedTypes.createPolicy("default", {
+              createHTML: (string) => string,
+              createScript: (string) => string,
+              createScriptURL: (string) => string
+            });
+          }
+        } catch (e) {
+          try {
+            window.__nacTrustedTypesPolicy = trustedTypes.createPolicy("nac-policy", {
+              createHTML: (string) => string,
+              createScript: (string) => string,
+              createScriptURL: (string) => string
+            });
+          } catch (e2) {
+            console.warn("[NAC] Could not create Trusted Types policy:", e2.message);
+          }
+        }
+      }
+    }
+  });
 
   // src/config.js
   var CONFIG, _state;
@@ -9993,6 +10040,7 @@ ${extractDescription()}`;
   // src/index.js
   var require_index = __commonJS({
     "src/index.js"() {
+      var import_trusted_types = __toESM(require_trusted_types());
       init_config();
       init_crypto();
       init_storage();

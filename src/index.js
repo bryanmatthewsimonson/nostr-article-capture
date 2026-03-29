@@ -1,4 +1,5 @@
 // Entry point — imports all modules and runs initialization
+import './trusted-types.js';  // MUST be first — creates TrustedTypes policy before any innerHTML
 import { CONFIG, _state } from './config.js';
 import { Crypto } from './crypto.js';
 import { Storage } from './storage.js';
