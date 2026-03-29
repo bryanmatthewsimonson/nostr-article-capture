@@ -4,7 +4,7 @@
 // @version      3.6.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
-// @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
+// @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
 // @author       Decentralized News Network
 // @match        *://*/*
 // @require      https://cdn.jsdelivr.net/npm/@mozilla/readability@0.5.0/Readability.js
@@ -42,7 +42,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.4.0",
+        version: "3.6.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -8891,6 +8891,7 @@ Enter option (1-4):`;
     GM_addStyle(STYLES);
     const fabHost = document.createElement("div");
     fabHost.id = "nac-fab-host";
+    fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
     document.body.appendChild(fabHost);
     const fabShadow = fabHost.attachShadow({ mode: "closed" });
     const fabStyle = document.createElement("style");
@@ -8940,18 +8941,20 @@ Enter option (1-4):`;
     }
   `;
     fabShadow.appendChild(fabStyle);
+    const detection = ContentDetector.detect();
+    const fabIcon = detection.platform ? ContentDetector.getPlatformIcon(detection.platform) : "\u{1F4F0}";
     const fab = document.createElement("button");
     fab.className = "nac-fab";
-    fab.innerHTML = "\u{1F4F0}";
+    fab.innerHTML = fabIcon;
     fab.title = "NOSTR Article Capture";
     fab.setAttribute("aria-label", "Capture Article");
     fab.addEventListener("click", async () => {
       Utils.log("FAB clicked");
-      const detection = ContentDetector.detect();
-      Utils.log("Content detected:", detection);
+      const detection2 = ContentDetector.detect();
+      Utils.log("Content detected:", detection2);
       let article;
-      if (detection.platform && PlatformHandler.has(detection.platform)) {
-        const handler = PlatformHandler.get(detection.platform);
+      if (detection2.platform && PlatformHandler.has(detection2.platform)) {
+        const handler = PlatformHandler.get(detection2.platform);
         article = await handler.extract();
       } else {
         article = ContentExtractor.extractArticle();
@@ -8960,10 +8963,10 @@ Enter option (1-4):`;
         Utils.showToast("No article content found on this page", "error");
         return;
       }
-      article.contentType = detection.type;
-      article.platform = detection.platform;
-      article.platformMetadata = detection.metadata;
-      article.contentConfidence = detection.confidence;
+      article.contentType = detection2.type;
+      article.platform = detection2.platform;
+      article.platformMetadata = detection2.metadata;
+      article.contentConfidence = detection2.confidence;
       article.hasComments = ContentDetector.hasComments();
       await ReaderView.show(article);
     });
@@ -8973,10 +8976,7 @@ Enter option (1-4):`;
       if (!document.body.contains(fabHost)) {
         document.body.appendChild(fabHost);
       }
-      fabHost.style.setProperty("display", "block", "important");
-      fabHost.style.setProperty("visibility", "visible", "important");
-      fabHost.style.setProperty("opacity", "1", "important");
-      fabHost.style.setProperty("pointer-events", "none", "important");
+      fabHost.style.cssText = "position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;";
     }, 3e3);
     GM_registerMenuCommand("Open Settings", async () => {
       const article = ContentExtractor.extractArticle() || { url: window.location.href };

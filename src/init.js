@@ -27,6 +27,9 @@ async function init() {
   // Create Shadow DOM host for FAB (isolates from page CSS, prevents overlays from hiding it)
   const fabHost = document.createElement('div');
   fabHost.id = 'nac-fab-host';
+  // Host must be positioned with z-index in outer DOM to create a top-level stacking context;
+  // without this, YouTube's/SPAs' positioned overlays hide the shadow-DOM FAB
+  fabHost.style.cssText = 'position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;';
   document.body.appendChild(fabHost);
   const fabShadow = fabHost.attachShadow({ mode: 'closed' });
 
@@ -79,10 +82,16 @@ async function init() {
   `;
   fabShadow.appendChild(fabStyle);
 
+  // Detect platform and pick adaptive FAB icon
+  const detection = ContentDetector.detect();
+  const fabIcon = detection.platform
+    ? ContentDetector.getPlatformIcon(detection.platform)
+    : '📰';
+
   // Create FAB button inside Shadow DOM
   const fab = document.createElement('button');
   fab.className = 'nac-fab';
-  fab.innerHTML = '📰';
+  fab.innerHTML = fabIcon;
   fab.title = 'NOSTR Article Capture';
   fab.setAttribute('aria-label', 'Capture Article');
 
@@ -127,10 +136,8 @@ async function init() {
     if (!document.body.contains(fabHost)) {
       document.body.appendChild(fabHost);
     }
-    fabHost.style.setProperty('display', 'block', 'important');
-    fabHost.style.setProperty('visibility', 'visible', 'important');
-    fabHost.style.setProperty('opacity', '1', 'important');
-    fabHost.style.setProperty('pointer-events', 'none', 'important');
+    // Re-enforce all host styles (YouTube/SPAs may mutate or override them)
+    fabHost.style.cssText = 'position:fixed!important;bottom:0!important;right:0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;display:block!important;visibility:visible!important;opacity:1!important;';
   }, 3000);
   
   // Register menu commands
