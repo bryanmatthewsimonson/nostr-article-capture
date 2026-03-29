@@ -115,6 +115,13 @@ export const EventBuilder = {
     if (article.contentType) tags.push(['content_format', article.contentType]);
     if (article.platform) tags.push(['platform', article.platform]);
 
+    // Add engagement metrics tags (Phase 4)
+    if (article.engagement) {
+      if (article.engagement.likes) tags.push(['engagement_likes', String(article.engagement.likes)]);
+      if (article.engagement.shares) tags.push(['engagement_shares', String(article.engagement.shares)]);
+      if (article.engagement.comments) tags.push(['engagement_comments', String(article.engagement.comments)]);
+    }
+
     // Add topic tags
     tags.push(['t', 'article']);
     if (article.domain) {

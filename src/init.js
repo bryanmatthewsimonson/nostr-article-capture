@@ -3,6 +3,7 @@ import { Storage } from './storage.js';
 import { Utils } from './utils.js';
 import { ContentExtractor } from './content-extractor.js';
 import { ContentDetector } from './content-detector.js';
+import { PlatformHandler } from './platform-handler.js';
 import { ReaderView } from './reader-view.js';
 import { EntityMigration } from './entity-migration.js';
 import { STYLES } from './styles.js';
@@ -92,8 +93,14 @@ async function init() {
     const detection = ContentDetector.detect();
     Utils.log('Content detected:', detection);
     
-    // Extract article
-    const article = ContentExtractor.extractArticle();
+    // Extract article — use platform handler if available, else generic
+    let article;
+    if (detection.platform && PlatformHandler.has(detection.platform)) {
+      const handler = PlatformHandler.get(detection.platform);
+      article = await handler.extract();
+    } else {
+      article = ContentExtractor.extractArticle();
+    }
     
     if (!article) {
       Utils.showToast('No article content found on this page', 'error');

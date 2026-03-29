@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.2.0
+// @version      3.3.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -42,7 +42,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.2.0",
+        version: "3.3.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -2358,6 +2358,11 @@ ${items}
           if (article.structuredData?.type) tags.push(["content_type", article.structuredData.type]);
           if (article.contentType) tags.push(["content_format", article.contentType]);
           if (article.platform) tags.push(["platform", article.platform]);
+          if (article.engagement) {
+            if (article.engagement.likes) tags.push(["engagement_likes", String(article.engagement.likes)]);
+            if (article.engagement.shares) tags.push(["engagement_shares", String(article.engagement.shares)]);
+            if (article.engagement.comments) tags.push(["engagement_comments", String(article.engagement.comments)]);
+          }
           tags.push(["t", "article"]);
           if (article.domain) {
             tags.push(["t", article.domain.replace(/\./g, "-")]);
@@ -3554,6 +3559,14 @@ Enter number:`);
               <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
               ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">\u{1F4AC} Comments</span>' : ""}
             </div>
+            ${article.engagement && (article.engagement.likes || article.engagement.shares || article.engagement.comments) ? `
+            <div class="nac-meta-engagement">
+              ${article.engagement.likes ? `\u2764\uFE0F ${article.engagement.likes}` : ""}
+              ${article.engagement.likes && (article.engagement.shares || article.engagement.comments) ? " \xB7 " : ""}
+              ${article.engagement.shares ? `\u{1F504} ${article.engagement.shares}` : ""}
+              ${article.engagement.shares && article.engagement.comments ? " \xB7 " : ""}
+              ${article.engagement.comments ? `\u{1F4AC} ${article.engagement.comments}` : ""}
+            </div>` : ""}
             ${article.wordCount ? `
             <div class="nac-meta-stats">
               <span>${article.wordCount.toLocaleString()} words</span>
@@ -8753,6 +8766,16 @@ Enter option (1-4):`;
       font-size: 12px;
     }
   }
+
+  /* Engagement Metrics Display */
+  .nac-meta-engagement {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    padding: 4px 0;
+  }
 `;
     }
   });
@@ -8827,7 +8850,13 @@ Enter option (1-4):`;
       Utils.log("FAB clicked");
       const detection = ContentDetector.detect();
       Utils.log("Content detected:", detection);
-      const article = ContentExtractor.extractArticle();
+      let article;
+      if (detection.platform && PlatformHandler.has(detection.platform)) {
+        const handler = PlatformHandler.get(detection.platform);
+        article = await handler.extract();
+      } else {
+        article = ContentExtractor.extractArticle();
+      }
       if (!article) {
         Utils.showToast("No article content found on this page", "error");
         return;
@@ -8874,9 +8903,118 @@ Enter option (1-4):`;
       init_utils();
       init_content_extractor();
       init_content_detector();
+      init_platform_handler();
       init_reader_view();
       init_entity_migration();
       init_styles();
+    }
+  });
+
+  // src/platforms/substack.js
+  function extractSubstackMeta() {
+    const meta = {
+      publicationName: null,
+      authorBio: null,
+      isNewsletter: true,
+      isPaid: false,
+      likes: 0,
+      restacks: 0,
+      comments: 0
+    };
+    meta.publicationName = document.querySelector(
+      '.publication-name, [class*="PublicationName"], .navbar-title'
+    )?.textContent?.trim() || document.querySelector('meta[property="og:site_name"]')?.content || null;
+    meta.authorBio = document.querySelector(
+      '.author-bio, .subtitle, [class*="AuthorBio"]'
+    )?.textContent?.trim() || null;
+    meta.isPaid = !!document.querySelector(
+      '.paywall, [class*="paywall"], .subscriber-only, [class*="PaywallBanner"]'
+    );
+    const likesEl = document.querySelector('[class*="like-count"], [class*="LikeCount"]');
+    if (likesEl) meta.likes = parseInt(likesEl.textContent) || 0;
+    const restacksEl = document.querySelector('[class*="restack-count"], [class*="RestackCount"]');
+    if (restacksEl) meta.restacks = parseInt(restacksEl.textContent) || 0;
+    const commentsEl = document.querySelector('[class*="comment-count"], [class*="CommentCount"]');
+    if (commentsEl) meta.comments = parseInt(commentsEl.textContent) || 0;
+    return meta;
+  }
+  function extractEngagement() {
+    return {
+      likes: parseInt(document.querySelector('[class*="like-count"]')?.textContent) || 0,
+      shares: parseInt(document.querySelector('[class*="restack-count"], [class*="share-count"]')?.textContent) || 0,
+      comments: parseInt(document.querySelector('[class*="comment-count"]')?.textContent) || 0
+    };
+  }
+  var SubstackHandler;
+  var init_substack = __esm({
+    "src/platforms/substack.js"() {
+      init_content_extractor();
+      init_platform_handler();
+      SubstackHandler = {
+        type: "article",
+        platform: "substack",
+        canCapture: () => {
+          return window.location.hostname.includes("substack.com") || !!document.querySelector('meta[content*="substack"], script[src*="substack"]') || !!document.querySelector(".available-content, .post-content");
+        },
+        extract: async () => {
+          const article = ContentExtractor.extractArticle();
+          if (!article) return null;
+          article.platform = "substack";
+          try {
+            article.substackMeta = extractSubstackMeta();
+          } catch (e) {
+            console.warn("[NAC] Substack meta extraction failed:", e);
+            article.substackMeta = {};
+          }
+          if (article.substackMeta?.publicationName) {
+            article.siteName = article.substackMeta.publicationName;
+          }
+          try {
+            article.engagement = extractEngagement();
+          } catch (e) {
+            console.warn("[NAC] Substack engagement extraction failed:", e);
+            article.engagement = null;
+          }
+          return article;
+        },
+        extractComments: async (articleUrl) => {
+          const commentElements = document.querySelectorAll(
+            '.comment-list-item, .comment, [class*="CommentListItem"], .thread-comment'
+          );
+          const comments = [];
+          for (const el of commentElements) {
+            const authorEl = el.querySelector('.commenter-name, .comment-author, [class*="CommentName"]');
+            const textEl = el.querySelector('.comment-body, .comment-content, [class*="CommentBody"] p');
+            const timeEl = el.querySelector("time, [datetime], .comment-timestamp");
+            const avatarEl = el.querySelector('img.commenter-photo, img[class*="avatar"]');
+            const profileLink = authorEl?.closest("a") || el.querySelector('a[href*="/profile/"]');
+            const authorName = authorEl?.textContent?.trim() || "Anonymous";
+            const text = textEl?.textContent?.trim() || el.querySelector("p")?.textContent?.trim() || "";
+            if (text.length < 2) continue;
+            const likesEl = el.querySelector('[class*="like-count"], [class*="heart-count"], .comment-like-count');
+            const likes = likesEl ? parseInt(likesEl.textContent) || 0 : 0;
+            comments.push({
+              authorName,
+              text,
+              timestamp: timeEl?.getAttribute("datetime") || timeEl?.textContent?.trim(),
+              avatarUrl: avatarEl?.src || null,
+              profileUrl: profileLink?.href || null,
+              likes,
+              platform: "substack",
+              sourceUrl: articleUrl
+            });
+          }
+          return comments;
+        },
+        getReaderViewConfig: () => ({
+          showEditor: true,
+          showEntityBar: true,
+          showClaimsBar: true,
+          showComments: true,
+          platformLabel: "\u2709\uFE0F Substack Newsletter"
+        })
+      };
+      PlatformHandler.register("substack", SubstackHandler);
     }
   });
 
@@ -8904,6 +9042,7 @@ Enter option (1-4):`;
       init_entity_migration();
       init_styles();
       init_init();
+      init_substack();
       if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", init);
       } else {

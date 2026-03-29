@@ -93,6 +93,14 @@ export const ReaderView = {
               <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
               ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">💬 Comments</span>' : ''}
             </div>
+            ${article.engagement && (article.engagement.likes || article.engagement.shares || article.engagement.comments) ? `
+            <div class="nac-meta-engagement">
+              ${article.engagement.likes ? `❤️ ${article.engagement.likes}` : ''}
+              ${article.engagement.likes && (article.engagement.shares || article.engagement.comments) ? ' · ' : ''}
+              ${article.engagement.shares ? `🔄 ${article.engagement.shares}` : ''}
+              ${article.engagement.shares && article.engagement.comments ? ' · ' : ''}
+              ${article.engagement.comments ? `💬 ${article.engagement.comments}` : ''}
+            </div>` : ''}
             ${article.wordCount ? `
             <div class="nac-meta-stats">
               <span>${article.wordCount.toLocaleString()} words</span>

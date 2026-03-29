@@ -2762,4 +2762,14 @@ export const STYLES = `
       font-size: 12px;
     }
   }
+
+  /* Engagement Metrics Display */
+  .nac-meta-engagement {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    padding: 4px 0;
+  }
 `;

@@ -20,6 +20,7 @@ import { ReaderView } from './reader-view.js';
 import { EntityMigration } from './entity-migration.js';
 import { STYLES } from './styles.js';
 import { init } from './init.js';
+import './platforms/substack.js';  // Self-registering
 
 // Run init when DOM is ready
 if (document.readyState === 'loading') {
