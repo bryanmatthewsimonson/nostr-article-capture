@@ -156,8 +156,14 @@ function createFAB() {
       let article;
       if (detection.platform && PlatformHandler.has(detection.platform)) {
         const handler = PlatformHandler.get(detection.platform);
-        article = await handler.extract();
-      } else {
+        try {
+          article = await handler.extract();
+        } catch (handlerError) {
+          console.warn('[NAC] Platform handler failed, falling back to generic:', handlerError.message);
+          article = null;
+        }
+      }
+      if (!article) {
         article = ContentExtractor.extractArticle();
       }
       

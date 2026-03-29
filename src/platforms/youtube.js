@@ -1,4 +1,5 @@
 import { PlatformHandler } from '../platform-handler.js';
+import { Utils } from '../utils.js';
 
 const YouTubeHandler = {
     type: 'video',
@@ -10,76 +11,86 @@ const YouTubeHandler = {
     },
 
     extract: async () => {
-        const article = {
-            title: extractVideoTitle(),
-            byline: extractChannelName(),
-            url: getCanonicalVideoUrl(),
-            domain: 'youtube.com',
-            siteName: 'YouTube',
-            publishedAt: extractPublishDate(),
-            content: buildVideoContent(),       // HTML representation
-            textContent: buildTextContent(),     // Plain text
-            excerpt: extractDescription().substring(0, 200),
-            featuredImage: extractThumbnail(),
-            publicationIcon: 'https://www.youtube.com/favicon.ico',
+        try {
+            const article = {
+                title: extractVideoTitle(),
+                byline: extractChannelName(),
+                url: getCanonicalVideoUrl(),
+                domain: 'youtube.com',
+                siteName: 'YouTube',
+                publishedAt: extractPublishDate(),
+                content: buildVideoContent(),       // HTML representation
+                textContent: buildTextContent(),     // Plain text
+                excerpt: extractDescription().substring(0, 200),
+                featuredImage: extractThumbnail(),
+                publicationIcon: 'https://www.youtube.com/favicon.ico',
 
-            // YouTube-specific
-            platform: 'youtube',
-            contentType: 'video',
-            videoMeta: extractVideoMeta(),
-            transcript: await extractTranscript(),
-            engagement: extractEngagement(),
+                // YouTube-specific
+                platform: 'youtube',
+                contentType: 'video',
+                videoMeta: extractVideoMeta(),
+                transcript: await extractTranscript(),
+                engagement: extractEngagement(),
 
-            // Standard metadata fields
-            wordCount: 0,  // Will be set from transcript
-            readingTimeMinutes: 0,
-            structuredData: extractStructuredData(),
-            keywords: extractKeywords(),
-            language: document.documentElement.lang || 'en',
-            isPaywalled: false,
-            section: null,
-            dateModified: null
-        };
+                // Standard metadata fields
+                wordCount: 0,  // Will be set from transcript
+                readingTimeMinutes: 0,
+                structuredData: extractStructuredData(),
+                keywords: extractKeywords(),
+                language: document.documentElement.lang || 'en',
+                isPaywalled: false,
+                section: null,
+                dateModified: null
+            };
 
-        // Word count from transcript if available
-        if (article.transcript) {
-            article.wordCount = article.transcript.split(/\s+/).filter(w => w).length;
-            article.readingTimeMinutes = Math.ceil(article.wordCount / 225);
+            // Word count from transcript if available
+            if (article.transcript) {
+                article.wordCount = article.transcript.split(/\s+/).filter(w => w).length;
+                article.readingTimeMinutes = Math.ceil(article.wordCount / 225);
+            }
+
+            return article;
+        } catch (e) {
+            console.error('[NAC YouTube] extract() failed:', e);
+            return null;
         }
-
-        return article;
     },
 
     extractComments: async (articleUrl) => {
-        // YouTube comments are in #comments section
-        const commentElements = document.querySelectorAll(
-            'ytd-comment-thread-renderer, ytd-comment-renderer'
-        );
+        try {
+            // YouTube comments are in #comments section
+            const commentElements = document.querySelectorAll(
+                'ytd-comment-thread-renderer, ytd-comment-renderer'
+            );
 
-        const comments = [];
-        for (const el of commentElements) {
-            const authorEl = el.querySelector('#author-text, .ytd-comment-renderer #author-text');
-            const textEl = el.querySelector('#content-text, .ytd-comment-renderer #content-text');
-            const timeEl = el.querySelector('#published-time-text a, .published-time-text');
-            const avatarEl = el.querySelector('#author-thumbnail img, #img');
-            const likesEl = el.querySelector('#vote-count-middle');
+            const comments = [];
+            for (const el of commentElements) {
+                const authorEl = el.querySelector('#author-text, .ytd-comment-renderer #author-text');
+                const textEl = el.querySelector('#content-text, .ytd-comment-renderer #content-text');
+                const timeEl = el.querySelector('#published-time-text a, .published-time-text');
+                const avatarEl = el.querySelector('#author-thumbnail img, #img');
+                const likesEl = el.querySelector('#vote-count-middle');
 
-            const text = textEl?.textContent?.trim() || '';
-            if (!text) continue;
+                const text = textEl?.textContent?.trim() || '';
+                if (!text) continue;
 
-            comments.push({
-                authorName: authorEl?.textContent?.trim() || 'Anonymous',
-                text,
-                timestamp: timeEl?.textContent?.trim() || null,
-                avatarUrl: avatarEl?.src || null,
-                profileUrl: authorEl?.closest('a')?.href || null,
-                likes: parseInt(likesEl?.textContent?.trim()) || 0,
-                platform: 'youtube',
-                sourceUrl: articleUrl
-            });
+                comments.push({
+                    authorName: authorEl?.textContent?.trim() || 'Anonymous',
+                    text,
+                    timestamp: timeEl?.textContent?.trim() || null,
+                    avatarUrl: avatarEl?.src || null,
+                    profileUrl: authorEl?.closest('a')?.href || null,
+                    likes: parseInt(likesEl?.textContent?.trim()) || 0,
+                    platform: 'youtube',
+                    sourceUrl: articleUrl
+                });
+            }
+
+            return comments;
+        } catch (e) {
+            console.error('[NAC YouTube] extractComments() failed:', e);
+            return [];
         }
-
-        return comments;
     },
 
     getReaderViewConfig: () => ({
@@ -320,8 +331,8 @@ function buildVideoContent() {
     // Video metadata
     html += '<div class="nac-video-meta">';
     const channel = extractChannelName();
-    if (channel) html += `<p><strong>Channel:</strong> ${channel}</p>`;
-    if (meta.duration) html += `<p><strong>Duration:</strong> ${meta.duration}</p>`;
+    if (channel) html += `<p><strong>Channel:</strong> ${Utils.escapeHtml(channel)}</p>`;
+    if (meta.duration) html += `<p><strong>Duration:</strong> ${Utils.escapeHtml(meta.duration)}</p>`;
     if (meta.isLive) html += `<p>🔴 <strong>Live Stream</strong></p>`;
     html += '</div>';
 
@@ -329,7 +340,7 @@ function buildVideoContent() {
     if (desc) {
         html += `<div class="nac-video-description">
             <h3>Description</h3>
-            ${desc.split('\n').filter(l => l.trim()).map(l => `<p>${l}</p>`).join('')}
+            ${desc.split('\n').filter(l => l.trim()).map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}
         </div>`;
     }
 

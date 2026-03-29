@@ -11,34 +11,44 @@ const TwitterHandler = {
     },
 
     extract: async () => {
-        const isTweet = /\/status\/\d+/.test(window.location.pathname);
+        try {
+            const isTweet = /\/status\/\d+/.test(window.location.pathname);
 
-        if (isTweet) {
-            return extractTweet();
-        } else {
-            // Profile page or timeline — extract what's visible
-            return extractProfile();
+            if (isTweet) {
+                return extractTweet();
+            } else {
+                // Profile page or timeline — extract what's visible
+                return extractProfile();
+            }
+        } catch (e) {
+            console.error('[NAC Twitter] extract() failed:', e);
+            return null;
         }
     },
 
     extractComments: async (articleUrl) => {
-        // On Twitter, "comments" are replies to the tweet
-        const allTweets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-        const replies = allTweets.slice(1); // Skip main tweet
+        try {
+            // On Twitter, "comments" are replies to the tweet
+            const allTweets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+            const replies = allTweets.slice(1); // Skip main tweet
 
-        const comments = [];
-        for (const el of replies) {
-            const comment = parseTweetElement(el);
-            if (comment) {
-                comments.push({
-                    ...comment,
-                    platform: 'twitter',
-                    sourceUrl: articleUrl
-                });
+            const comments = [];
+            for (const el of replies) {
+                const comment = parseTweetElement(el);
+                if (comment) {
+                    comments.push({
+                        ...comment,
+                        platform: 'twitter',
+                        sourceUrl: articleUrl
+                    });
+                }
             }
-        }
 
-        return comments;
+            return comments;
+        } catch (e) {
+            console.error('[NAC Twitter] extractComments() failed:', e);
+            return [];
+        }
     },
 
     getReaderViewConfig: () => ({
@@ -87,14 +97,14 @@ function extractTweet() {
         contentHtml = `<blockquote class="nac-tweet-embed">
             <p>${Utils.escapeHtml(tweetData.text || '')}</p>
             <footer>— ${Utils.escapeHtml(tweetData.authorName || '')} (@${Utils.escapeHtml(tweetData.authorHandle || '')})</footer>
-            ${tweetData.tweetUrl ? `<cite><a href="${tweetData.tweetUrl}">${tweetData.tweetUrl}</a></cite>` : ''}
+            ${tweetData.tweetUrl ? `<cite><a href="${Utils.escapeHtml(tweetData.tweetUrl)}">${Utils.escapeHtml(tweetData.tweetUrl)}</a></cite>` : ''}
         </blockquote>`;
     }
 
     // Add media if present
     const mediaImages = mainTweet?.querySelectorAll('img[src*="pbs.twimg.com/media"]') || [];
     mediaImages.forEach(img => {
-        contentHtml += `<figure><img src="${img.src}" alt="Tweet media"></figure>`;
+        contentHtml += `<figure><img src="${Utils.escapeHtml(img.src)}" alt="Tweet media"></figure>`;
     });
 
     const tweetId = window.location.pathname.match(/\/status\/(\d+)/)?.[1] || '';

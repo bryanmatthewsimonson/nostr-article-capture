@@ -80,7 +80,7 @@ export const ReaderView = {
       <div class="nac-reader-content">
         <div class="nac-reader-article">
           <div class="nac-article-header">
-            <h1 class="nac-article-title" contenteditable="false" id="nac-title">${article.title || 'Untitled'}</h1>
+            <h1 class="nac-article-title" contenteditable="false" id="nac-title">${Utils.escapeHtml(article.title || 'Untitled')}</h1>
             <div class="nac-article-meta">
               <span class="nac-meta-author nac-editable-field" id="nac-author" data-field="byline" title="Click to edit author" role="button" tabindex="0" aria-label="Edit author — click to change">${Utils.escapeHtml(article.byline || 'Unknown Author')}</span>
               <span class="nac-meta-separator">•</span>

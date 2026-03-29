@@ -11,90 +11,108 @@ const FacebookHandler = {
     },
 
     extract: async () => {
-        // Use OG tags extensively as Facebook generates them well
-        const ogTitle = document.querySelector('meta[property="og:title"]')?.content || '';
-        const ogDesc = document.querySelector('meta[property="og:description"]')?.content || '';
-        const ogImage = document.querySelector('meta[property="og:image"]')?.content || '';
-        const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
-        const ogType = document.querySelector('meta[property="og:type"]')?.content || '';
+        try {
+            // Use OG tags extensively as Facebook generates them well
+            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || '';
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || '';
+            const ogImage = document.querySelector('meta[property="og:image"]')?.content || '';
+            const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+            const ogType = document.querySelector('meta[property="og:type"]')?.content || '';
 
-        // Try to find the main post content
-        const postEl = document.querySelector(
-            '[data-ad-preview="message"], [data-testid="post_message"], ' +
-            '.userContent, [class*="x1iorvi4"]'  // React class patterns
-        );
-        const postText = postEl?.textContent?.trim() || ogDesc || '';
+            // Try to find the main post content
+            const postEl = document.querySelector(
+                '[data-ad-preview="message"], [data-testid="post_message"], ' +
+                '.userContent, [class*="x1iorvi4"]'  // React class patterns
+            );
+            const postText = postEl?.textContent?.trim() || ogDesc || '';
 
-        // Author from various possible locations
-        const authorEl = document.querySelector(
-            'h2 a[href*="facebook.com"], strong > a, [data-testid="story-subtitle"] a'
-        );
-        const authorName = authorEl?.textContent?.trim() || ogTitle.split(' - ')[0] || '';
-        const authorUrl = authorEl?.href || '';
+            // Author from various possible locations
+            const authorEl = document.querySelector(
+                'h2 a[href*="facebook.com"], strong > a, [data-testid="story-subtitle"] a'
+            );
+            const authorName = authorEl?.textContent?.trim() || ogTitle.split(' - ')[0] || '';
+            const authorUrl = authorEl?.href || '';
 
-        // Timestamp
-        const timeEl = document.querySelector('abbr[data-utime], time, [data-testid="story-subtitle"] a > span');
-        const timestamp = timeEl?.getAttribute('data-utime') || timeEl?.getAttribute('datetime') || timeEl?.title || '';
+            // Timestamp — data-utime is a Unix timestamp (seconds); datetime is ISO string
+            const timeEl = document.querySelector('abbr[data-utime], time, [data-testid="story-subtitle"] a > span');
+            const dataUtime = timeEl?.getAttribute('data-utime');
+            const datetimeAttr = timeEl?.getAttribute('datetime');
+            let publishedAt = Math.floor(Date.now() / 1000);
+            if (dataUtime && /^\d+$/.test(dataUtime)) {
+                publishedAt = parseInt(dataUtime);
+            } else if (datetimeAttr) {
+                const parsed = Date.parse(datetimeAttr);
+                if (!isNaN(parsed)) publishedAt = Math.floor(parsed / 1000);
+            }
 
-        // Media
-        const images = Array.from(document.querySelectorAll(
-            'img[class*="scaledImageFit"], img[data-visualcompletion="media-vc-image"], [role="img"] img'
-        )).map(img => img.src).filter(src => src && !src.includes('emoji'));
+            // Media
+            const images = Array.from(document.querySelectorAll(
+                'img[class*="scaledImageFit"], img[data-visualcompletion="media-vc-image"], [role="img"] img'
+            )).map(img => img.src).filter(src => src && !src.includes('emoji'));
 
-        let contentHtml = `<blockquote><p>${Utils.escapeHtml(postText)}</p>`;
-        contentHtml += `<footer>— ${Utils.escapeHtml(authorName)} on Facebook</footer></blockquote>`;
-        images.forEach(src => { contentHtml += `<figure><img src="${src}" alt="Facebook media"></figure>`; });
+            let contentHtml = `<blockquote><p>${Utils.escapeHtml(postText)}</p>`;
+            contentHtml += `<footer>— ${Utils.escapeHtml(authorName)} on Facebook</footer></blockquote>`;
+            images.forEach(src => { contentHtml += `<figure><img src="${Utils.escapeHtml(src)}" alt="Facebook media"></figure>`; });
 
-        // Engagement
-        const engagement = extractFBEngagement();
+            // Engagement
+            const engagement = extractFBEngagement();
 
-        return {
-            title: postText.substring(0, 80) + (postText.length > 80 ? '...' : '') || ogTitle,
-            byline: authorName,
-            url: ogUrl,
-            domain: 'facebook.com',
-            siteName: 'Facebook',
-            publishedAt: timestamp ? Math.floor(new Date(parseInt(timestamp) * 1000 || timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000),
-            content: contentHtml,
-            textContent: postText,
-            excerpt: postText.substring(0, 200),
-            featuredImage: ogImage || images[0] || '',
-            publicationIcon: 'https://www.facebook.com/favicon.ico',
-            platform: 'facebook',
-            contentType: 'social_post',
-            engagement,
-            wordCount: postText.split(/\s+/).filter(w => w).length,
-            readingTimeMinutes: 1,
-            structuredData: { type: 'SocialMediaPosting' },
-            keywords: [],
-            language: document.documentElement.lang || 'en',
-            isPaywalled: false,
-            section: null,
-            dateModified: null
-        };
+            return {
+                title: postText.substring(0, 80) + (postText.length > 80 ? '...' : '') || ogTitle,
+                byline: authorName,
+                url: ogUrl,
+                domain: 'facebook.com',
+                siteName: 'Facebook',
+                publishedAt,
+                content: contentHtml,
+                textContent: postText,
+                excerpt: postText.substring(0, 200),
+                featuredImage: ogImage || images[0] || '',
+                publicationIcon: 'https://www.facebook.com/favicon.ico',
+                platform: 'facebook',
+                contentType: 'social_post',
+                engagement,
+                wordCount: postText.split(/\s+/).filter(w => w).length,
+                readingTimeMinutes: 1,
+                structuredData: { type: 'SocialMediaPosting' },
+                keywords: [],
+                language: document.documentElement.lang || 'en',
+                isPaywalled: false,
+                section: null,
+                dateModified: null
+            };
+        } catch (e) {
+            console.error('[NAC Facebook] extract() failed:', e);
+            return null;
+        }
     },
 
     extractComments: async (articleUrl) => {
-        const commentEls = document.querySelectorAll(
-            '[aria-label="Comment"], .UFICommentBody, [data-testid*="comment"], [class*="comment"]'
-        );
-        const comments = [];
-        for (const el of commentEls) {
-            const author = el.querySelector('a[role="link"], .UFICommentActorName, a span')?.textContent?.trim() || '';
-            const text = el.querySelector('[dir="auto"], .UFICommentBody, span[dir]')?.textContent?.trim() || el.textContent?.trim() || '';
-            if (text.length < 2 || !author) continue;
-            comments.push({
-                authorName: author,
-                text: text.substring(0, 500),
-                timestamp: null,
-                avatarUrl: null,
-                profileUrl: null,
-                likes: 0,
-                platform: 'facebook',
-                sourceUrl: articleUrl
-            });
+        try {
+            const commentEls = document.querySelectorAll(
+                '[aria-label="Comment"], .UFICommentBody, [data-testid*="comment"], [class*="comment"]'
+            );
+            const comments = [];
+            for (const el of commentEls) {
+                const author = el.querySelector('a[role="link"], .UFICommentActorName, a span')?.textContent?.trim() || '';
+                const text = el.querySelector('[dir="auto"], .UFICommentBody, span[dir]')?.textContent?.trim() || el.textContent?.trim() || '';
+                if (text.length < 2 || !author) continue;
+                comments.push({
+                    authorName: author,
+                    text: text.substring(0, 500),
+                    timestamp: null,
+                    avatarUrl: null,
+                    profileUrl: null,
+                    likes: 0,
+                    platform: 'facebook',
+                    sourceUrl: articleUrl
+                });
+            }
+            return comments;
+        } catch (e) {
+            console.error('[NAC Facebook] extractComments() failed:', e);
+            return [];
         }
-        return comments;
     },
 
     getReaderViewConfig: () => ({

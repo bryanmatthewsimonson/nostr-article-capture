@@ -12,74 +12,84 @@ const SubstackHandler = {
     },
 
     extract: async () => {
-        // Use standard Readability extraction as base
-        const article = ContentExtractor.extractArticle();
-
-        if (!article) return null;
-
-        // Enhance with Substack-specific metadata
-        article.platform = 'substack';
-
-        // Extract Substack-specific data (wrapped in try/catch for graceful fallback)
         try {
-            article.substackMeta = extractSubstackMeta();
+            // Use standard Readability extraction as base
+            const article = ContentExtractor.extractArticle();
+
+            if (!article) return null;
+
+            // Enhance with Substack-specific metadata
+            article.platform = 'substack';
+
+            // Extract Substack-specific data (wrapped in try/catch for graceful fallback)
+            try {
+                article.substackMeta = extractSubstackMeta();
+            } catch (e) {
+                console.warn('[NAC Substack] meta extraction failed:', e);
+                article.substackMeta = {};
+            }
+
+            // Override siteName with publication name if available
+            if (article.substackMeta?.publicationName) {
+                article.siteName = article.substackMeta.publicationName;
+            }
+
+            // Substack newsletters often have subscriber counts, likes, etc.
+            try {
+                article.engagement = extractEngagement();
+            } catch (e) {
+                console.warn('[NAC Substack] engagement extraction failed:', e);
+                article.engagement = null;
+            }
+
+            return article;
         } catch (e) {
-            console.warn('[NAC] Substack meta extraction failed:', e);
-            article.substackMeta = {};
+            console.error('[NAC Substack] extract() failed:', e);
+            return null;
         }
-
-        // Override siteName with publication name if available
-        if (article.substackMeta?.publicationName) {
-            article.siteName = article.substackMeta.publicationName;
-        }
-
-        // Substack newsletters often have subscriber counts, likes, etc.
-        try {
-            article.engagement = extractEngagement();
-        } catch (e) {
-            console.warn('[NAC] Substack engagement extraction failed:', e);
-            article.engagement = null;
-        }
-
-        return article;
     },
 
     extractComments: async (articleUrl) => {
-        // Substack has a specific comment structure
-        const commentElements = document.querySelectorAll(
-            '.comment-list-item, .comment, [class*="CommentListItem"], .thread-comment'
-        );
+        try {
+            // Substack has a specific comment structure
+            const commentElements = document.querySelectorAll(
+                '.comment-list-item, .comment, [class*="CommentListItem"], .thread-comment'
+            );
 
-        const comments = [];
-        for (const el of commentElements) {
-            const authorEl = el.querySelector('.commenter-name, .comment-author, [class*="CommentName"]');
-            const textEl = el.querySelector('.comment-body, .comment-content, [class*="CommentBody"] p');
-            const timeEl = el.querySelector('time, [datetime], .comment-timestamp');
-            const avatarEl = el.querySelector('img.commenter-photo, img[class*="avatar"]');
-            const profileLink = authorEl?.closest('a') || el.querySelector('a[href*="/profile/"]');
+            const comments = [];
+            for (const el of commentElements) {
+                const authorEl = el.querySelector('.commenter-name, .comment-author, [class*="CommentName"]');
+                const textEl = el.querySelector('.comment-body, .comment-content, [class*="CommentBody"] p');
+                const timeEl = el.querySelector('time, [datetime], .comment-timestamp');
+                const avatarEl = el.querySelector('img.commenter-photo, img[class*="avatar"]');
+                const profileLink = authorEl?.closest('a') || el.querySelector('a[href*="/profile/"]');
 
-            const authorName = authorEl?.textContent?.trim() || 'Anonymous';
-            const text = textEl?.textContent?.trim() || el.querySelector('p')?.textContent?.trim() || '';
+                const authorName = authorEl?.textContent?.trim() || 'Anonymous';
+                const text = textEl?.textContent?.trim() || el.querySelector('p')?.textContent?.trim() || '';
 
-            if (text.length < 2) continue;
+                if (text.length < 2) continue;
 
-            // Detect likes/hearts on comment
-            const likesEl = el.querySelector('[class*="like-count"], [class*="heart-count"], .comment-like-count');
-            const likes = likesEl ? parseInt(likesEl.textContent) || 0 : 0;
+                // Detect likes/hearts on comment
+                const likesEl = el.querySelector('[class*="like-count"], [class*="heart-count"], .comment-like-count');
+                const likes = likesEl ? parseInt(likesEl.textContent) || 0 : 0;
 
-            comments.push({
-                authorName,
-                text,
-                timestamp: timeEl?.getAttribute('datetime') || timeEl?.textContent?.trim(),
-                avatarUrl: avatarEl?.src || null,
-                profileUrl: profileLink?.href || null,
-                likes,
-                platform: 'substack',
-                sourceUrl: articleUrl
-            });
+                comments.push({
+                    authorName,
+                    text,
+                    timestamp: timeEl?.getAttribute('datetime') || timeEl?.textContent?.trim(),
+                    avatarUrl: avatarEl?.src || null,
+                    profileUrl: profileLink?.href || null,
+                    likes,
+                    platform: 'substack',
+                    sourceUrl: articleUrl
+                });
+            }
+
+            return comments;
+        } catch (e) {
+            console.error('[NAC Substack] extractComments() failed:', e);
+            return [];
         }
-
-        return comments;
     },
 
     getReaderViewConfig: () => ({
