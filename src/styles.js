@@ -2772,4 +2772,56 @@ export const STYLES = `
     color: var(--nac-text-muted);
     padding: 4px 0;
   }
+
+  /* Transcript Section (YouTube / Video) */
+  .nac-transcript-section {
+    margin: 1.5em 0;
+    border: 1px solid var(--nac-border);
+    border-radius: 8px;
+  }
+
+  .nac-transcript-header {
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    user-select: none;
+    border-radius: 8px;
+    transition: background 0.15s;
+  }
+
+  .nac-transcript-header:hover {
+    background: var(--nac-bg);
+  }
+
+  .nac-transcript-header:focus-visible {
+    outline: 2px solid var(--nac-primary);
+    outline-offset: 2px;
+  }
+
+  .nac-transcript-arrow {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+    font-size: 14px;
+    transition: transform 0.15s;
+  }
+
+  .nac-transcript-body {
+    padding: 0 16px 16px;
+  }
+
+  .nac-transcript-text {
+    white-space: pre-wrap;
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', monospace;
+    font-size: 0.9em;
+    line-height: 1.8;
+    max-height: 500px;
+    overflow-y: auto;
+    padding: 12px;
+    background: var(--nac-bg);
+    border-radius: 6px;
+    border: 1px solid var(--nac-border);
+    color: var(--nac-text);
+    margin: 0;
+  }
 `;

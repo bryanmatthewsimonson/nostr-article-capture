@@ -137,6 +137,16 @@ export const ReaderView = {
           <div class="nac-article-body" id="nac-content" contenteditable="false">
             ${article.content || ''}
           </div>
+          
+          ${article.transcript ? `
+          <div class="nac-transcript-section">
+            <div class="nac-transcript-header" id="nac-transcript-toggle" role="button" tabindex="0" aria-expanded="false">
+              <span class="nac-transcript-arrow">▸</span> 📝 Transcript
+            </div>
+            <div class="nac-transcript-body" id="nac-transcript-body" style="display:none">
+              <pre class="nac-transcript-text">${Utils.escapeHtml(article.transcript)}</pre>
+            </div>
+          </div>` : ''}
         </div>
         
         <!-- Comments section (collapsible) -->
@@ -276,6 +286,24 @@ export const ReaderView = {
       container.style.display = ReaderView.commentsCollapsed ? 'none' : '';
       toggleBtn.textContent = ReaderView.commentsCollapsed ? '▼' : '▲';
     });
+
+    // Transcript toggle (collapse/expand) — for video content
+    const transcriptToggle = document.getElementById('nac-transcript-toggle');
+    if (transcriptToggle) {
+      const toggleTranscript = () => {
+        const body = document.getElementById('nac-transcript-body');
+        const arrow = transcriptToggle.querySelector('.nac-transcript-arrow');
+        if (!body) return;
+        const isHidden = body.style.display === 'none';
+        body.style.display = isHidden ? '' : 'none';
+        transcriptToggle.setAttribute('aria-expanded', String(isHidden));
+        if (arrow) arrow.textContent = isHidden ? '▾' : '▸';
+      };
+      transcriptToggle.addEventListener('click', toggleTranscript);
+      transcriptToggle.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTranscript(); }
+      });
+    }
 
     // Load previously captured comments for this URL
     try {

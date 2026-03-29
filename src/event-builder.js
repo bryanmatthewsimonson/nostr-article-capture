@@ -11,6 +11,11 @@ export const EventBuilder = {
       markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
     }
 
+    // Append transcript for video content
+    if (article.transcript) {
+      markdownContent += '\n\n---\n\n## Transcript\n\n```\n' + article.transcript + '\n```';
+    }
+
     // Build metadata header for published content
     let metadataHeader = '---\n';
     metadataHeader += `**Source**: [${article.title}](${article.url})\n`;
@@ -114,6 +119,14 @@ export const EventBuilder = {
     // Add content detection tags (Phase 2)
     if (article.contentType) tags.push(['content_format', article.contentType]);
     if (article.platform) tags.push(['platform', article.platform]);
+
+    // Add video-specific tags (Phase 5)
+    if (article.contentType === 'video' && article.videoMeta) {
+      if (article.videoMeta.videoId) tags.push(['video_id', article.videoMeta.videoId]);
+      if (article.videoMeta.duration) tags.push(['duration', article.videoMeta.duration]);
+      if (article.byline) tags.push(['channel', article.byline]);
+      if (article.transcript) tags.push(['transcript', 'true']);
+    }
 
     // Add engagement metrics tags (Phase 4)
     if (article.engagement) {
