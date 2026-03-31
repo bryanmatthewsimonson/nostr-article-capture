@@ -9,6 +9,73 @@ import { EntityMigration } from './entity-migration.js';
 import { STYLES } from './styles.js';
 
 /**
+ * Prompt the user to click on a page element for selection.
+ * Shows a semi-transparent overlay with instructions, highlights
+ * the element under the cursor, and resolves with the clicked element.
+ * Resolves with null if the user presses Escape.
+ */
+function promptUserSelection(platform) {
+  return new Promise((resolve) => {
+    // Create a semi-transparent overlay with instructions
+    const overlay = document.createElement('div');
+    overlay.id = 'nac-selection-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.3);cursor:crosshair;display:flex;align-items:flex-start;justify-content:center;padding-top:80px;';
+
+    const banner = document.createElement('div');
+    banner.style.cssText = 'background:#6366f1;color:white;padding:16px 24px;border-radius:12px;font-family:system-ui;font-size:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:400px;pointer-events:none;';
+    banner.innerHTML = `<div style="font-size:20px;margin-bottom:8px;">📌 Click on the post to capture</div><div style="font-size:13px;opacity:0.8;">Click anywhere on the ${platform} post you want to capture. Press Escape to cancel.</div>`;
+    overlay.appendChild(banner);
+
+    // Highlight element under cursor
+    let lastHighlighted = null;
+    const highlightStyle = '2px solid #6366f1';
+
+    overlay.addEventListener('mousemove', (e) => {
+      // Get element below the overlay
+      overlay.style.pointerEvents = 'none';
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      overlay.style.pointerEvents = 'auto';
+
+      if (lastHighlighted) {
+        lastHighlighted.style.outline = '';
+      }
+      if (el && el !== document.body && el !== document.documentElement) {
+        el.style.outline = highlightStyle;
+        lastHighlighted = el;
+      }
+    });
+
+    overlay.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Get the actual element under the overlay
+      overlay.style.pointerEvents = 'none';
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      overlay.style.pointerEvents = 'auto';
+
+      if (lastHighlighted) lastHighlighted.style.outline = '';
+      overlay.remove();
+      document.removeEventListener('keydown', escHandler);
+      resolve(el);
+    });
+
+    // Escape to cancel
+    const escHandler = (e) => {
+      if (e.key === 'Escape') {
+        if (lastHighlighted) lastHighlighted.style.outline = '';
+        overlay.remove();
+        document.removeEventListener('keydown', escHandler);
+        resolve(null);
+      }
+    };
+    document.addEventListener('keydown', escHandler);
+
+    document.body.appendChild(overlay);
+  });
+}
+
+/**
  * Wait for document.body to exist.
  * On YouTube SPA and other dynamic pages, body may not be ready when the script runs.
  */
@@ -157,7 +224,21 @@ function createFAB() {
       if (detection.platform && PlatformHandler.has(detection.platform)) {
         const handler = PlatformHandler.get(detection.platform);
         try {
-          article = await handler.extract();
+          if (handler.needsUserSelection) {
+            // User-assisted selection flow
+            const selectedElement = await promptUserSelection(handler.platform);
+            if (!selectedElement) return; // User cancelled (Escape)
+
+            // Find the post container from the clicked element
+            const postContainer = handler.findPostContainer
+              ? handler.findPostContainer(selectedElement)
+              : selectedElement;
+
+            // Extract from the selected container
+            article = await handler.extract(postContainer);
+          } else {
+            article = await handler.extract();
+          }
         } catch (handlerError) {
           console.warn('[NAC] Platform handler failed, falling back to generic:', handlerError.message);
           article = null;
@@ -294,4 +375,4 @@ async function init() {
   }
 }
 
-export { init };
+export { init, promptUserSelection };

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.7.0
+// @version      3.8.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.7.0",
+        version: "3.8.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -6818,6 +6818,13 @@ ${extractDescription()}`;
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date \u2014 click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : "Unknown Date"}</span>
               ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">\u{1F512}</span>' : ""}
             </div>
+            ${article.platformAccount ? `
+            <div class="nac-platform-account">
+              ${article.platformAccount.avatarUrl ? `<img class="nac-platform-account-avatar" src="${Utils.escapeHtml(article.platformAccount.avatarUrl)}" onerror="this.style.display='none'" alt="">` : ""}
+              <span class="nac-platform-account-name">${Utils.escapeHtml(article.platformAccount.username || "Unknown")}</span>
+              ${article.platformAccount.profileUrl ? `<a class="nac-platform-account-link" href="${Utils.escapeHtml(article.platformAccount.profileUrl)}" target="_blank" rel="noopener">\u2197 Profile</a>` : ""}
+              <span class="nac-platform-account-badge">${Utils.escapeHtml(article.platformAccount.platform || "")}</span>
+            </div>` : ""}
             <div class="nac-meta-detection-row">
               <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
               ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">\u{1F4AC} Comments</span>' : ""}
@@ -12213,11 +12220,175 @@ Enter option (1-4):`;
     outline: 2px solid var(--nac-primary);
     outline-offset: 2px;
   }
+
+  /* ===== Facebook Post Styling ===== */
+
+  .nac-facebook-post {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--nac-surface, #fff);
+    border: 1px solid var(--nac-border, #ddd);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 1em 0;
+  }
+
+  .nac-fb-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .nac-fb-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+
+  .nac-fb-author-name {
+    font-weight: 600;
+    font-size: 0.95em;
+    color: var(--nac-text);
+  }
+
+  .nac-fb-timestamp {
+    font-size: 0.8em;
+    color: var(--nac-text-muted, #888);
+  }
+
+  .nac-fb-text {
+    font-size: 0.95em;
+    line-height: 1.5;
+    margin: 12px 0;
+    white-space: pre-wrap;
+  }
+
+  .nac-fb-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 12px 0;
+  }
+
+  .nac-fb-image {
+    max-width: 100%;
+    border-radius: 8px;
+  }
+
+  .nac-fb-links {
+    margin: 8px 0;
+  }
+
+  .nac-fb-link {
+    display: block;
+    padding: 8px 12px;
+    background: var(--nac-surface);
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    color: var(--nac-primary);
+    text-decoration: none;
+    margin: 4px 0;
+  }
+
+  /* Platform Account Display */
+  .nac-platform-account {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    margin-bottom: 4px;
+    font-size: 13px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-platform-account-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+
+  .nac-platform-account-name {
+    font-weight: 600;
+    color: var(--nac-text);
+  }
+
+  .nac-platform-account-link {
+    color: var(--nac-primary);
+    text-decoration: none;
+    font-size: 12px;
+  }
+
+  .nac-platform-account-link:hover {
+    text-decoration: underline;
+  }
+
+  .nac-platform-account-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+  }
+
+  /* Selection Overlay */
+  #nac-selection-overlay {
+    font-family: system-ui, -apple-system, sans-serif;
+  }
 `;
     }
   });
 
   // src/init.js
+  function promptUserSelection(platform) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.id = "nac-selection-overlay";
+      overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.3);cursor:crosshair;display:flex;align-items:flex-start;justify-content:center;padding-top:80px;";
+      const banner = document.createElement("div");
+      banner.style.cssText = "background:#6366f1;color:white;padding:16px 24px;border-radius:12px;font-family:system-ui;font-size:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:400px;pointer-events:none;";
+      banner.innerHTML = `<div style="font-size:20px;margin-bottom:8px;">\u{1F4CC} Click on the post to capture</div><div style="font-size:13px;opacity:0.8;">Click anywhere on the ${platform} post you want to capture. Press Escape to cancel.</div>`;
+      overlay.appendChild(banner);
+      let lastHighlighted = null;
+      const highlightStyle = "2px solid #6366f1";
+      overlay.addEventListener("mousemove", (e) => {
+        overlay.style.pointerEvents = "none";
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        overlay.style.pointerEvents = "auto";
+        if (lastHighlighted) {
+          lastHighlighted.style.outline = "";
+        }
+        if (el && el !== document.body && el !== document.documentElement) {
+          el.style.outline = highlightStyle;
+          lastHighlighted = el;
+        }
+      });
+      overlay.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        overlay.style.pointerEvents = "none";
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        overlay.style.pointerEvents = "auto";
+        if (lastHighlighted) lastHighlighted.style.outline = "";
+        overlay.remove();
+        document.removeEventListener("keydown", escHandler);
+        resolve(el);
+      });
+      const escHandler = (e) => {
+        if (e.key === "Escape") {
+          if (lastHighlighted) lastHighlighted.style.outline = "";
+          overlay.remove();
+          document.removeEventListener("keydown", escHandler);
+          resolve(null);
+        }
+      };
+      document.addEventListener("keydown", escHandler);
+      document.body.appendChild(overlay);
+    });
+  }
   function waitForBody() {
     return new Promise((resolve) => {
       if (document.body) return resolve();
@@ -12330,7 +12501,14 @@ Enter option (1-4):`;
         if (detection2.platform && PlatformHandler.has(detection2.platform)) {
           const handler = PlatformHandler.get(detection2.platform);
           try {
-            article = await handler.extract();
+            if (handler.needsUserSelection) {
+              const selectedElement = await promptUserSelection(handler.platform);
+              if (!selectedElement) return;
+              const postContainer = handler.findPostContainer ? handler.findPostContainer(selectedElement) : selectedElement;
+              article = await handler.extract(postContainer);
+            } else {
+              article = await handler.extract();
+            }
           } catch (handlerError) {
             console.warn("[NAC] Platform handler failed, falling back to generic:", handlerError.message);
             article = null;
@@ -12783,22 +12961,196 @@ Enter option (1-4):`;
   });
 
   // src/platforms/facebook.js
-  function extractFBEngagement() {
-    const reactionsEl = document.querySelector('[aria-label*="reaction"], [aria-label*="Like"]');
-    const commentsEl = document.querySelector('[aria-label*="comment"]');
-    const sharesEl = document.querySelector('[aria-label*="share"]');
-    const parseCount = (el) => {
-      if (!el) return 0;
-      const text = el.textContent?.replace(/,/g, "") || el.getAttribute("aria-label")?.replace(/,/g, "") || "";
-      const match = text.match(/(\d+)/);
-      return match ? parseInt(match[1]) : 0;
-    };
+  function extractFromContainer(container) {
+    const postText = extractTextFromElement(container);
+    const author = extractAuthorFromElement(container);
+    const timestamp = extractTimestampFromElement(container);
+    const images = extractImagesFromElement(container);
+    const links = extractLinksFromElement(container);
+    const engagement = extractEngagementFromElement(container);
+    let contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
     return {
-      likes: parseCount(reactionsEl),
-      comments: parseCount(commentsEl),
-      shares: parseCount(sharesEl),
-      views: 0
+      title,
+      byline: author.name || "Facebook User",
+      url: window.location.href,
+      domain: "facebook.com",
+      siteName: "Facebook",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
+      publicationIcon: "https://www.facebook.com/favicon.ico",
+      platform: "facebook",
+      contentType: "social_post",
+      // Platform account data (NOT jammed into author)
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "facebook"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags2(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
     };
+  }
+  function extractFromOGTags() {
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+    const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const text = ogDesc || ogTitle;
+    return {
+      title: ogTitle || "Facebook Post",
+      byline: ogTitle.split(" - ")[0] || "",
+      url: ogUrl,
+      domain: "facebook.com",
+      siteName: "Facebook",
+      publishedAt: Math.floor(Date.now() / 1e3),
+      content: `<blockquote class="nac-facebook-post"><p>${Utils.escapeHtml(text)}</p></blockquote>`,
+      textContent: text,
+      excerpt: text.substring(0, 200),
+      featuredImage: ogImage,
+      publicationIcon: "https://www.facebook.com/favicon.ico",
+      platform: "facebook",
+      contentType: "social_post",
+      platformAccount: { username: ogTitle.split(" - ")[0] || "Unknown", profileUrl: null, avatarUrl: null, platform: "facebook" },
+      engagement: { likes: 0, comments: 0, shares: 0, views: 0 },
+      wordCount: text.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: [],
+      language: "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractTextFromElement(el) {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('svg, [role="button"], [role="navigation"], [data-testid="like_button"], [data-testid="comment_button"], [data-testid="share_button"]').forEach((x) => x.remove());
+    const text = clone.textContent?.trim() || "";
+    return text.replace(/\s+/g, " ").trim();
+  }
+  function extractAuthorFromElement(el) {
+    const result = { name: "", profileUrl: null, avatarUrl: null };
+    const links = el.querySelectorAll('a[href*="facebook.com"]');
+    for (const link of links) {
+      const href = link.href;
+      if (href.match(/facebook\.com\/(profile\.php|[a-zA-Z0-9.]+)(\?|$)/) && !href.includes("/posts/") && !href.includes("/photos/") && !href.includes("/videos/")) {
+        const text = link.textContent?.trim();
+        if (text && text.length > 1 && text.length < 100) {
+          result.name = text;
+          result.profileUrl = href;
+          break;
+        }
+      }
+    }
+    const avatarImg = el.querySelector('image[href], img[src*="profile"], img[src*="scontent"]');
+    if (avatarImg) {
+      result.avatarUrl = avatarImg.getAttribute("href") || avatarImg.src;
+    }
+    return result;
+  }
+  function extractTimestampFromElement(el) {
+    const timeEl = el.querySelector('abbr[data-utime], time, a[href*="/posts/"] span');
+    if (timeEl) {
+      const utime = timeEl.getAttribute("data-utime");
+      if (utime) return new Date(parseInt(utime) * 1e3).toISOString();
+      const datetime = timeEl.getAttribute("datetime");
+      if (datetime) return datetime;
+      const text = timeEl.textContent?.trim();
+      if (text) return text;
+    }
+    return null;
+  }
+  function extractImagesFromElement(el) {
+    const images = [];
+    el.querySelectorAll("img[src]").forEach((img) => {
+      const src = img.src;
+      const width = img.naturalWidth || img.width || 0;
+      if (width > 0 && width < 50) return;
+      if (src.includes("emoji") || src.includes("icon") || src.includes("static")) return;
+      if (src.includes("scontent") || src.includes("fbcdn")) {
+        images.push(src);
+      }
+    });
+    return images;
+  }
+  function extractLinksFromElement(el) {
+    const links = [];
+    el.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.href;
+      if (href.includes("/profile.php") || href.includes("facebook.com/#") || href.includes("l.facebook.com/l.php")) return;
+      if (!href.includes("facebook.com") || href.includes("/posts/") || href.includes("/videos/")) {
+        const text = a.textContent?.trim();
+        if (text && text.length > 3) {
+          links.push({ url: href, text });
+        }
+      }
+    });
+    return links;
+  }
+  function extractEngagementFromElement(el) {
+    const result = { likes: 0, comments: 0, shares: 0, views: 0 };
+    const allText = el.textContent || "";
+    const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*(like|reaction|Love|Haha|Wow|Sad|Angry)/i);
+    if (likeMatch) result.likes = parseCount(likeMatch[1]);
+    const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
+    if (commentMatch) result.comments = parseCount(commentMatch[1]);
+    const shareMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*share/i);
+    if (shareMatch) result.shares = parseCount(shareMatch[1]);
+    return result;
+  }
+  function parseCount(text) {
+    if (!text) return 0;
+    text = text.replace(/,/g, "");
+    if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
+    if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
+    return parseInt(text) || 0;
+  }
+  function extractHashtags2(text) {
+    return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
+  }
+  function buildFacebookStyledContent(text, author, timestamp, images, links) {
+    let html = '<div class="nac-facebook-post">';
+    html += '<div class="nac-fb-header">';
+    if (author.avatarUrl) {
+      html += `<img class="nac-fb-avatar" src="${Utils.escapeHtml(author.avatarUrl)}" width="40" height="40" onerror="this.style.display='none'">`;
+    }
+    html += '<div class="nac-fb-author-info">';
+    html += `<div class="nac-fb-author-name">${Utils.escapeHtml(author.name || "Facebook User")}</div>`;
+    if (timestamp) {
+      html += `<div class="nac-fb-timestamp">${Utils.escapeHtml(typeof timestamp === "string" ? timestamp : new Date(timestamp).toLocaleString())}</div>`;
+    }
+    html += "</div></div>";
+    if (text) {
+      html += `<div class="nac-fb-text">${Utils.escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
+    }
+    if (images.length > 0) {
+      html += '<div class="nac-fb-images">';
+      images.forEach((src) => {
+        html += `<img class="nac-fb-image" src="${Utils.escapeHtml(src)}" alt="Post image" loading="lazy">`;
+      });
+      html += "</div>";
+    }
+    if (links.length > 0) {
+      html += '<div class="nac-fb-links">';
+      links.forEach((link) => {
+        html += `<a class="nac-fb-link" href="${Utils.escapeHtml(link.url)}" target="_blank">${Utils.escapeHtml(link.text)}</a>`;
+      });
+      html += "</div>";
+    }
+    html += "</div>";
+    return html;
   }
   var FacebookHandler;
   var init_facebook = __esm({
@@ -12808,91 +13160,55 @@ Enter option (1-4):`;
       FacebookHandler = {
         type: "social_post",
         platform: "facebook",
+        needsUserSelection: true,
         canCapture: () => {
           const h = window.location.hostname;
           return h.includes("facebook.com") || h.includes("fb.com");
         },
-        extract: async () => {
-          try {
-            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
-            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
-            const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
-            const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
-            const ogType = document.querySelector('meta[property="og:type"]')?.content || "";
-            const postEl = document.querySelector(
-              '[data-ad-preview="message"], [data-testid="post_message"], .userContent, [class*="x1iorvi4"]'
-              // React class patterns
-            );
-            const postText = postEl?.textContent?.trim() || ogDesc || "";
-            const authorEl = document.querySelector(
-              'h2 a[href*="facebook.com"], strong > a, [data-testid="story-subtitle"] a'
-            );
-            const authorName = authorEl?.textContent?.trim() || ogTitle.split(" - ")[0] || "";
-            const authorUrl = authorEl?.href || "";
-            const timeEl = document.querySelector('abbr[data-utime], time, [data-testid="story-subtitle"] a > span');
-            const dataUtime = timeEl?.getAttribute("data-utime");
-            const datetimeAttr = timeEl?.getAttribute("datetime");
-            let publishedAt = Math.floor(Date.now() / 1e3);
-            if (dataUtime && /^\d+$/.test(dataUtime)) {
-              publishedAt = parseInt(dataUtime);
-            } else if (datetimeAttr) {
-              const parsed = Date.parse(datetimeAttr);
-              if (!isNaN(parsed)) publishedAt = Math.floor(parsed / 1e3);
+        findPostContainer: (clickTarget) => {
+          let el = clickTarget;
+          let bestCandidate = clickTarget;
+          while (el && el !== document.body) {
+            if (el.getAttribute("role") === "article") return el;
+            if (el.getAttribute("data-pagelet")?.includes("FeedUnit")) return el;
+            if (el.getAttribute("data-testid")?.includes("Keycommand_wrapper")) return el;
+            const hasText = el.textContent?.length > 50;
+            const hasButtons = el.querySelectorAll('[role="button"]').length > 2;
+            const hasLinks = el.querySelectorAll("a[href]").length > 1;
+            const isLargeEnough = el.offsetHeight > 100;
+            if (hasText && (hasButtons || hasLinks) && isLargeEnough) {
+              bestCandidate = el;
             }
-            const images = Array.from(document.querySelectorAll(
-              'img[class*="scaledImageFit"], img[data-visualcompletion="media-vc-image"], [role="img"] img'
-            )).map((img) => img.src).filter((src) => src && !src.includes("emoji"));
-            let contentHtml = `<blockquote><p>${Utils.escapeHtml(postText)}</p>`;
-            contentHtml += `<footer>\u2014 ${Utils.escapeHtml(authorName)} on Facebook</footer></blockquote>`;
-            images.forEach((src) => {
-              contentHtml += `<figure><img src="${Utils.escapeHtml(src)}" alt="Facebook media"></figure>`;
-            });
-            const engagement = extractFBEngagement();
-            return {
-              title: postText.substring(0, 80) + (postText.length > 80 ? "..." : "") || ogTitle,
-              byline: authorName,
-              url: ogUrl,
-              domain: "facebook.com",
-              siteName: "Facebook",
-              publishedAt,
-              content: contentHtml,
-              textContent: postText,
-              excerpt: postText.substring(0, 200),
-              featuredImage: ogImage || images[0] || "",
-              publicationIcon: "https://www.facebook.com/favicon.ico",
-              platform: "facebook",
-              contentType: "social_post",
-              engagement,
-              wordCount: postText.split(/\s+/).filter((w) => w).length,
-              readingTimeMinutes: 1,
-              structuredData: { type: "SocialMediaPosting" },
-              keywords: [],
-              language: document.documentElement.lang || "en",
-              isPaywalled: false,
-              section: null,
-              dateModified: null
-            };
+            el = el.parentElement;
+          }
+          return bestCandidate;
+        },
+        extract: async (containerEl) => {
+          try {
+            if (!containerEl) {
+              return extractFromOGTags();
+            }
+            return extractFromContainer(containerEl);
           } catch (e) {
-            console.error("[NAC Facebook] extract() failed:", e);
-            return null;
+            console.error("[NAC Facebook] Extraction failed:", e);
+            return extractFromOGTags();
           }
         },
         extractComments: async (articleUrl) => {
           try {
-            const commentEls = document.querySelectorAll(
-              '[aria-label="Comment"], .UFICommentBody, [data-testid*="comment"], [class*="comment"]'
-            );
             const comments = [];
-            for (const el of commentEls) {
-              const author = el.querySelector('a[role="link"], .UFICommentActorName, a span')?.textContent?.trim() || "";
-              const text = el.querySelector('[dir="auto"], .UFICommentBody, span[dir]')?.textContent?.trim() || el.textContent?.trim() || "";
-              if (text.length < 2 || !author) continue;
+            const commentEls = document.querySelectorAll('[role="article"]');
+            const potentialComments = Array.from(commentEls).slice(1);
+            for (const el of potentialComments.slice(0, 50)) {
+              const text = extractTextFromElement(el);
+              if (text.length < 5) continue;
+              const author = extractAuthorFromElement(el);
               comments.push({
-                authorName: author,
-                text: text.substring(0, 500),
-                timestamp: null,
-                avatarUrl: null,
-                profileUrl: null,
+                authorName: author.name || "Facebook User",
+                text: text.substring(0, 2e3),
+                timestamp: extractTimestampFromElement(el),
+                avatarUrl: author.avatarUrl,
+                profileUrl: author.profileUrl,
                 likes: 0,
                 platform: "facebook",
                 sourceUrl: articleUrl
@@ -12900,7 +13216,7 @@ Enter option (1-4):`;
             }
             return comments;
           } catch (e) {
-            console.error("[NAC Facebook] extractComments() failed:", e);
+            console.error("[NAC Facebook] Comment extraction failed:", e);
             return [];
           }
         },
@@ -13057,7 +13373,7 @@ Enter option (1-4):`;
             const commentsEl = document.querySelector('[data-e2e="browse-comment-count"], [data-e2e="comment-count"]');
             const sharesEl = document.querySelector('[data-e2e="share-count"]');
             const viewsEl = document.querySelector('[data-e2e="video-views"]');
-            const parseCount = (el) => {
+            const parseCount2 = (el) => {
               if (!el) return 0;
               const t = el.textContent?.trim().replace(/,/g, "") || "";
               if (t.includes("K")) return Math.round(parseFloat(t) * 1e3);
@@ -13087,10 +13403,10 @@ Enter option (1-4):`;
                 username: authorName
               },
               engagement: {
-                likes: parseCount(likesEl),
-                comments: parseCount(commentsEl),
-                shares: parseCount(sharesEl),
-                views: parseCount(viewsEl)
+                likes: parseCount2(likesEl),
+                comments: parseCount2(commentsEl),
+                shares: parseCount2(sharesEl),
+                views: parseCount2(viewsEl)
               },
               wordCount: caption.split(/\s+/).filter((w) => w).length,
               readingTimeMinutes: 1,

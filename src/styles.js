@@ -2870,4 +2870,122 @@ export const STYLES = `
     outline: 2px solid var(--nac-primary);
     outline-offset: 2px;
   }
+
+  /* ===== Facebook Post Styling ===== */
+
+  .nac-facebook-post {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--nac-surface, #fff);
+    border: 1px solid var(--nac-border, #ddd);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 1em 0;
+  }
+
+  .nac-fb-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .nac-fb-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+
+  .nac-fb-author-name {
+    font-weight: 600;
+    font-size: 0.95em;
+    color: var(--nac-text);
+  }
+
+  .nac-fb-timestamp {
+    font-size: 0.8em;
+    color: var(--nac-text-muted, #888);
+  }
+
+  .nac-fb-text {
+    font-size: 0.95em;
+    line-height: 1.5;
+    margin: 12px 0;
+    white-space: pre-wrap;
+  }
+
+  .nac-fb-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 12px 0;
+  }
+
+  .nac-fb-image {
+    max-width: 100%;
+    border-radius: 8px;
+  }
+
+  .nac-fb-links {
+    margin: 8px 0;
+  }
+
+  .nac-fb-link {
+    display: block;
+    padding: 8px 12px;
+    background: var(--nac-surface);
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    color: var(--nac-primary);
+    text-decoration: none;
+    margin: 4px 0;
+  }
+
+  /* Platform Account Display */
+  .nac-platform-account {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    margin-bottom: 4px;
+    font-size: 13px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-platform-account-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+
+  .nac-platform-account-name {
+    font-weight: 600;
+    color: var(--nac-text);
+  }
+
+  .nac-platform-account-link {
+    color: var(--nac-primary);
+    text-decoration: none;
+    font-size: 12px;
+  }
+
+  .nac-platform-account-link:hover {
+    text-decoration: underline;
+  }
+
+  .nac-platform-account-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--nac-primary);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+  }
+
+  /* Selection Overlay */
+  #nac-selection-overlay {
+    font-family: system-ui, -apple-system, sans-serif;
+  }
 `;

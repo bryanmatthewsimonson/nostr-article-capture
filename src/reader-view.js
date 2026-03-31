@@ -90,6 +90,13 @@ export const ReaderView = {
               <span class="nac-meta-date nac-editable-field" id="nac-date" data-field="publishedAt" title="Click to edit date" role="button" tabindex="0" aria-label="Edit date — click to change">${article.publishedAt ? ReaderView._formatDate(article.publishedAt) : 'Unknown Date'}</span>
               ${article.isPaywalled ? '<span class="nac-meta-paywall" title="Paywalled content">🔒</span>' : ''}
             </div>
+            ${article.platformAccount ? `
+            <div class="nac-platform-account">
+              ${article.platformAccount.avatarUrl ? `<img class="nac-platform-account-avatar" src="${Utils.escapeHtml(article.platformAccount.avatarUrl)}" onerror="this.style.display='none'" alt="">` : ''}
+              <span class="nac-platform-account-name">${Utils.escapeHtml(article.platformAccount.username || 'Unknown')}</span>
+              ${article.platformAccount.profileUrl ? `<a class="nac-platform-account-link" href="${Utils.escapeHtml(article.platformAccount.profileUrl)}" target="_blank" rel="noopener">↗ Profile</a>` : ''}
+              <span class="nac-platform-account-badge">${Utils.escapeHtml(article.platformAccount.platform || '')}</span>
+            </div>` : ''}
             <div class="nac-meta-detection-row">
               <span class="nac-meta-content-type">${ContentDetector.getPlatformIcon(article.platform)} ${ContentDetector.getTypeLabel(article.contentType)}</span>
               ${article.hasComments ? '<span class="nac-meta-comments-indicator" title="Comments detected on this page">💬 Comments</span>' : ''}
