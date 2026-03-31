@@ -6537,66 +6537,145 @@ Enter number:`);
     return data;
   }
   async function extractTranscript() {
+    console.log("[NAC YouTube] Attempting transcript extraction...");
     try {
-      const playerResponse = (typeof unsafeWindow !== "undefined" ? unsafeWindow : window)?.ytInitialPlayerResponse || window.ytInitialPlayerResponse;
-      if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-        const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
-        const track = tracks.find((t) => t.languageCode === "en") || tracks[0];
-        if (track?.baseUrl) {
-          const response = await fetch(track.baseUrl + "&fmt=json3");
-          const json = await response.json();
-          if (json.events) {
-            return json.events.filter((e) => e.segs).map((e) => {
-              const ms = e.tStartMs || 0;
-              const mins = Math.floor(ms / 6e4);
-              const secs = Math.floor(ms % 6e4 / 1e3);
-              const text = e.segs.map((s) => s.utf8).join("");
-              return `[${mins}:${String(secs).padStart(2, "0")}] ${text.trim()}`;
-            }).filter((line) => line.match(/\] .+/)).join("\n");
+      let playerResponse = null;
+      if (typeof unsafeWindow !== "undefined") {
+        playerResponse = unsafeWindow.ytInitialPlayerResponse;
+        if (!playerResponse) {
+          const player = unsafeWindow.document.querySelector("#movie_player");
+          if (player && player.getPlayerResponse) {
+            playerResponse = player.getPlayerResponse();
           }
         }
       }
-    } catch (e) {
-      console.log("[NAC YouTube] Method 1 transcript failed:", e.message);
-    }
-    try {
-      const scripts = document.querySelectorAll("script");
-      for (const script of scripts) {
-        const text = script.textContent;
-        if (text.includes('"captionTracks"')) {
-          const match = text.match(/"captionTracks":\s*(\[.*?\])/s);
-          if (match) {
-            const tracks = JSON.parse(match[1]);
-            const track = tracks.find((t) => t.languageCode === "en") || tracks[0];
-            if (track?.baseUrl) {
-              const resp = await fetch(track.baseUrl);
-              const xml = await resp.text();
+      if (!playerResponse) {
+        playerResponse = window.ytInitialPlayerResponse;
+      }
+      if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+        const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
+        console.log("[NAC YouTube] Found", tracks.length, "caption tracks");
+        const track = tracks.find((t) => t.languageCode === "en" && !t.kind) || tracks.find((t) => t.languageCode === "en") || tracks.find((t) => !t.kind) || tracks[0];
+        if (track?.baseUrl) {
+          console.log("[NAC YouTube] Fetching transcript from:", track.name?.simpleText || track.languageCode);
+          try {
+            const jsonResp = await fetch(track.baseUrl + "&fmt=json3");
+            if (jsonResp.ok) {
+              const json = await jsonResp.json();
+              if (json.events) {
+                const lines = json.events.filter((e) => e.segs && e.segs.some((s) => s.utf8?.trim())).map((e) => {
+                  const ms = e.tStartMs || 0;
+                  const m = Math.floor(ms / 6e4);
+                  const s = Math.floor(ms % 6e4 / 1e3);
+                  const text = e.segs.map((seg) => seg.utf8 || "").join("").trim();
+                  return `[${m}:${String(s).padStart(2, "0")}] ${text}`;
+                }).filter((l) => l.match(/\] .+/));
+                if (lines.length > 0) {
+                  console.log("[NAC YouTube] Got transcript:", lines.length, "lines");
+                  return lines.join("\n");
+                }
+              }
+            }
+          } catch (jsonErr) {
+            console.log("[NAC YouTube] JSON transcript failed, trying XML:", jsonErr.message);
+          }
+          try {
+            const xmlResp = await fetch(track.baseUrl);
+            if (xmlResp.ok) {
+              const xml = await xmlResp.text();
               const parser = new DOMParser();
               const doc = parser.parseFromString(xml, "text/xml");
-              return Array.from(doc.querySelectorAll("text")).map((node) => {
+              const lines = Array.from(doc.querySelectorAll("text")).map((node) => {
                 const start = parseFloat(node.getAttribute("start") || "0");
                 const m = Math.floor(start / 60);
                 const s = Math.floor(start % 60);
-                return `[${m}:${String(s).padStart(2, "0")}] ${node.textContent.trim()}`;
-              }).filter((l) => l.match(/\] .+/)).join("\n");
+                const text = node.textContent.replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
+                return `[${m}:${String(s).padStart(2, "0")}] ${text}`;
+              }).filter((l) => l.match(/\] .+/));
+              if (lines.length > 0) {
+                console.log("[NAC YouTube] Got XML transcript:", lines.length, "lines");
+                return lines.join("\n");
+              }
             }
+          } catch (xmlErr) {
+            console.log("[NAC YouTube] XML transcript also failed:", xmlErr.message);
           }
         }
       }
     } catch (e) {
-      console.log("[NAC YouTube] Method 2 transcript failed:", e.message);
+      console.log("[NAC YouTube] Method 1 failed:", e.message);
+    }
+    try {
+      const pageSource = document.documentElement.innerHTML;
+      const captionMatch = pageSource.match(/"captionTracks"\s*:\s*(\[.*?\])/s);
+      if (captionMatch) {
+        const tracks = JSON.parse(captionMatch[1]);
+        console.log("[NAC YouTube] Found", tracks.length, "tracks from page source");
+        const track = tracks.find((t) => t.languageCode === "en") || tracks[0];
+        if (track?.baseUrl) {
+          const resp = await fetch(track.baseUrl);
+          if (resp.ok) {
+            const xml = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(xml, "text/xml");
+            const lines = Array.from(doc.querySelectorAll("text")).map((node) => {
+              const start = parseFloat(node.getAttribute("start") || "0");
+              const m = Math.floor(start / 60);
+              const s = Math.floor(start % 60);
+              return `[${m}:${String(s).padStart(2, "0")}] ${node.textContent.trim()}`;
+            }).filter((l) => l.match(/\] .+/));
+            if (lines.length > 0) return lines.join("\n");
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[NAC YouTube] Method 2 failed:", e.message);
+    }
+    try {
+      const pageSource = document.documentElement.innerHTML;
+      const captionMatch = pageSource.match(/"captionTracks"\s*:\s*(\[.*?\])/s);
+      if (captionMatch && typeof GM_xmlhttpRequest !== "undefined") {
+        const tracks = JSON.parse(captionMatch[1]);
+        const track = tracks.find((t) => t.languageCode === "en") || tracks[0];
+        if (track?.baseUrl) {
+          console.log("[NAC YouTube] Trying GM_xmlhttpRequest for transcript...");
+          const xml = await new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+              method: "GET",
+              url: track.baseUrl,
+              onload: (resp) => resolve(resp.responseText),
+              onerror: (err) => reject(new Error("GM_xmlhttpRequest failed"))
+            });
+          });
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(xml, "text/xml");
+          const lines = Array.from(doc.querySelectorAll("text")).map((node) => {
+            const start = parseFloat(node.getAttribute("start") || "0");
+            const m = Math.floor(start / 60);
+            const s = Math.floor(start % 60);
+            return `[${m}:${String(s).padStart(2, "0")}] ${node.textContent.trim()}`;
+          }).filter((l) => l.match(/\] .+/));
+          if (lines.length > 0) {
+            console.log("[NAC YouTube] Got transcript via GM_xmlhttpRequest:", lines.length, "lines");
+            return lines.join("\n");
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[NAC YouTube] Method 3 (GM_xmlhttpRequest) failed:", e.message);
     }
     const segments = document.querySelectorAll(
       'ytd-transcript-segment-renderer .segment-text, [class*="transcript"] [class*="segment-text"]'
     );
     if (segments.length > 0) {
+      console.log("[NAC YouTube] Found transcript segments in DOM:", segments.length);
       return Array.from(segments).map((seg, i) => {
         const timeEl = seg.previousElementSibling || seg.closest('[class*="segment"]')?.querySelector('[class*="timestamp"]');
         const time = timeEl?.textContent?.trim() || `${Math.floor(i * 5 / 60)}:${String(i * 5 % 60).padStart(2, "0")}`;
         return `[${time}] ${seg.textContent.trim()}`;
       }).join("\n");
     }
-    console.log("[NAC YouTube] No transcript available");
+    console.log("[NAC YouTube] No transcript available after all methods");
     return null;
   }
   function buildVideoContent() {
@@ -12338,6 +12417,80 @@ Enter option (1-4):`;
   #nac-selection-overlay {
     font-family: system-ui, -apple-system, sans-serif;
   }
+
+  /* Instagram Post Styles */
+  .nac-instagram-post {
+    border: 1px solid var(--nac-border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--nac-surface);
+    margin: 1em 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  .nac-ig-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--nac-border);
+  }
+
+  .nac-ig-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 2px solid transparent;
+    background: linear-gradient(var(--nac-surface), var(--nac-surface)) padding-box,
+                linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888) border-box;
+  }
+
+  .nac-ig-author-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .nac-ig-author-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--nac-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nac-ig-timestamp {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-ig-images {
+    width: 100%;
+    background: #000;
+  }
+
+  .nac-ig-image {
+    width: 100%;
+    display: block;
+    object-fit: contain;
+    max-height: 600px;
+  }
+
+  .nac-ig-caption {
+    padding: 12px 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--nac-text);
+    word-wrap: break-word;
+  }
+
+  .nac-ig-caption-author {
+    font-weight: 600;
+    margin-right: 4px;
+  }
 `;
     }
   });
@@ -13233,6 +13386,212 @@ Enter option (1-4):`;
   });
 
   // src/platforms/instagram.js
+  function extractFromContainer2(container) {
+    const postText = extractTextFromElement2(container);
+    const author = extractAuthorFromElement2(container);
+    const timestamp = extractTimestampFromElement2(container);
+    const images = extractImagesFromElement2(container);
+    const engagement = extractEngagementFromElement2(container);
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const isReel = /\/reel\//.test(window.location.pathname);
+    let contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: author.name || "Instagram User",
+      url: ogUrl,
+      domain: "instagram.com",
+      siteName: "Instagram",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: ogImage || images[0] || "",
+      publicationIcon: "https://www.instagram.com/favicon.ico",
+      platform: "instagram",
+      contentType: isReel ? "video" : "social_post",
+      // Platform account data (NOT jammed into author)
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "instagram"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags3(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractFromOGTags2() {
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+    const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const isReel = /\/reel\//.test(window.location.pathname);
+    const authorName = ogTitle.match(/(.+?) on Instagram/)?.[1] || ogTitle.split("\u2022")[0]?.trim() || document.querySelector('header a[href*="/"]')?.textContent?.trim() || "";
+    const text = ogDesc || ogTitle;
+    const caption = text;
+    let contentHtml = '<div class="nac-instagram-post">';
+    contentHtml += '<div class="nac-ig-header">';
+    contentHtml += `<div class="nac-ig-author-name">${Utils.escapeHtml(authorName || "Instagram User")}</div>`;
+    contentHtml += "</div>";
+    if (caption) {
+      contentHtml += `<div class="nac-ig-caption">${Utils.escapeHtml(caption).replace(/\n/g, "<br>")}</div>`;
+    }
+    if (ogImage) {
+      contentHtml += `<div class="nac-ig-images"><img class="nac-ig-image" src="${Utils.escapeHtml(ogImage)}" alt="Instagram media" loading="lazy"></div>`;
+    }
+    contentHtml += "</div>";
+    return {
+      title: authorName ? `${authorName}: "${caption.substring(0, 60)}${caption.length > 60 ? "..." : ""}"` : caption.substring(0, 80) || "Instagram Post",
+      byline: authorName || "",
+      url: ogUrl,
+      domain: "instagram.com",
+      siteName: "Instagram",
+      publishedAt: Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: caption,
+      excerpt: caption.substring(0, 200),
+      featuredImage: ogImage,
+      publicationIcon: "https://www.instagram.com/favicon.ico",
+      platform: "instagram",
+      contentType: isReel ? "video" : "social_post",
+      platformAccount: { username: authorName || "Unknown", profileUrl: null, avatarUrl: null, platform: "instagram" },
+      engagement: { likes: 0, comments: 0, shares: 0, views: 0 },
+      wordCount: caption.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags3(caption),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractTextFromElement2(el) {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('svg, [role="button"], [role="navigation"], button, nav').forEach((x) => x.remove());
+    const text = clone.textContent?.trim() || "";
+    return text.replace(/\s+/g, " ").trim();
+  }
+  function extractAuthorFromElement2(el) {
+    const result = { name: "", profileUrl: null, avatarUrl: null };
+    const headerEl = el.querySelector("header") || el;
+    const links = headerEl.querySelectorAll('a[href*="/"]');
+    for (const link of links) {
+      const href = link.href;
+      if (href.match(/instagram\.com\/[a-zA-Z0-9_.]+\/?$/) && !href.includes("/p/") && !href.includes("/reel/") && !href.includes("/explore/") && !href.includes("/stories/")) {
+        const text = link.textContent?.trim();
+        if (text && text.length > 1 && text.length < 100) {
+          result.name = text;
+          result.profileUrl = href;
+          break;
+        }
+      }
+    }
+    if (!result.name) {
+      const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+      result.name = ogTitle.match(/(.+?) on Instagram/)?.[1] || ogTitle.split("\u2022")[0]?.trim() || "";
+    }
+    const avatarImg = el.querySelector('header img[src], img[alt*="profile"], img[src*="profile"]');
+    if (avatarImg) {
+      result.avatarUrl = avatarImg.src;
+    }
+    return result;
+  }
+  function extractTimestampFromElement2(el) {
+    const timeEl = el.querySelector("time[datetime]");
+    if (timeEl) {
+      return timeEl.getAttribute("datetime");
+    }
+    const links = el.querySelectorAll('a[href*="/p/"] time, a time');
+    for (const link of links) {
+      const datetime = link.getAttribute("datetime");
+      if (datetime) return datetime;
+    }
+    return null;
+  }
+  function extractImagesFromElement2(el) {
+    const images = [];
+    el.querySelectorAll("img[src]").forEach((img) => {
+      const src = img.src;
+      const srcset = img.getAttribute("srcset");
+      const width = img.naturalWidth || img.width || 0;
+      if (width > 0 && width < 50) return;
+      if (src.includes("emoji") || src.includes("icon") || src.includes("static")) return;
+      if (srcset) {
+        const srcsetParts = srcset.split(",").map((s) => s.trim());
+        const largest = srcsetParts.pop()?.split(" ")[0];
+        if (largest && !images.includes(largest)) {
+          images.push(largest);
+          return;
+        }
+      }
+      if (src.includes("cdninstagram") || src.includes("scontent") || src.includes("fbcdn") || src.includes("instagram")) {
+        if (!src.includes("profile_pic") && !images.includes(src)) {
+          images.push(src);
+        }
+      }
+    });
+    if (images.length === 0) {
+      const ogImage = document.querySelector('meta[property="og:image"]')?.content;
+      if (ogImage) images.push(ogImage);
+    }
+    return images;
+  }
+  function extractEngagementFromElement2(el) {
+    const result = { likes: 0, comments: 0, shares: 0, views: 0 };
+    const allText = el.textContent || "";
+    const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*like/i);
+    if (likeMatch) result.likes = parseCount2(likeMatch[1]);
+    const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
+    if (commentMatch) result.comments = parseCount2(commentMatch[1]);
+    const viewMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*view/i);
+    if (viewMatch) result.views = parseCount2(viewMatch[1]);
+    return result;
+  }
+  function parseCount2(text) {
+    if (!text) return 0;
+    text = text.replace(/,/g, "");
+    if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
+    if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
+    return parseInt(text) || 0;
+  }
+  function extractHashtags3(text) {
+    return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
+  }
+  function buildInstagramStyledContent(text, author, timestamp, images) {
+    let html = '<div class="nac-instagram-post">';
+    html += '<div class="nac-ig-header">';
+    if (author.avatarUrl) {
+      html += `<img class="nac-ig-avatar" src="${Utils.escapeHtml(author.avatarUrl)}" width="32" height="32" onerror="this.style.display='none'">`;
+    }
+    html += '<div class="nac-ig-author-info">';
+    html += `<div class="nac-ig-author-name">${Utils.escapeHtml(author.name || "Instagram User")}</div>`;
+    if (timestamp) {
+      html += `<div class="nac-ig-timestamp">${Utils.escapeHtml(typeof timestamp === "string" ? timestamp : new Date(timestamp).toLocaleString())}</div>`;
+    }
+    html += "</div></div>";
+    if (images.length > 0) {
+      html += '<div class="nac-ig-images">';
+      images.forEach((src) => {
+        html += `<img class="nac-ig-image" src="${Utils.escapeHtml(src)}" alt="Instagram media" loading="lazy">`;
+      });
+      html += "</div>";
+    }
+    if (text) {
+      html += `<div class="nac-ig-caption"><span class="nac-ig-caption-author">${Utils.escapeHtml(author.name || "")}</span> ${Utils.escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
+    }
+    html += "</div>";
+    return html;
+  }
   var InstagramHandler;
   var init_instagram = __esm({
     "src/platforms/instagram.js"() {
@@ -13241,56 +13600,35 @@ Enter option (1-4):`;
       InstagramHandler = {
         type: "social_post",
         platform: "instagram",
+        needsUserSelection: true,
         canCapture: () => window.location.hostname.includes("instagram.com"),
-        extract: async () => {
+        findPostContainer: (clickTarget) => {
+          let el = clickTarget;
+          let bestCandidate = clickTarget;
+          while (el && el !== document.body) {
+            if (el.tagName === "ARTICLE") return el;
+            if (el.getAttribute("role") === "presentation") return el;
+            if (el.getAttribute("role") === "dialog") return el;
+            const hasText = el.textContent?.length > 30;
+            const hasImages = el.querySelectorAll("img").length > 0;
+            const hasLinks = el.querySelectorAll("a[href]").length > 1;
+            const isLargeEnough = el.offsetHeight > 100;
+            if (hasText && (hasImages || hasLinks) && isLargeEnough) {
+              bestCandidate = el;
+            }
+            el = el.parentElement;
+          }
+          return bestCandidate;
+        },
+        extract: async (containerEl) => {
           try {
-            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
-            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
-            const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
-            const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
-            const isPost = /\/p\//.test(window.location.pathname);
-            const isReel = /\/reel\//.test(window.location.pathname);
-            const authorName = ogTitle.match(/(.+?) on Instagram/)?.[1] || ogTitle.split("\u2022")[0]?.trim() || document.querySelector('header a[href*="/"]')?.textContent?.trim() || "";
-            const captionEl = document.querySelector(
-              '[class*="caption"] span, article span[dir="auto"], h1 + div span'
-            );
-            const caption = captionEl?.textContent?.trim() || ogDesc || "";
-            const images = Array.from(document.querySelectorAll('article img[srcset], article img[src*="instagram"]')).map((img) => img.src).filter((src) => src && !src.includes("profile_pic"));
-            const videos = Array.from(document.querySelectorAll("article video source, article video")).map((v) => v.src || v.querySelector("source")?.src).filter(Boolean);
-            let contentHtml = `<blockquote><p>${Utils.escapeHtml(caption)}</p>`;
-            contentHtml += `<footer>\u2014 ${Utils.escapeHtml(authorName)} on Instagram</footer></blockquote>`;
-            images.forEach((src) => {
-              contentHtml += `<figure><img src="${Utils.escapeHtml(src)}" alt="Instagram media"></figure>`;
-            });
-            const likesEl = document.querySelector('section span[class*="like"], [class*="like"] span');
-            const likes = parseInt(likesEl?.textContent?.replace(/,/g, "")) || 0;
-            return {
-              title: `${authorName}: "${caption.substring(0, 60)}${caption.length > 60 ? "..." : ""}"`,
-              byline: authorName,
-              url: ogUrl,
-              domain: "instagram.com",
-              siteName: "Instagram",
-              publishedAt: Math.floor(Date.now() / 1e3),
-              content: contentHtml,
-              textContent: caption,
-              excerpt: caption.substring(0, 200),
-              featuredImage: ogImage || images[0] || "",
-              publicationIcon: "https://www.instagram.com/favicon.ico",
-              platform: "instagram",
-              contentType: isReel ? "video" : "social_post",
-              engagement: { likes, shares: 0, comments: 0, views: 0 },
-              wordCount: caption.split(/\s+/).filter((w) => w).length,
-              readingTimeMinutes: 1,
-              structuredData: { type: "SocialMediaPosting" },
-              keywords: (caption.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase()),
-              language: document.documentElement.lang || "en",
-              isPaywalled: false,
-              section: null,
-              dateModified: null
-            };
+            if (!containerEl) {
+              return extractFromOGTags2();
+            }
+            return extractFromContainer2(containerEl);
           } catch (e) {
-            console.error("[NAC Instagram] extract() failed:", e);
-            return null;
+            console.error("[NAC Instagram] Extraction failed:", e);
+            return extractFromOGTags2();
           }
         },
         extractComments: async (articleUrl) => {
@@ -13373,7 +13711,7 @@ Enter option (1-4):`;
             const commentsEl = document.querySelector('[data-e2e="browse-comment-count"], [data-e2e="comment-count"]');
             const sharesEl = document.querySelector('[data-e2e="share-count"]');
             const viewsEl = document.querySelector('[data-e2e="video-views"]');
-            const parseCount2 = (el) => {
+            const parseCount3 = (el) => {
               if (!el) return 0;
               const t = el.textContent?.trim().replace(/,/g, "") || "";
               if (t.includes("K")) return Math.round(parseFloat(t) * 1e3);
@@ -13403,10 +13741,10 @@ Enter option (1-4):`;
                 username: authorName
               },
               engagement: {
-                likes: parseCount2(likesEl),
-                comments: parseCount2(commentsEl),
-                shares: parseCount2(sharesEl),
-                views: parseCount2(viewsEl)
+                likes: parseCount3(likesEl),
+                comments: parseCount3(commentsEl),
+                shares: parseCount3(sharesEl),
+                views: parseCount3(viewsEl)
               },
               wordCount: caption.split(/\s+/).filter((w) => w).length,
               readingTimeMinutes: 1,

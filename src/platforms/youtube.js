@@ -228,77 +228,178 @@ function extractStructuredData() {
 }
 
 async function extractTranscript() {
-    // Method 1: Try ytInitialPlayerResponse global variable (most reliable)
-    try {
-        // YouTube stores this as a global — use unsafeWindow for Tampermonkey access
-        const playerResponse = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window)?.ytInitialPlayerResponse ||
-                              window.ytInitialPlayerResponse;
+    console.log('[NAC YouTube] Attempting transcript extraction...');
 
-        if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-            const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
-            // Prefer English, fallback to first track
-            const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
-            if (track?.baseUrl) {
-                const response = await fetch(track.baseUrl + '&fmt=json3');
-                const json = await response.json();
-                if (json.events) {
-                    return json.events
-                        .filter(e => e.segs)
-                        .map(e => {
-                            const ms = e.tStartMs || 0;
-                            const mins = Math.floor(ms / 60000);
-                            const secs = Math.floor((ms % 60000) / 1000);
-                            const text = e.segs.map(s => s.utf8).join('');
-                            return `[${mins}:${String(secs).padStart(2, '0')}] ${text.trim()}`;
-                        })
-                        .filter(line => line.match(/\] .+/))
-                        .join('\n');
+    // Method 1: Access player response from multiple sources
+    try {
+        let playerResponse = null;
+
+        // Try unsafeWindow first (Tampermonkey context)
+        if (typeof unsafeWindow !== 'undefined') {
+            playerResponse = unsafeWindow.ytInitialPlayerResponse;
+            if (!playerResponse) {
+                // Try getting it from the player element
+                const player = unsafeWindow.document.querySelector('#movie_player');
+                if (player && player.getPlayerResponse) {
+                    playerResponse = player.getPlayerResponse();
                 }
             }
         }
-    } catch(e) {
-        console.log('[NAC YouTube] Method 1 transcript failed:', e.message);
-    }
 
-    // Method 2: Try parsing captionTracks from script tags (legacy / fallback)
-    try {
-        const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-            const text = script.textContent;
-            if (text.includes('"captionTracks"')) {
-                const match = text.match(/"captionTracks":\s*(\[.*?\])/s);
-                if (match) {
-                    const tracks = JSON.parse(match[1]);
-                    const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
-                    if (track?.baseUrl) {
-                        // Fetch XML transcript
-                        const resp = await fetch(track.baseUrl);
-                        const xml = await resp.text();
+        // Try window context
+        if (!playerResponse) {
+            playerResponse = window.ytInitialPlayerResponse;
+        }
+
+        if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+            const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
+            console.log('[NAC YouTube] Found', tracks.length, 'caption tracks');
+
+            // Prefer English, then any auto-generated, then first
+            const track = tracks.find(t => t.languageCode === 'en' && !t.kind) ||
+                         tracks.find(t => t.languageCode === 'en') ||
+                         tracks.find(t => !t.kind) ||
+                         tracks[0];
+
+            if (track?.baseUrl) {
+                console.log('[NAC YouTube] Fetching transcript from:', track.name?.simpleText || track.languageCode);
+
+                // Try JSON format first (more reliable)
+                try {
+                    const jsonResp = await fetch(track.baseUrl + '&fmt=json3');
+                    if (jsonResp.ok) {
+                        const json = await jsonResp.json();
+                        if (json.events) {
+                            const lines = json.events
+                                .filter(e => e.segs && e.segs.some(s => s.utf8?.trim()))
+                                .map(e => {
+                                    const ms = e.tStartMs || 0;
+                                    const m = Math.floor(ms / 60000);
+                                    const s = Math.floor((ms % 60000) / 1000);
+                                    const text = e.segs.map(seg => seg.utf8 || '').join('').trim();
+                                    return `[${m}:${String(s).padStart(2, '0')}] ${text}`;
+                                })
+                                .filter(l => l.match(/\] .+/));
+
+                            if (lines.length > 0) {
+                                console.log('[NAC YouTube] Got transcript:', lines.length, 'lines');
+                                return lines.join('\n');
+                            }
+                        }
+                    }
+                } catch(jsonErr) {
+                    console.log('[NAC YouTube] JSON transcript failed, trying XML:', jsonErr.message);
+                }
+
+                // Fallback to XML format
+                try {
+                    const xmlResp = await fetch(track.baseUrl);
+                    if (xmlResp.ok) {
+                        const xml = await xmlResp.text();
                         const parser = new DOMParser();
                         const doc = parser.parseFromString(xml, 'text/xml');
-                        return Array.from(doc.querySelectorAll('text'))
+                        const lines = Array.from(doc.querySelectorAll('text'))
                             .map(node => {
                                 const start = parseFloat(node.getAttribute('start') || '0');
                                 const m = Math.floor(start / 60);
                                 const s = Math.floor(start % 60);
-                                return `[${m}:${String(s).padStart(2, '0')}] ${node.textContent.trim()}`;
+                                const text = node.textContent
+                                    .replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+                                    .replace(/&quot;/g, '"').replace(/&lt;/g, '<')
+                                    .replace(/&gt;/g, '>').trim();
+                                return `[${m}:${String(s).padStart(2, '0')}] ${text}`;
                             })
-                            .filter(l => l.match(/\] .+/))
-                            .join('\n');
+                            .filter(l => l.match(/\] .+/));
+
+                        if (lines.length > 0) {
+                            console.log('[NAC YouTube] Got XML transcript:', lines.length, 'lines');
+                            return lines.join('\n');
+                        }
                     }
+                } catch(xmlErr) {
+                    console.log('[NAC YouTube] XML transcript also failed:', xmlErr.message);
                 }
             }
         }
     } catch(e) {
-        console.log('[NAC YouTube] Method 2 transcript failed:', e.message);
+        console.log('[NAC YouTube] Method 1 failed:', e.message);
     }
 
-    // Method 3: Check if transcript panel is already open in the DOM
+    // Method 2: Parse from page source
+    try {
+        const pageSource = document.documentElement.innerHTML;
+        const captionMatch = pageSource.match(/"captionTracks"\s*:\s*(\[.*?\])/s);
+        if (captionMatch) {
+            const tracks = JSON.parse(captionMatch[1]);
+            console.log('[NAC YouTube] Found', tracks.length, 'tracks from page source');
+            const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
+            if (track?.baseUrl) {
+                const resp = await fetch(track.baseUrl);
+                if (resp.ok) {
+                    const xml = await resp.text();
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(xml, 'text/xml');
+                    const lines = Array.from(doc.querySelectorAll('text'))
+                        .map(node => {
+                            const start = parseFloat(node.getAttribute('start') || '0');
+                            const m = Math.floor(start / 60);
+                            const s = Math.floor(start % 60);
+                            return `[${m}:${String(s).padStart(2, '0')}] ${node.textContent.trim()}`;
+                        })
+                        .filter(l => l.match(/\] .+/));
+                    if (lines.length > 0) return lines.join('\n');
+                }
+            }
+        }
+    } catch(e) {
+        console.log('[NAC YouTube] Method 2 failed:', e.message);
+    }
+
+    // Method 3: GM_xmlhttpRequest for CORS bypass
+    // Tampermonkey's GM_xmlhttpRequest bypasses CORS restrictions
+    try {
+        const pageSource = document.documentElement.innerHTML;
+        const captionMatch = pageSource.match(/"captionTracks"\s*:\s*(\[.*?\])/s);
+        if (captionMatch && typeof GM_xmlhttpRequest !== 'undefined') {
+            const tracks = JSON.parse(captionMatch[1]);
+            const track = tracks.find(t => t.languageCode === 'en') || tracks[0];
+            if (track?.baseUrl) {
+                console.log('[NAC YouTube] Trying GM_xmlhttpRequest for transcript...');
+                const xml = await new Promise((resolve, reject) => {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: track.baseUrl,
+                        onload: (resp) => resolve(resp.responseText),
+                        onerror: (err) => reject(new Error('GM_xmlhttpRequest failed'))
+                    });
+                });
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(xml, 'text/xml');
+                const lines = Array.from(doc.querySelectorAll('text'))
+                    .map(node => {
+                        const start = parseFloat(node.getAttribute('start') || '0');
+                        const m = Math.floor(start / 60);
+                        const s = Math.floor(start % 60);
+                        return `[${m}:${String(s).padStart(2, '0')}] ${node.textContent.trim()}`;
+                    })
+                    .filter(l => l.match(/\] .+/));
+                if (lines.length > 0) {
+                    console.log('[NAC YouTube] Got transcript via GM_xmlhttpRequest:', lines.length, 'lines');
+                    return lines.join('\n');
+                }
+            }
+        }
+    } catch(e) {
+        console.log('[NAC YouTube] Method 3 (GM_xmlhttpRequest) failed:', e.message);
+    }
+
+    // Method 4: Check if transcript panel is already open in the DOM
     const segments = document.querySelectorAll(
         'ytd-transcript-segment-renderer .segment-text, ' +
         '[class*="transcript"] [class*="segment-text"]'
     );
     if (segments.length > 0) {
+        console.log('[NAC YouTube] Found transcript segments in DOM:', segments.length);
         return Array.from(segments).map((seg, i) => {
             const timeEl = seg.previousElementSibling || seg.closest('[class*="segment"]')?.querySelector('[class*="timestamp"]');
             const time = timeEl?.textContent?.trim() || `${Math.floor(i * 5 / 60)}:${String((i * 5) % 60).padStart(2, '0')}`;
@@ -306,7 +407,7 @@ async function extractTranscript() {
         }).join('\n');
     }
 
-    console.log('[NAC YouTube] No transcript available');
+    console.log('[NAC YouTube] No transcript available after all methods');
     return null;
 }
 

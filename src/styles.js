@@ -2988,4 +2988,78 @@ export const STYLES = `
   #nac-selection-overlay {
     font-family: system-ui, -apple-system, sans-serif;
   }
+
+  /* Instagram Post Styles */
+  .nac-instagram-post {
+    border: 1px solid var(--nac-border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--nac-surface);
+    margin: 1em 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  .nac-ig-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--nac-border);
+  }
+
+  .nac-ig-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 2px solid transparent;
+    background: linear-gradient(var(--nac-surface), var(--nac-surface)) padding-box,
+                linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888) border-box;
+  }
+
+  .nac-ig-author-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .nac-ig-author-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--nac-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nac-ig-timestamp {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-ig-images {
+    width: 100%;
+    background: #000;
+  }
+
+  .nac-ig-image {
+    width: 100%;
+    display: block;
+    object-fit: contain;
+    max-height: 600px;
+  }
+
+  .nac-ig-caption {
+    padding: 12px 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--nac-text);
+    word-wrap: break-word;
+  }
+
+  .nac-ig-caption-author {
+    font-weight: 600;
+    margin-right: 4px;
+  }
 `;
