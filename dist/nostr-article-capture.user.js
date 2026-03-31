@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.8.0
+// @version      3.9.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.8.0",
+        version: "3.9.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -12491,6 +12491,108 @@ Enter option (1-4):`;
     font-weight: 600;
     margin-right: 4px;
   }
+
+  /* ===== TikTok Post Styling ===== */
+
+  .nac-tiktok-post {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--nac-surface, #fff);
+    border: 1px solid var(--nac-border, #ddd);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1em 0;
+  }
+
+  .nac-tt-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+  }
+
+  .nac-tt-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+
+  .nac-tt-author-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .nac-tt-author-name {
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--nac-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nac-tt-timestamp {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-tt-thumbnail {
+    position: relative;
+    width: 100%;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .nac-tt-image {
+    width: 100%;
+    display: block;
+    object-fit: contain;
+    max-height: 600px;
+  }
+
+  .nac-tt-play-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 48px;
+    color: rgba(255, 255, 255, 0.85);
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+  }
+
+  .nac-tt-caption {
+    padding: 12px 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--nac-text);
+    word-wrap: break-word;
+  }
+
+  .nac-tt-hashtags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 16px 14px;
+  }
+
+  .nac-tt-hashtag {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fe2c55;
+    cursor: default;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .nac-tt-hashtag {
+      color: #ff6a8a;
+    }
+  }
 `;
     }
   });
@@ -13671,6 +13773,264 @@ Enter option (1-4):`;
   });
 
   // src/platforms/tiktok.js
+  function extractFromContainer3(container) {
+    const postText = extractTextFromElement3(container);
+    const author = extractAuthorFromElement3(container);
+    const timestamp = extractTimestampFromElement3(container);
+    const thumbnail = extractThumbnailFromElement(container);
+    const engagement = extractEngagementFromElement3(container);
+    const hashtags = extractHashtags4(postText);
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    let contentHtml = buildTikTokStyledContent(postText, author, timestamp, thumbnail || ogImage, hashtags);
+    const title = author.name ? `@${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: `@${author.name || "TikTok User"}`,
+      url: ogUrl,
+      domain: "tiktok.com",
+      siteName: "TikTok",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: thumbnail || ogImage,
+      publicationIcon: "https://www.tiktok.com/favicon.ico",
+      platform: "tiktok",
+      contentType: "video",
+      // Platform account data (NOT jammed into author)
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "tiktok"
+      },
+      videoMeta: {
+        videoId: window.location.pathname.match(/\/video\/(\d+)/)?.[1] || "",
+        duration: "",
+        username: author.name || ""
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "VideoObject" },
+      keywords: hashtags,
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractFromOGTags3() {
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+    const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const username = window.location.pathname.match(/@([^/]+)/)?.[1] || "";
+    let videoData = {};
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const s of scripts) {
+        const json = JSON.parse(s.textContent);
+        if (json["@type"] === "VideoObject") {
+          videoData = json;
+          break;
+        }
+      }
+    } catch (e) {
+    }
+    const authorName = username || ogTitle.split("|")[0]?.trim() || "";
+    const caption = ogDesc || videoData.description || "";
+    let contentHtml = '<div class="nac-tiktok-post">';
+    contentHtml += '<div class="nac-tt-header">';
+    contentHtml += `<div class="nac-tt-author-name">@${Utils.escapeHtml(authorName || "TikTok User")}</div>`;
+    contentHtml += "</div>";
+    if (caption) {
+      contentHtml += `<div class="nac-tt-caption">${Utils.escapeHtml(caption).replace(/\n/g, "<br>")}</div>`;
+    }
+    if (ogImage) {
+      contentHtml += `<div class="nac-tt-thumbnail"><img class="nac-tt-image" src="${Utils.escapeHtml(ogImage)}" alt="TikTok video thumbnail" loading="lazy"></div>`;
+    }
+    contentHtml += "</div>";
+    return {
+      title: authorName ? `@${authorName}: "${caption.substring(0, 60)}${caption.length > 60 ? "..." : ""}"` : caption.substring(0, 80) || "TikTok Video",
+      byline: `@${authorName}`,
+      url: ogUrl,
+      domain: "tiktok.com",
+      siteName: "TikTok",
+      publishedAt: videoData.uploadDate ? Math.floor(new Date(videoData.uploadDate).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: caption,
+      excerpt: caption.substring(0, 200),
+      featuredImage: ogImage,
+      publicationIcon: "https://www.tiktok.com/favicon.ico",
+      platform: "tiktok",
+      contentType: "video",
+      platformAccount: { username: authorName || "Unknown", profileUrl: null, avatarUrl: null, platform: "tiktok" },
+      videoMeta: {
+        videoId: window.location.pathname.match(/\/video\/(\d+)/)?.[1] || "",
+        duration: videoData.duration || "",
+        username: authorName
+      },
+      engagement: { likes: 0, comments: 0, shares: 0, views: 0 },
+      wordCount: caption.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "VideoObject" },
+      keywords: extractHashtags4(caption),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractTextFromElement3(el) {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('svg, [role="button"], [role="navigation"], button, nav, video').forEach((x) => x.remove());
+    const text = clone.textContent?.trim() || "";
+    return text.replace(/\s+/g, " ").trim();
+  }
+  function extractAuthorFromElement3(el) {
+    const result = { name: "", profileUrl: null, avatarUrl: null };
+    const usernameEl = el.querySelector(
+      '[data-e2e="browse-username"], [data-e2e="video-author-uniqueid"], a[href*="/@"] [class*="uniqueId"], a[href*="/@"] [class*="username"]'
+    );
+    if (usernameEl) {
+      result.name = usernameEl.textContent?.trim().replace(/^@/, "") || "";
+      const parentLink = usernameEl.closest('a[href*="/@"]');
+      if (parentLink) result.profileUrl = parentLink.href;
+    }
+    if (!result.name) {
+      const links = el.querySelectorAll('a[href*="/@"]');
+      for (const link of links) {
+        const href = link.href;
+        const match = href.match(/\/@([^/?]+)/);
+        if (match) {
+          const text = link.textContent?.trim();
+          if (text && text.length > 1 && text.length < 80) {
+            result.name = text.replace(/^@/, "");
+            result.profileUrl = href;
+            break;
+          }
+        }
+      }
+    }
+    if (!result.name) {
+      result.name = window.location.pathname.match(/@([^/]+)/)?.[1] || "";
+    }
+    if (!result.name) {
+      const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+      result.name = ogTitle.split("|")[0]?.trim().replace(/^@/, "") || "";
+    }
+    const avatarImg = el.querySelector(
+      'img[src*="muscdn"], img[src*="tiktokcdn"], img[alt*="avatar"], img[alt*="profile"], [class*="avatar"] img'
+    );
+    if (avatarImg) {
+      result.avatarUrl = avatarImg.src;
+    }
+    return result;
+  }
+  function extractTimestampFromElement3(el) {
+    const timeEl = el.querySelector("time[datetime]");
+    if (timeEl) {
+      return timeEl.getAttribute("datetime");
+    }
+    const allText = el.textContent || "";
+    const relativeMatch = allText.match(/(\d+)\s*(h|d|w|m|s)\s*ago/i);
+    if (relativeMatch) {
+      return relativeMatch[0];
+    }
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const s of scripts) {
+        const json = JSON.parse(s.textContent);
+        if (json["@type"] === "VideoObject" && json.uploadDate) {
+          return json.uploadDate;
+        }
+      }
+    } catch (e) {
+    }
+    return null;
+  }
+  function extractThumbnailFromElement(el) {
+    const videoEl = el.querySelector("video[poster]");
+    if (videoEl?.poster) return videoEl.poster;
+    const images = el.querySelectorAll("img[src]");
+    for (const img of images) {
+      const src = img.src;
+      const width = img.naturalWidth || img.width || 0;
+      if (width > 0 && width < 60) continue;
+      if (src.includes("emoji") || src.includes("icon") || src.includes("static")) continue;
+      if (src.includes("muscdn") || src.includes("tiktokcdn") || src.includes("p16-sign")) {
+        if (src.includes("avatar") || src.includes("100x100")) continue;
+        return src;
+      }
+    }
+    return null;
+  }
+  function extractEngagementFromElement3(el) {
+    const result = { likes: 0, comments: 0, shares: 0, views: 0 };
+    const likesEl = el.querySelector('[data-e2e="browse-like-count"], [data-e2e="like-count"]');
+    const commentsEl = el.querySelector('[data-e2e="browse-comment-count"], [data-e2e="comment-count"]');
+    const sharesEl = el.querySelector('[data-e2e="share-count"]');
+    const viewsEl = el.querySelector('[data-e2e="video-views"]');
+    if (likesEl) result.likes = parseCount3(likesEl.textContent?.trim());
+    if (commentsEl) result.comments = parseCount3(commentsEl.textContent?.trim());
+    if (sharesEl) result.shares = parseCount3(sharesEl.textContent?.trim());
+    if (viewsEl) result.views = parseCount3(viewsEl.textContent?.trim());
+    if (result.likes === 0 && result.comments === 0) {
+      const allText = el.textContent || "";
+      const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*like/i);
+      if (likeMatch) result.likes = parseCount3(likeMatch[1]);
+      const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
+      if (commentMatch) result.comments = parseCount3(commentMatch[1]);
+      const shareMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*share/i);
+      if (shareMatch) result.shares = parseCount3(shareMatch[1]);
+      const viewMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*view/i);
+      if (viewMatch) result.views = parseCount3(viewMatch[1]);
+    }
+    return result;
+  }
+  function parseCount3(text) {
+    if (!text) return 0;
+    text = text.replace(/,/g, "");
+    if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
+    if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
+    return parseInt(text) || 0;
+  }
+  function extractHashtags4(text) {
+    return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
+  }
+  function buildTikTokStyledContent(text, author, timestamp, thumbnail, hashtags) {
+    let html = '<div class="nac-tiktok-post">';
+    html += '<div class="nac-tt-header">';
+    if (author.avatarUrl) {
+      html += `<img class="nac-tt-avatar" src="${Utils.escapeHtml(author.avatarUrl)}" width="40" height="40" onerror="this.style.display='none'">`;
+    }
+    html += '<div class="nac-tt-author-info">';
+    html += `<div class="nac-tt-author-name">@${Utils.escapeHtml(author.name || "TikTok User")}</div>`;
+    if (timestamp) {
+      html += `<div class="nac-tt-timestamp">${Utils.escapeHtml(typeof timestamp === "string" ? timestamp : new Date(timestamp).toLocaleString())}</div>`;
+    }
+    html += "</div></div>";
+    if (thumbnail) {
+      html += '<div class="nac-tt-thumbnail">';
+      html += `<img class="nac-tt-image" src="${Utils.escapeHtml(thumbnail)}" alt="TikTok video thumbnail" loading="lazy">`;
+      html += '<div class="nac-tt-play-icon">\u25B6</div>';
+      html += "</div>";
+    }
+    if (text) {
+      html += `<div class="nac-tt-caption">${Utils.escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
+    }
+    if (hashtags && hashtags.length > 0) {
+      html += '<div class="nac-tt-hashtags">';
+      hashtags.forEach((tag) => {
+        html += `<span class="nac-tt-hashtag">#${Utils.escapeHtml(tag)}</span>`;
+      });
+      html += "</div>";
+    }
+    html += "</div>";
+    return html;
+  }
   var TikTokHandler;
   var init_tiktok = __esm({
     "src/platforms/tiktok.js"() {
@@ -13679,85 +14039,41 @@ Enter option (1-4):`;
       TikTokHandler = {
         type: "video",
         platform: "tiktok",
+        needsUserSelection: true,
         canCapture: () => window.location.hostname.includes("tiktok.com"),
-        extract: async () => {
-          try {
-            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
-            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
-            const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
-            const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
-            const username = window.location.pathname.match(/@([^/]+)/)?.[1] || "";
-            let videoData = {};
-            try {
-              const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-              for (const s of scripts) {
-                const json = JSON.parse(s.textContent);
-                if (json["@type"] === "VideoObject") {
-                  videoData = json;
-                  break;
-                }
+        findPostContainer: (clickTarget) => {
+          let el = clickTarget;
+          let bestCandidate = clickTarget;
+          while (el && el !== document.body) {
+            if (el.getAttribute("data-e2e") === "browse-video") return el;
+            if (el.getAttribute("data-e2e") === "recommend-list-item-container") return el;
+            if (el.tagName === "ARTICLE") return el;
+            if (el.className && typeof el.className === "string") {
+              if (el.className.includes("DivItemContainer") || el.className.includes("video-feed-item") || el.className.includes("DivBrowserMode")) {
+                return el;
               }
-            } catch (e) {
             }
-            const captionEl = document.querySelector(
-              '[data-e2e="browse-video-desc"], [class*="video-meta-caption"], h1'
-            );
-            const caption = captionEl?.textContent?.trim() || ogDesc || videoData.description || "";
-            const authorEl = document.querySelector(
-              '[data-e2e="browse-username"], [class*="author-uniqueId"], [class*="user-username"]'
-            );
-            const authorName = authorEl?.textContent?.trim() || username || ogTitle.split("|")[0]?.trim() || "";
-            const likesEl = document.querySelector('[data-e2e="browse-like-count"], [data-e2e="like-count"]');
-            const commentsEl = document.querySelector('[data-e2e="browse-comment-count"], [data-e2e="comment-count"]');
-            const sharesEl = document.querySelector('[data-e2e="share-count"]');
-            const viewsEl = document.querySelector('[data-e2e="video-views"]');
-            const parseCount3 = (el) => {
-              if (!el) return 0;
-              const t = el.textContent?.trim().replace(/,/g, "") || "";
-              if (t.includes("K")) return Math.round(parseFloat(t) * 1e3);
-              if (t.includes("M")) return Math.round(parseFloat(t) * 1e6);
-              return parseInt(t) || 0;
-            };
-            let contentHtml = `<blockquote><p>${Utils.escapeHtml(caption)}</p>`;
-            contentHtml += `<footer>\u2014 @${Utils.escapeHtml(authorName)} on TikTok</footer></blockquote>`;
-            if (ogImage) contentHtml += `<figure><img src="${Utils.escapeHtml(ogImage)}" alt="TikTok video thumbnail"></figure>`;
-            return {
-              title: `@${authorName}: "${caption.substring(0, 60)}${caption.length > 60 ? "..." : ""}"`,
-              byline: `@${authorName}`,
-              url: ogUrl,
-              domain: "tiktok.com",
-              siteName: "TikTok",
-              publishedAt: videoData.uploadDate ? Math.floor(new Date(videoData.uploadDate).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
-              content: contentHtml,
-              textContent: caption,
-              excerpt: caption.substring(0, 200),
-              featuredImage: ogImage,
-              publicationIcon: "https://www.tiktok.com/favicon.ico",
-              platform: "tiktok",
-              contentType: "video",
-              videoMeta: {
-                videoId: window.location.pathname.match(/\/video\/(\d+)/)?.[1] || "",
-                duration: videoData.duration || "",
-                username: authorName
-              },
-              engagement: {
-                likes: parseCount3(likesEl),
-                comments: parseCount3(commentsEl),
-                shares: parseCount3(sharesEl),
-                views: parseCount3(viewsEl)
-              },
-              wordCount: caption.split(/\s+/).filter((w) => w).length,
-              readingTimeMinutes: 1,
-              structuredData: { type: "VideoObject" },
-              keywords: (caption.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase()),
-              language: document.documentElement.lang || "en",
-              isPaywalled: false,
-              section: null,
-              dateModified: null
-            };
+            const hasText = el.textContent?.length > 30;
+            const hasVideo = el.querySelectorAll("video").length > 0;
+            const hasImages = el.querySelectorAll("img").length > 0;
+            const hasLinks = el.querySelectorAll("a[href]").length > 1;
+            const isLargeEnough = el.offsetHeight > 150;
+            if (hasText && (hasVideo || hasImages || hasLinks) && isLargeEnough) {
+              bestCandidate = el;
+            }
+            el = el.parentElement;
+          }
+          return bestCandidate;
+        },
+        extract: async (containerEl) => {
+          try {
+            if (!containerEl) {
+              return extractFromOGTags3();
+            }
+            return extractFromContainer3(containerEl);
           } catch (e) {
-            console.error("[NAC TikTok] extract() failed:", e);
-            return null;
+            console.error("[NAC TikTok] Extraction failed:", e);
+            return extractFromOGTags3();
           }
         },
         extractComments: async (articleUrl) => {

@@ -1,6 +1,6 @@
 # NOSTR Content Capture
 
-![Version](https://img.shields.io/badge/version-3.7.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.9.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures content from any website — articles, s
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.7.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.9.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
   </a>
 </p>
 
@@ -30,15 +30,15 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 
 ## 🌐 Supported Platforms
 
-| Icon | Platform | Content Types |
-|------|----------|---------------|
-| 📰 | **Articles** (any website via Readability) | Article text, metadata, comments |
-| ✉️ | **Substack** newsletters | Articles, author bios, subscriber info, comments |
-| ▶️ | **YouTube** videos | Video metadata, transcripts (3 methods), embedded player, comments, engagement |
-| 𝕏 | **Twitter/X** | Tweets, threads, profiles, replies |
-| f | **Facebook** posts | Post text, media, comments (best-effort) |
-| 📷 | **Instagram** posts and reels | Captions, media, comments |
-| ♪ | **TikTok** videos | Video metadata, comments |
+| Icon | Platform | Content Types | Capture Method |
+|------|----------|---------------|----------------|
+| 📰 | **Articles** (any website via Readability) | Article text, metadata, comments | Automatic |
+| ✉️ | **Substack** newsletters | Articles, author bios, subscriber info, comments | Automatic |
+| ▶️ | **YouTube** videos | Video metadata, transcripts (4 methods), embedded player, comments, engagement | Automatic |
+| 𝕏 | **Twitter/X** | Tweets, threads, profiles, replies | Automatic (stable `data-testid` selectors) |
+| f | **Facebook** posts | Post text, media, comments | User-assisted (click on post) |
+| 📷 | **Instagram** posts and reels | Captions, media, comments | User-assisted (click on post) |
+| ♪ | **TikTok** videos | Video metadata, captions, hashtags, comments, engagement | User-assisted (click on post) |
 
 ---
 
@@ -51,12 +51,15 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Mozilla Readability** extracts title, author, date, and body from any article
 - **Smart date detection** — JSON-LD, meta tags (`article:published_time`, `datePublished`), platform-specific selectors
 - **Enhanced metadata** — word count, reading time, language, section, keywords, structured data (JSON-LD + OpenGraph), paywall detection
+- **User-assisted capture** — Facebook, Instagram, and TikTok use a click-to-select flow: a semi-transparent overlay prompts the user to click on the specific post to capture, then walks up the DOM to find the post container
+- **Platform-native styling** — captured Facebook, Instagram, and TikTok posts render with platform-specific styled HTML (`.nac-facebook-post`, `.nac-instagram-post`, `.nac-tiktok-post`)
+- **`platformAccount` data model** — social platform handlers extract platform account identity (username, profileUrl, avatarUrl) as a separate `platformAccount` object, distinct from `byline`/author
 - **Platform-specific extractors** — each platform has its own handler with tailored DOM selectors and metadata extraction
-- **YouTube transcript extraction** — three methods: player API `getTranscript()`, timedtext API, and DOM scraping with automatic fallback
+- **YouTube transcript extraction** — four methods: player API `getTranscript()`, timedtext API, `GM_xmlhttpRequest` CORS bypass, and DOM scraping with automatic fallback
 - **YouTube video embed** — embedded player in reader view with responsive iframe
 - **On-demand transcript loading** — "Load Transcript" button in reader view for deferred extraction
 - **YouTube SPA navigation** — detects `yt-navigate-finish` events for seamless page transition support
-- **Twitter/X thread detection** — captures multi-tweet threads by the same author as a single piece of content
+- **Twitter/X thread detection** — captures multi-tweet threads by the same author as a single piece of content (DOM-based extraction with stable `data-testid` selectors)
 - **Engagement metrics** — likes, shares, views, comments captured as evidentiary signals
 - **Trusted Types CSP compatibility** — creates CSP-compliant Trusted Types policies for YouTube and Google domains
 - **Quality-hardened platform handlers** — comprehensive try/catch wrapping with XSS prevention (`escapeHtml`) across all extractors

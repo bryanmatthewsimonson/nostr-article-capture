@@ -3062,4 +3062,106 @@ export const STYLES = `
     font-weight: 600;
     margin-right: 4px;
   }
+
+  /* ===== TikTok Post Styling ===== */
+
+  .nac-tiktok-post {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--nac-surface, #fff);
+    border: 1px solid var(--nac-border, #ddd);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1em 0;
+  }
+
+  .nac-tt-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+  }
+
+  .nac-tt-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+
+  .nac-tt-author-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .nac-tt-author-name {
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--nac-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nac-tt-timestamp {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-tt-thumbnail {
+    position: relative;
+    width: 100%;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .nac-tt-image {
+    width: 100%;
+    display: block;
+    object-fit: contain;
+    max-height: 600px;
+  }
+
+  .nac-tt-play-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 48px;
+    color: rgba(255, 255, 255, 0.85);
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+  }
+
+  .nac-tt-caption {
+    padding: 12px 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--nac-text);
+    word-wrap: break-word;
+  }
+
+  .nac-tt-hashtags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 16px 14px;
+  }
+
+  .nac-tt-hashtag {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fe2c55;
+    cursor: default;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .nac-tt-hashtag {
+      color: #ff6a8a;
+    }
+  }
 `;
