@@ -7175,6 +7175,7 @@ ${extractDescription()}`;
               ReaderView._startInlineEdit(el, el.dataset.field);
             });
             el.addEventListener("keydown", (e) => {
+              if (el.querySelector("input")) return;
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
                 e.stopPropagation();
@@ -7324,6 +7325,8 @@ ${extractDescription()}`;
         // Start inline editing of a metadata field
         _startInlineEdit: (element, fieldKey) => {
           if (element.querySelector("input")) return;
+          element.style.opacity = "";
+          element.style.fontStyle = "";
           const originalText = element.textContent.trim();
           const isDate = fieldKey === "publishedAt";
           const input = document.createElement("input");
@@ -7342,7 +7345,8 @@ ${extractDescription()}`;
             input.style.fontSize = "12px";
           } else {
             input.type = "text";
-            input.value = fieldKey === "byline" ? ReaderView.article.byline || "" : ReaderView.article.siteName || ReaderView.article.domain || "";
+            input.value = fieldKey === "byline" ? ReaderView.article.byline || "" : ReaderView.article[fieldKey] || ReaderView.article.siteName || ReaderView.article.domain || "";
+            input.placeholder = fieldKey === "byline" ? "Author name..." : "Publication name...";
           }
           element.textContent = "";
           element.appendChild(input);
@@ -7380,11 +7384,13 @@ ${extractDescription()}`;
                 element.textContent = originalText;
               }
             } else {
+              ReaderView.article[fieldKey] = newValue || "";
               if (newValue) {
-                ReaderView.article[fieldKey] = newValue;
                 element.textContent = newValue;
               } else {
-                element.textContent = originalText;
+                element.textContent = fieldKey === "byline" ? "(No author \u2014 click to set)" : "(No publication \u2014 click to set)";
+                element.style.opacity = "0.5";
+                element.style.fontStyle = "italic";
               }
             }
           };

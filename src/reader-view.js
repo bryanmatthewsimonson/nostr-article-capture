@@ -390,6 +390,8 @@ export const ReaderView = {
         ReaderView._startInlineEdit(el, el.dataset.field);
       });
       el.addEventListener('keydown', (e) => {
+        // Don't intercept keys when an input is already active inside this element
+        if (el.querySelector('input')) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           e.stopPropagation();
@@ -568,6 +570,10 @@ export const ReaderView = {
     // Guard: already editing
     if (element.querySelector('input')) return;
 
+    // Reset any placeholder styles from a previously cleared field
+    element.style.opacity = '';
+    element.style.fontStyle = '';
+
     const originalText = element.textContent.trim();
     const isDate = fieldKey === 'publishedAt';
 
@@ -590,9 +596,11 @@ export const ReaderView = {
       input.style.fontSize = '12px';
     } else {
       input.type = 'text';
+      // Read from the data model, not from the displayed text (which may be a placeholder)
       input.value = fieldKey === 'byline'
         ? (ReaderView.article.byline || '')
-        : (ReaderView.article.siteName || ReaderView.article.domain || '');
+        : (ReaderView.article[fieldKey] || ReaderView.article.siteName || ReaderView.article.domain || '');
+      input.placeholder = fieldKey === 'byline' ? 'Author name...' : 'Publication name...';
     }
 
     // Replace text with input
@@ -637,11 +645,15 @@ export const ReaderView = {
           element.textContent = originalText;
         }
       } else {
+        // Allow clearing the field (empty string resets to placeholder)
+        ReaderView.article[fieldKey] = newValue || '';
         if (newValue) {
-          ReaderView.article[fieldKey] = newValue;
           element.textContent = newValue;
         } else {
-          element.textContent = originalText;
+          // Show a placeholder indicating the field is empty
+          element.textContent = fieldKey === 'byline' ? '(No author — click to set)' : '(No publication — click to set)';
+          element.style.opacity = '0.5';
+          element.style.fontStyle = 'italic';
         }
       }
     };
