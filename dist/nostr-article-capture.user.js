@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.10.0
+// @version      3.11.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.9.0",
+        version: "3.11.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -3368,7 +3368,7 @@
   function isPreOrCode(node) {
     return node.nodeName === "PRE" || node.nodeName === "CODE";
   }
-  function Node(node, options) {
+  function Node2(node, options) {
     node.isBlock = isBlock(node);
     node.isCode = node.nodeName === "CODE" || node.parentNode.isCode;
     node.isBlank = isBlank(node);
@@ -3457,7 +3457,7 @@
   function process(parentNode) {
     var self = this;
     return reduce.call(parentNode.childNodes, function(output, node) {
-      node = new Node(node, self.options);
+      node = new Node2(node, self.options);
       var replacement = "";
       if (node.nodeType === 3) {
         replacement = node.isCode ? node.nodeValue : self.escape(node.nodeValue);
@@ -12598,43 +12598,99 @@ Enter option (1-4):`;
   });
 
   // src/init.js
+  function getTextSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
+    const text = sel.toString().trim();
+    if (text.length < 5) return null;
+    const range = sel.getRangeAt(0);
+    let container = range.commonAncestorContainer;
+    if (container.nodeType === Node.TEXT_NODE) {
+      container = container.parentElement;
+    }
+    console.log("[NAC] Text selection detected:", text.substring(0, 80) + "...");
+    return { text, container, range };
+  }
+  function findVisualPostBoundary(startEl) {
+    let el = startEl;
+    let bestCandidate = startEl;
+    let bestScore = 0;
+    while (el && el !== document.body && el !== document.documentElement) {
+      const rect = el.getBoundingClientRect();
+      let score = 0;
+      if (rect.width > 250 && rect.height > 80) score++;
+      if (rect.width > 350) score++;
+      if (rect.height > 120 && rect.height < 2e3) score++;
+      if (el.getAttribute("role") === "article") score += 5;
+      if (el.getAttribute("role") === "main") score -= 2;
+      if (el.getAttribute("data-pagelet")) score += 2;
+      if (el.getAttribute("data-testid")) score++;
+      const hasImages = el.querySelectorAll("img").length > 0;
+      const hasLinks = el.querySelectorAll("a[href]").length > 0;
+      const hasText = el.textContent.length > 30;
+      if (hasImages) score++;
+      if (hasLinks) score++;
+      if (hasText) score++;
+      const computed = window.getComputedStyle(el);
+      const hasBorder = computed.borderWidth !== "0px" && computed.borderStyle !== "none";
+      const hasBackground = computed.backgroundColor !== "rgba(0, 0, 0, 0)" && computed.backgroundColor !== "transparent";
+      const hasShadow = computed.boxShadow !== "none";
+      const hasMargin = parseInt(computed.marginTop) > 4 || parseInt(computed.marginBottom) > 4;
+      if (hasBorder) score++;
+      if (hasBackground) score++;
+      if (hasShadow) score += 2;
+      if (hasMargin) score++;
+      if (rect.width > window.innerWidth * 0.95) score -= 3;
+      if (rect.height > window.innerHeight * 1.5) score -= 3;
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = el;
+      }
+      el = el.parentElement;
+    }
+    return bestCandidate;
+  }
   function promptUserSelection(platform) {
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
       overlay.id = "nac-selection-overlay";
-      overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.3);cursor:crosshair;display:flex;align-items:flex-start;justify-content:center;padding-top:80px;";
+      overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.15);cursor:crosshair;";
       const banner = document.createElement("div");
-      banner.style.cssText = "background:#6366f1;color:white;padding:16px 24px;border-radius:12px;font-family:system-ui;font-size:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:400px;pointer-events:none;";
-      banner.innerHTML = `<div style="font-size:20px;margin-bottom:8px;">\u{1F4CC} Click on the post to capture</div><div style="font-size:13px;opacity:0.8;">Click anywhere on the ${platform} post you want to capture. Press Escape to cancel.</div>`;
+      banner.style.cssText = "position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#6366f1;color:white;padding:14px 24px;border-radius:12px;font-family:system-ui;font-size:15px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:440px;pointer-events:none;z-index:2147483647;";
+      banner.innerHTML = `<div style="font-size:18px;margin-bottom:6px;">\u{1F4CC} Click on the ${platform} post to capture</div><div style="font-size:12px;opacity:0.85;">The highlighted area shows what will be captured. Press Escape to cancel.</div>`;
       overlay.appendChild(banner);
-      let lastHighlighted = null;
-      const highlightStyle = "2px solid #6366f1";
+      const highlight = document.createElement("div");
+      highlight.style.cssText = "position:fixed;pointer-events:none;border:3px solid #6366f1;border-radius:8px;background:rgba(99,102,241,0.08);transition:all 0.15s ease;z-index:2147483646;box-shadow:0 0 0 4000px rgba(0,0,0,0.2);";
+      overlay.appendChild(highlight);
+      let lastBoundary = null;
       overlay.addEventListener("mousemove", (e) => {
         overlay.style.pointerEvents = "none";
         const el = document.elementFromPoint(e.clientX, e.clientY);
         overlay.style.pointerEvents = "auto";
-        if (lastHighlighted) {
-          lastHighlighted.style.outline = "";
+        if (!el || el === document.body || el === document.documentElement) {
+          highlight.style.display = "none";
+          lastBoundary = null;
+          return;
         }
-        if (el && el !== document.body && el !== document.documentElement) {
-          el.style.outline = highlightStyle;
-          lastHighlighted = el;
-        }
+        const boundary = findVisualPostBoundary(el);
+        if (boundary === lastBoundary) return;
+        lastBoundary = boundary;
+        const rect = boundary.getBoundingClientRect();
+        highlight.style.display = "block";
+        highlight.style.top = rect.top - 3 + "px";
+        highlight.style.left = rect.left - 3 + "px";
+        highlight.style.width = rect.width + 6 + "px";
+        highlight.style.height = rect.height + 6 + "px";
       });
       overlay.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        overlay.style.pointerEvents = "none";
-        const el = document.elementFromPoint(e.clientX, e.clientY);
-        overlay.style.pointerEvents = "auto";
-        if (lastHighlighted) lastHighlighted.style.outline = "";
         overlay.remove();
         document.removeEventListener("keydown", escHandler);
-        resolve(el);
+        resolve(lastBoundary);
       });
       const escHandler = (e) => {
         if (e.key === "Escape") {
-          if (lastHighlighted) lastHighlighted.style.outline = "";
           overlay.remove();
           document.removeEventListener("keydown", escHandler);
           resolve(null);
@@ -12756,8 +12812,20 @@ Enter option (1-4):`;
         if (detection2.platform && PlatformHandler.has(detection2.platform)) {
           const handler = PlatformHandler.get(detection2.platform);
           try {
-            if (handler.needsUserSelection) {
-              const selectedElement = await promptUserSelection(handler.platform);
+            const textSel = getTextSelection();
+            if (textSel && handler.needsUserSelection) {
+              console.log("[NAC] Using text selection for capture");
+              const postContainer = handler.findPostContainer ? handler.findPostContainer(textSel.container) : findVisualPostBoundary(textSel.container);
+              article = await handler.extract(postContainer);
+              if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
+                article.textContent = textSel.text;
+                if (!article.content || article.content.length < textSel.text.length) {
+                  article.content = article.content || "";
+                }
+              }
+              window.getSelection().removeAllRanges();
+            } else if (handler.needsUserSelection) {
+              const selectedElement = await promptUserSelection(handler.platform || detection2.type);
               if (!selectedElement) return;
               const postContainer = handler.findPostContainer ? handler.findPostContainer(selectedElement) : selectedElement;
               article = await handler.extract(postContainer);

@@ -9,61 +9,148 @@ import { EntityMigration } from './entity-migration.js';
 import { STYLES } from './styles.js';
 
 /**
+ * Check if the user has text selected on the page.
+ * If so, return the selection text and the containing element.
+ * This is the most obfuscation-proof capture method — the user
+ * highlights exactly what they want captured.
+ */
+function getTextSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
+
+  const text = sel.toString().trim();
+  if (text.length < 5) return null; // Too short to be meaningful
+
+  // Find the containing element of the selection
+  const range = sel.getRangeAt(0);
+  let container = range.commonAncestorContainer;
+  // If it's a text node, get its parent element
+  if (container.nodeType === Node.TEXT_NODE) {
+    container = container.parentElement;
+  }
+
+  console.log('[NAC] Text selection detected:', text.substring(0, 80) + '...');
+  return { text, container, range };
+}
+
+/**
+ * Walk up the DOM from an element to find a "post-shaped" container.
+ * Uses visual characteristics: size, separation from siblings, content signals.
+ */
+function findVisualPostBoundary(startEl) {
+  let el = startEl;
+  let bestCandidate = startEl;
+  let bestScore = 0;
+
+  while (el && el !== document.body && el !== document.documentElement) {
+    const rect = el.getBoundingClientRect();
+    let score = 0;
+
+    // Size checks — posts are typically 300-800px wide and 100-1000px tall
+    if (rect.width > 250 && rect.height > 80) score++;
+    if (rect.width > 350) score++;
+    if (rect.height > 120 && rect.height < 2000) score++;
+
+    // ARIA signals
+    if (el.getAttribute('role') === 'article') score += 5;
+    if (el.getAttribute('role') === 'main') score -= 2; // Too broad
+    if (el.getAttribute('data-pagelet')) score += 2;
+    if (el.getAttribute('data-testid')) score++;
+
+    // Content signals
+    const hasImages = el.querySelectorAll('img').length > 0;
+    const hasLinks = el.querySelectorAll('a[href]').length > 0;
+    const hasText = el.textContent.length > 30;
+    if (hasImages) score++;
+    if (hasLinks) score++;
+    if (hasText) score++;
+
+    // Visual separation from siblings (border, margin, padding, background)
+    const computed = window.getComputedStyle(el);
+    const hasBorder = computed.borderWidth !== '0px' && computed.borderStyle !== 'none';
+    const hasBackground = computed.backgroundColor !== 'rgba(0, 0, 0, 0)' && computed.backgroundColor !== 'transparent';
+    const hasShadow = computed.boxShadow !== 'none';
+    const hasMargin = parseInt(computed.marginTop) > 4 || parseInt(computed.marginBottom) > 4;
+    if (hasBorder) score++;
+    if (hasBackground) score++;
+    if (hasShadow) score += 2; // Cards often have shadows
+    if (hasMargin) score++;
+
+    // Penalty for being too large (entire page)
+    if (rect.width > window.innerWidth * 0.95) score -= 3;
+    if (rect.height > window.innerHeight * 1.5) score -= 3;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = el;
+    }
+
+    el = el.parentElement;
+  }
+
+  return bestCandidate;
+}
+
+/**
  * Prompt the user to click on a page element for selection.
  * Shows a semi-transparent overlay with instructions, highlights
- * the element under the cursor, and resolves with the clicked element.
+ * the POST BOUNDARY (not just the hovered element) under the cursor.
  * Resolves with null if the user presses Escape.
  */
 function promptUserSelection(platform) {
   return new Promise((resolve) => {
-    // Create a semi-transparent overlay with instructions
     const overlay = document.createElement('div');
     overlay.id = 'nac-selection-overlay';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.3);cursor:crosshair;display:flex;align-items:flex-start;justify-content:center;padding-top:80px;';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483645;background:rgba(0,0,0,0.15);cursor:crosshair;';
 
+    // Instruction banner
     const banner = document.createElement('div');
-    banner.style.cssText = 'background:#6366f1;color:white;padding:16px 24px;border-radius:12px;font-family:system-ui;font-size:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:400px;pointer-events:none;';
-    banner.innerHTML = `<div style="font-size:20px;margin-bottom:8px;">📌 Click on the post to capture</div><div style="font-size:13px;opacity:0.8;">Click anywhere on the ${platform} post you want to capture. Press Escape to cancel.</div>`;
+    banner.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#6366f1;color:white;padding:14px 24px;border-radius:12px;font-family:system-ui;font-size:15px;box-shadow:0 8px 32px rgba(0,0,0,0.3);text-align:center;max-width:440px;pointer-events:none;z-index:2147483647;';
+    banner.innerHTML = `<div style="font-size:18px;margin-bottom:6px;">📌 Click on the ${platform} post to capture</div><div style="font-size:12px;opacity:0.85;">The highlighted area shows what will be captured. Press Escape to cancel.</div>`;
     overlay.appendChild(banner);
 
-    // Highlight element under cursor
-    let lastHighlighted = null;
-    const highlightStyle = '2px solid #6366f1';
+    // Highlight overlay — a positioned div that outlines the detected post boundary
+    const highlight = document.createElement('div');
+    highlight.style.cssText = 'position:fixed;pointer-events:none;border:3px solid #6366f1;border-radius:8px;background:rgba(99,102,241,0.08);transition:all 0.15s ease;z-index:2147483646;box-shadow:0 0 0 4000px rgba(0,0,0,0.2);';
+    overlay.appendChild(highlight);
+
+    let lastBoundary = null;
 
     overlay.addEventListener('mousemove', (e) => {
-      // Get element below the overlay
       overlay.style.pointerEvents = 'none';
       const el = document.elementFromPoint(e.clientX, e.clientY);
       overlay.style.pointerEvents = 'auto';
 
-      if (lastHighlighted) {
-        lastHighlighted.style.outline = '';
+      if (!el || el === document.body || el === document.documentElement) {
+        highlight.style.display = 'none';
+        lastBoundary = null;
+        return;
       }
-      if (el && el !== document.body && el !== document.documentElement) {
-        el.style.outline = highlightStyle;
-        lastHighlighted = el;
-      }
+
+      // Find the visual post boundary from the hovered element
+      const boundary = findVisualPostBoundary(el);
+      if (boundary === lastBoundary) return; // No change
+
+      lastBoundary = boundary;
+      const rect = boundary.getBoundingClientRect();
+      highlight.style.display = 'block';
+      highlight.style.top = rect.top - 3 + 'px';
+      highlight.style.left = rect.left - 3 + 'px';
+      highlight.style.width = rect.width + 6 + 'px';
+      highlight.style.height = rect.height + 6 + 'px';
     });
 
     overlay.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
 
-      // Get the actual element under the overlay
-      overlay.style.pointerEvents = 'none';
-      const el = document.elementFromPoint(e.clientX, e.clientY);
-      overlay.style.pointerEvents = 'auto';
-
-      if (lastHighlighted) lastHighlighted.style.outline = '';
       overlay.remove();
       document.removeEventListener('keydown', escHandler);
-      resolve(el);
+      resolve(lastBoundary);
     });
 
-    // Escape to cancel
     const escHandler = (e) => {
       if (e.key === 'Escape') {
-        if (lastHighlighted) lastHighlighted.style.outline = '';
         overlay.remove();
         document.removeEventListener('keydown', escHandler);
         resolve(null);
@@ -219,24 +306,46 @@ function createFAB() {
       const detection = ContentDetector.detect();
       Utils.log('Content detected:', detection);
       
-      // Extract article — use platform handler if available, else generic
+      // Extract article — dual-mode: text selection first, then click-to-select
       let article;
       if (detection.platform && PlatformHandler.has(detection.platform)) {
         const handler = PlatformHandler.get(detection.platform);
         try {
-          if (handler.needsUserSelection) {
-            // User-assisted selection flow
-            const selectedElement = await promptUserSelection(handler.platform);
+          // MODE 1: Check if user has text selected (most obfuscation-proof)
+          const textSel = getTextSelection();
+          
+          if (textSel && handler.needsUserSelection) {
+            // User already selected text — use the selection's container
+            console.log('[NAC] Using text selection for capture');
+            const postContainer = handler.findPostContainer
+              ? handler.findPostContainer(textSel.container)
+              : findVisualPostBoundary(textSel.container);
+            
+            // Pass the selected text as a hint to the extractor
+            article = await handler.extract(postContainer);
+            // If the handler didn't capture text well, use the selection text
+            if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
+              article.textContent = textSel.text;
+              if (!article.content || article.content.length < textSel.text.length) {
+                // Rebuild content HTML from selected text
+                article.content = article.content || '';
+              }
+            }
+            // Clear the selection after capture
+            window.getSelection().removeAllRanges();
+            
+          } else if (handler.needsUserSelection) {
+            // MODE 2: Click-to-select with enhanced visual boundary detection
+            const selectedElement = await promptUserSelection(handler.platform || detection.type);
             if (!selectedElement) return; // User cancelled (Escape)
 
-            // Find the post container from the clicked element
             const postContainer = handler.findPostContainer
               ? handler.findPostContainer(selectedElement)
               : selectedElement;
 
-            // Extract from the selected container
             article = await handler.extract(postContainer);
           } else {
+            // MODE 3: Automatic extraction (YouTube, Twitter single tweets, articles)
             article = await handler.extract();
           }
         } catch (handlerError) {
