@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.9.0
+// @version      3.10.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -13217,13 +13217,264 @@ Enter option (1-4):`;
 
   // src/platforms/facebook.js
   function extractFromContainer(container) {
+    const fiberData = getReactFiberData(container);
+    if (fiberData && (fiberData.text || fiberData.authorName)) {
+      console.log("[NAC Facebook] Extracted via React fiber");
+      return buildArticleFromFiberData(fiberData, container);
+    }
+    const ariaData = extractViaARIA(container);
+    if (ariaData.text && ariaData.text.length > 10) {
+      console.log("[NAC Facebook] Extracted via ARIA attributes");
+      return buildArticleFromExtractedData(ariaData, container);
+    }
+    const patternData = extractViaPatterns(container);
+    if (patternData.text && patternData.text.length > 10) {
+      console.log("[NAC Facebook] Extracted via text patterns");
+      return buildArticleFromExtractedData(patternData, container);
+    }
+    console.log("[NAC Facebook] Falling back to raw text extraction");
+    return buildArticleFromRawText(container);
+  }
+  function getReactFiberData(element) {
+    try {
+      const fiberKey = Object.keys(element).find(
+        (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$") || k.startsWith("__reactProps$")
+      );
+      if (!fiberKey) return null;
+      let fiber = element[fiberKey];
+      for (let i = 0; i < 30 && fiber; i++) {
+        const props = fiber.memoizedProps || fiber.pendingProps || {};
+        if (props.post) return flattenPostData(props.post);
+        if (props.story) return flattenPostData(props.story);
+        if (props.feedUnit) return flattenPostData(props.feedUnit);
+        if (props.__typename === "Story" || props.__typename === "Post") return flattenPostData(props);
+        if (props.data?.post) return flattenPostData(props.data.post);
+        if (props.data?.story) return flattenPostData(props.data.story);
+        if (props.data?.node) return flattenPostData(props.data.node);
+        fiber = fiber.return;
+      }
+    } catch (e) {
+      console.log("[NAC Facebook] React fiber traversal failed:", e.message);
+    }
+    return null;
+  }
+  function flattenPostData(post) {
+    return {
+      text: post.message?.text || post.message || post.body?.text || post.comet_sections?.content?.story?.message?.text || "",
+      authorName: post.author?.name || post.actor?.name || post.actors?.[0]?.name || post.owner?.name || "",
+      authorId: post.author?.id || post.actor?.id || post.owner?.id || "",
+      authorUrl: post.author?.url || post.actor?.url || post.owner?.url || "",
+      authorAvatar: post.author?.profile_picture?.uri || post.actor?.profile_picture?.uri || "",
+      timestamp: post.creation_time || post.created_time || post.timestamp || null,
+      url: post.url || post.permalink || post.wwwURL || "",
+      attachments: post.attachments || post.media || []
+    };
+  }
+  function buildArticleFromFiberData(fiberData, container) {
+    const images = extractImagesFromElement(container);
+    const engagement = extractEngagementFromElement(container);
+    const postText = fiberData.text || extractTextFromElement(container);
+    const author = {
+      name: fiberData.authorName || "",
+      profileUrl: fiberData.authorUrl || null,
+      avatarUrl: fiberData.authorAvatar || null
+    };
+    if (!author.name) {
+      const domAuthor = extractAuthorFromElement(container);
+      author.name = domAuthor.name;
+      author.profileUrl = domAuthor.profileUrl;
+      author.avatarUrl = domAuthor.avatarUrl;
+    }
+    const timestamp = fiberData.timestamp ? typeof fiberData.timestamp === "number" ? new Date(fiberData.timestamp * 1e3).toISOString() : fiberData.timestamp : extractTimestampFromElement(container);
+    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, []);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: author.name || "Facebook User",
+      url: fiberData.url || window.location.href,
+      domain: "facebook.com",
+      siteName: "Facebook",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
+      publicationIcon: "https://www.facebook.com/favicon.ico",
+      platform: "facebook",
+      contentType: "social_post",
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "facebook"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags2(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractViaARIA(container) {
+    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
+    const articles = container.querySelectorAll('[role="article"]');
+    const mainArticle = articles[0] || container;
+    const authorLink = mainArticle.querySelector(
+      'a[role="link"][href*="facebook.com/"]:not([href*="/posts/"]):not([href*="/photos/"]):not([href*="/videos/"]):not([href*="/watch"])'
+    );
+    if (authorLink) {
+      data.author.name = authorLink.textContent?.trim() || authorLink.getAttribute("aria-label") || "";
+      data.author.profileUrl = authorLink.href;
+    }
+    const avatarImg = mainArticle.querySelector('svg image[href], img[alt*="profile"], [role="img"] image, image[preserveAspectRatio]');
+    if (avatarImg) {
+      data.author.avatarUrl = avatarImg.getAttribute("href") || avatarImg.getAttribute("xlink:href") || avatarImg.src || "";
+    }
+    const textBlocks = [];
+    mainArticle.querySelectorAll('div[dir="auto"], span[dir="auto"]').forEach((el) => {
+      const text = el.textContent?.trim();
+      if (text && text.length > 10 && !el.closest('[role="button"]') && !el.closest('[role="navigation"]') && !el.closest('[role="toolbar"]')) {
+        textBlocks.push({ text, length: text.length, el });
+      }
+    });
+    textBlocks.sort((a, b) => b.length - a.length);
+    data.text = textBlocks[0]?.text || "";
+    mainArticle.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]').forEach((img) => {
+      const w = img.naturalWidth || img.width || 0;
+      if (w === 0 || w > 50) {
+        data.images.push(img.src);
+      }
+    });
+    const timeEl = mainArticle.querySelector('abbr[data-utime], time[datetime], [data-testid*="timestamp"], a[href*="/posts/"] span');
+    if (timeEl) {
+      data.timestamp = timeEl.getAttribute("data-utime") ? new Date(parseInt(timeEl.getAttribute("data-utime")) * 1e3).toISOString() : timeEl.getAttribute("datetime") || timeEl.textContent?.trim() || null;
+    }
+    return data;
+  }
+  function extractViaPatterns(container) {
+    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
+    const authorResult = identifyAuthorByStyle(container);
+    if (authorResult) {
+      data.author.name = authorResult.name;
+      data.author.profileUrl = authorResult.profileUrl;
+    }
+    const avatarResult = identifyAvatarByStyle(container);
+    if (avatarResult) {
+      data.author.avatarUrl = avatarResult;
+    }
+    const textResult = identifyPostTextByPattern(container);
+    data.text = textResult || "";
+    container.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]').forEach((img) => {
+      const w = img.naturalWidth || img.width || 0;
+      if (w === 0 || w > 50) {
+        if (!img.src.includes("emoji") && !img.src.includes("icon")) {
+          data.images.push(img.src);
+        }
+      }
+    });
+    const timestampResult = identifyTimestampByPattern(container);
+    data.timestamp = timestampResult;
+    return data;
+  }
+  function identifyAuthorByStyle(container) {
+    const links = container.querySelectorAll("a[href]");
+    for (const link of links) {
+      try {
+        const computed = window.getComputedStyle(link);
+        const rect = link.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const isBold = parseInt(computed.fontWeight) >= 600 || computed.fontWeight === "bold";
+        const isNearTop = rect.top - containerRect.top < 100;
+        const isReasonableSize = rect.height > 10 && rect.height < 50;
+        const isProfileLink = link.href.match(/facebook\.com\/[a-zA-Z0-9.]+(\/?|\?[^/]*)$/) && !link.href.includes("/posts/") && !link.href.includes("/photos/") && !link.href.includes("/videos/") && !link.href.includes("/watch");
+        if (isBold && isNearTop && isReasonableSize && isProfileLink) {
+          const name = link.textContent?.trim();
+          if (name && name.length > 1 && name.length < 100) {
+            return { name, profileUrl: link.href, element: link };
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    return null;
+  }
+  function identifyAvatarByStyle(container) {
+    const imgs = container.querySelectorAll("img[src], svg image[href], image[preserveAspectRatio]");
+    const containerRect = container.getBoundingClientRect();
+    for (const img of imgs) {
+      try {
+        const rect = img.getBoundingClientRect();
+        const isSmall = rect.width > 20 && rect.width < 80 && rect.height > 20 && rect.height < 80;
+        const isNearTop = rect.top - containerRect.top < 80;
+        const isNearLeft = rect.left - containerRect.left < 80;
+        const src = img.src || img.getAttribute("href") || img.getAttribute("xlink:href") || "";
+        if (isSmall && isNearTop && isNearLeft && src) {
+          const computed = window.getComputedStyle(img.closest("div, span, a") || img);
+          const isCircular = computed.borderRadius === "50%" || computed.clipPath?.includes("circle") || parseInt(computed.borderRadius) > 15;
+          if (isCircular || src.includes("scontent") || src.includes("profile")) {
+            return src;
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    return null;
+  }
+  function identifyPostTextByPattern(container) {
+    const candidates = [];
+    container.querySelectorAll("div, span, p").forEach((el) => {
+      try {
+        if (el.offsetHeight < 20 || el.offsetWidth < 100) return;
+      } catch (e) {
+        return;
+      }
+      if (el.closest('[role="button"]') || el.closest('[role="navigation"]') || el.closest('[role="toolbar"]') || el.closest("nav")) return;
+      const text = el.textContent?.trim() || "";
+      const containerText = container.textContent?.trim() || "";
+      if (text.length < 15 || text.length > containerText.length * 0.9) return;
+      let score = 0;
+      if (el.getAttribute("dir") === "auto") score += 3;
+      if (el.getAttribute("data-ad-preview") !== null) score -= 5;
+      if (text.length > 30) score += 1;
+      if (text.length > 100) score += 1;
+      const directTextLength = Array.from(el.childNodes).filter((n) => n.nodeType === 3).reduce((sum, n) => sum + (n.textContent?.trim().length || 0), 0);
+      if (directTextLength > text.length * 0.3) score += 2;
+      if (text.match(/^\d+[hm]$|^yesterday$/i)) return;
+      if (text.match(/^\d+\s*(like|comment|share|view)s?$/i)) return;
+      candidates.push({ text, score, el });
+    });
+    candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+    return candidates[0]?.text || "";
+  }
+  function identifyTimestampByPattern(container) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let node;
+    while (node = walker.nextNode()) {
+      const text = node.textContent?.trim();
+      if (!text || text.length > 50) continue;
+      if (text.match(/^(\d+[hmd]|yesterday|just now|\d+\s+(hour|minute|day|week|month)s?\s+ago)$/i)) {
+        return text;
+      }
+      if (text.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}/i)) {
+        return text;
+      }
+    }
+    return null;
+  }
+  function buildArticleFromRawText(container) {
     const postText = extractTextFromElement(container);
     const author = extractAuthorFromElement(container);
     const timestamp = extractTimestampFromElement(container);
     const images = extractImagesFromElement(container);
     const links = extractLinksFromElement(container);
     const engagement = extractEngagementFromElement(container);
-    let contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
+    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
     const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
     return {
       title,
@@ -13239,7 +13490,46 @@ Enter option (1-4):`;
       publicationIcon: "https://www.facebook.com/favicon.ico",
       platform: "facebook",
       contentType: "social_post",
-      // Platform account data (NOT jammed into author)
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "facebook"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags2(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function buildArticleFromExtractedData(data, container) {
+    const images = data.images && data.images.length > 0 ? data.images : extractImagesFromElement(container);
+    const engagement = extractEngagementFromElement(container);
+    const links = extractLinksFromElement(container);
+    const postText = data.text;
+    const author = data.author || { name: "", profileUrl: null, avatarUrl: null };
+    const timestamp = data.timestamp || extractTimestampFromElement(container);
+    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: author.name || "Facebook User",
+      url: window.location.href,
+      domain: "facebook.com",
+      siteName: "Facebook",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
+      publicationIcon: "https://www.facebook.com/favicon.ico",
+      platform: "facebook",
+      contentType: "social_post",
       platformAccount: {
         username: author.name || "Unknown",
         profileUrl: author.profileUrl || null,
@@ -13291,7 +13581,7 @@ Enter option (1-4):`;
   }
   function extractTextFromElement(el) {
     const clone = el.cloneNode(true);
-    clone.querySelectorAll('svg, [role="button"], [role="navigation"], [data-testid="like_button"], [data-testid="comment_button"], [data-testid="share_button"]').forEach((x) => x.remove());
+    clone.querySelectorAll('svg, [role="button"], [role="navigation"], [role="toolbar"], [data-testid="like_button"], [data-testid="comment_button"], [data-testid="share_button"]').forEach((x) => x.remove());
     const text = clone.textContent?.trim() || "";
     return text.replace(/\s+/g, " ").trim();
   }
@@ -13336,6 +13626,13 @@ Enter option (1-4):`;
       if (src.includes("emoji") || src.includes("icon") || src.includes("static")) return;
       if (src.includes("scontent") || src.includes("fbcdn")) {
         images.push(src);
+      }
+    });
+    el.querySelectorAll('[role="img"][style*="background-image"]').forEach((imgEl) => {
+      const style = imgEl.getAttribute("style") || "";
+      const match = style.match(/url\(["']?([^"')]+)["']?\)/);
+      if (match && match[1] && (match[1].includes("scontent") || match[1].includes("fbcdn"))) {
+        images.push(match[1]);
       }
     });
     return images;
@@ -13489,6 +13786,328 @@ Enter option (1-4):`;
 
   // src/platforms/instagram.js
   function extractFromContainer2(container) {
+    const fiberData = getReactFiberData2(container);
+    if (fiberData && (fiberData.text || fiberData.authorName)) {
+      console.log("[NAC Instagram] Extracted via React fiber");
+      return buildArticleFromFiberData2(fiberData, container);
+    }
+    const ariaData = extractViaARIA2(container);
+    if (ariaData.text && ariaData.text.length > 5) {
+      console.log("[NAC Instagram] Extracted via ARIA attributes");
+      return buildArticleFromExtractedData2(ariaData, container);
+    }
+    const patternData = extractViaPatterns2(container);
+    if (patternData.text && patternData.text.length > 5) {
+      console.log("[NAC Instagram] Extracted via text patterns");
+      return buildArticleFromExtractedData2(patternData, container);
+    }
+    console.log("[NAC Instagram] Falling back to raw text extraction");
+    return buildArticleFromRawText2(container);
+  }
+  function getReactFiberData2(element) {
+    try {
+      const fiberKey = Object.keys(element).find(
+        (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$") || k.startsWith("__reactProps$")
+      );
+      if (!fiberKey) return null;
+      let fiber = element[fiberKey];
+      for (let i = 0; i < 30 && fiber; i++) {
+        const props = fiber.memoizedProps || fiber.pendingProps || {};
+        if (props.post) return flattenPostData2(props.post);
+        if (props.media) return flattenPostData2(props.media);
+        if (props.shortcode_media) return flattenPostData2(props.shortcode_media);
+        if (props.__typename === "XDTGraphImage" || props.__typename === "XDTGraphVideo" || props.__typename === "XDTGraphSidecar") {
+          return flattenPostData2(props);
+        }
+        if (props.data?.shortcode_media) return flattenPostData2(props.data.shortcode_media);
+        if (props.data?.xdt_shortcode_media) return flattenPostData2(props.data.xdt_shortcode_media);
+        if (props.data?.node) return flattenPostData2(props.data.node);
+        fiber = fiber.return;
+      }
+    } catch (e) {
+      console.log("[NAC Instagram] React fiber traversal failed:", e.message);
+    }
+    return null;
+  }
+  function flattenPostData2(post) {
+    const caption = post.edge_media_to_caption?.edges?.[0]?.node?.text || post.caption?.text || post.caption || post.text || "";
+    return {
+      text: typeof caption === "string" ? caption : "",
+      authorName: post.owner?.username || post.user?.username || post.author?.name || "",
+      authorFullName: post.owner?.full_name || post.user?.full_name || "",
+      authorId: post.owner?.id || post.user?.pk || "",
+      authorUrl: post.owner?.username ? `https://www.instagram.com/${post.owner.username}/` : "",
+      authorAvatar: post.owner?.profile_pic_url || post.user?.profile_pic_url || "",
+      timestamp: post.taken_at_timestamp || post.taken_at || post.timestamp || null,
+      url: post.shortcode ? `https://www.instagram.com/p/${post.shortcode}/` : "",
+      displayUrl: post.display_url || post.image_versions2?.candidates?.[0]?.url || "",
+      isVideo: post.is_video || post.__typename === "XDTGraphVideo" || false,
+      videoUrl: post.video_url || "",
+      likes: post.edge_media_preview_like?.count || post.like_count || 0,
+      comments: post.edge_media_to_comment?.count || post.comment_count || 0
+    };
+  }
+  function buildArticleFromFiberData2(fiberData, container) {
+    const images = fiberData.displayUrl ? [fiberData.displayUrl] : extractImagesFromElement2(container);
+    const postText = fiberData.text || extractTextFromElement2(container);
+    const engagement = {
+      likes: fiberData.likes || 0,
+      comments: fiberData.comments || 0,
+      shares: 0,
+      views: 0
+    };
+    const author = {
+      name: fiberData.authorName || fiberData.authorFullName || "",
+      profileUrl: fiberData.authorUrl || null,
+      avatarUrl: fiberData.authorAvatar || null
+    };
+    if (!author.name) {
+      const domAuthor = extractAuthorFromElement2(container);
+      author.name = domAuthor.name;
+      author.profileUrl = domAuthor.profileUrl;
+      author.avatarUrl = domAuthor.avatarUrl;
+    }
+    const timestamp = fiberData.timestamp ? typeof fiberData.timestamp === "number" ? new Date(fiberData.timestamp * 1e3).toISOString() : fiberData.timestamp : extractTimestampFromElement2(container);
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const isReel = /\/reel\//.test(window.location.pathname) || fiberData.isVideo;
+    const contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: author.name || "Instagram User",
+      url: fiberData.url || ogUrl,
+      domain: "instagram.com",
+      siteName: "Instagram",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
+      publicationIcon: "https://www.instagram.com/favicon.ico",
+      platform: "instagram",
+      contentType: isReel ? "video" : "social_post",
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "instagram"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags3(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function extractViaARIA2(container) {
+    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
+    const mainArticle = container.closest("article") || container.querySelector("article") || container;
+    const headerEl = mainArticle.querySelector("header") || mainArticle;
+    const authorLink = headerEl.querySelector(
+      'a[href*="instagram.com/"]:not([href*="/p/"]):not([href*="/reel/"]):not([href*="/explore/"]):not([href*="/stories/"])'
+    );
+    if (authorLink) {
+      data.author.name = authorLink.textContent?.trim() || authorLink.getAttribute("aria-label") || "";
+      data.author.profileUrl = authorLink.href;
+    }
+    const avatarImg = headerEl.querySelector('img[alt*="profile" i], img[draggable="false"][src*="scontent"], canvas + img');
+    if (avatarImg) {
+      data.author.avatarUrl = avatarImg.src || "";
+    }
+    const textBlocks = [];
+    mainArticle.querySelectorAll('span[dir="auto"], div[dir="auto"]').forEach((el) => {
+      const text = el.textContent?.trim();
+      if (text && text.length > 5 && !el.closest('[role="button"]') && !el.closest("button") && !el.closest('[role="navigation"]') && !el.closest("nav")) {
+        textBlocks.push({ text, length: text.length, el });
+      }
+    });
+    textBlocks.sort((a, b) => b.length - a.length);
+    data.text = textBlocks[0]?.text || "";
+    mainArticle.querySelectorAll('img[src*="scontent"], img[src*="cdninstagram"], img[src*="fbcdn"]').forEach((img) => {
+      const w = img.naturalWidth || img.width || 0;
+      if (w === 0 || w > 50) {
+        const srcset = img.getAttribute("srcset");
+        if (srcset) {
+          const srcsetParts = srcset.split(",").map((s) => s.trim());
+          const largest = srcsetParts.pop()?.split(" ")[0];
+          if (largest && !data.images.includes(largest)) {
+            data.images.push(largest);
+            return;
+          }
+        }
+        if (!img.src.includes("profile_pic") && !data.images.includes(img.src)) {
+          data.images.push(img.src);
+        }
+      }
+    });
+    mainArticle.querySelectorAll('[role="img"][style*="background-image"]').forEach((imgEl) => {
+      const style = imgEl.getAttribute("style") || "";
+      const match = style.match(/url\(["']?([^"')]+)["']?\)/);
+      if (match && match[1] && !data.images.includes(match[1])) {
+        data.images.push(match[1]);
+      }
+    });
+    const timeEl = mainArticle.querySelector("time[datetime]");
+    if (timeEl) {
+      data.timestamp = timeEl.getAttribute("datetime");
+    } else {
+      const timeLink = mainArticle.querySelector('a[href*="/p/"] time, a time[datetime]');
+      if (timeLink) {
+        data.timestamp = timeLink.getAttribute("datetime");
+      }
+    }
+    return data;
+  }
+  function extractViaPatterns2(container) {
+    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
+    const authorResult = identifyAuthorByStyle2(container);
+    if (authorResult) {
+      data.author.name = authorResult.name;
+      data.author.profileUrl = authorResult.profileUrl;
+    }
+    const avatarResult = identifyAvatarByStyle2(container);
+    if (avatarResult) {
+      data.author.avatarUrl = avatarResult;
+    }
+    const textResult = identifyCaptionByPattern(container);
+    data.text = textResult || "";
+    container.querySelectorAll('img[src*="scontent"], img[src*="cdninstagram"], img[src*="fbcdn"]').forEach((img) => {
+      const w = img.naturalWidth || img.width || 0;
+      if (w === 0 || w > 50) {
+        if (!img.src.includes("profile_pic") && !img.src.includes("emoji") && !img.src.includes("icon")) {
+          const srcset = img.getAttribute("srcset");
+          if (srcset) {
+            const srcsetParts = srcset.split(",").map((s) => s.trim());
+            const largest = srcsetParts.pop()?.split(" ")[0];
+            if (largest && !data.images.includes(largest)) {
+              data.images.push(largest);
+              return;
+            }
+          }
+          if (!data.images.includes(img.src)) {
+            data.images.push(img.src);
+          }
+        }
+      }
+    });
+    const timeEl = container.querySelector("time[datetime]");
+    if (timeEl) {
+      data.timestamp = timeEl.getAttribute("datetime");
+    } else {
+      data.timestamp = identifyTimestampByPattern2(container);
+    }
+    return data;
+  }
+  function identifyAuthorByStyle2(container) {
+    const headerEl = container.querySelector("header") || container;
+    const links = headerEl.querySelectorAll("a[href]");
+    for (const link of links) {
+      try {
+        const computed = window.getComputedStyle(link);
+        const rect = link.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const isBold = parseInt(computed.fontWeight) >= 600 || computed.fontWeight === "bold";
+        const isNearTop = rect.top - containerRect.top < 80;
+        const isReasonableSize = rect.height > 10 && rect.height < 50;
+        const isProfileLink = link.href.match(/instagram\.com\/[a-zA-Z0-9_.]+\/?$/) && !link.href.includes("/p/") && !link.href.includes("/reel/") && !link.href.includes("/explore/") && !link.href.includes("/stories/");
+        if (isBold && isNearTop && isReasonableSize && isProfileLink) {
+          const name = link.textContent?.trim();
+          if (name && name.length > 1 && name.length < 100) {
+            return { name, profileUrl: link.href, element: link };
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    for (const link of links) {
+      try {
+        const rect = link.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const isNearTop = rect.top - containerRect.top < 80;
+        const isProfileLink = link.href.match(/instagram\.com\/[a-zA-Z0-9_.]+\/?$/) && !link.href.includes("/p/") && !link.href.includes("/reel/");
+        if (isNearTop && isProfileLink) {
+          const name = link.textContent?.trim();
+          if (name && name.length > 1 && name.length < 100) {
+            return { name, profileUrl: link.href, element: link };
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    return null;
+  }
+  function identifyAvatarByStyle2(container) {
+    const headerEl = container.querySelector("header") || container;
+    const imgs = headerEl.querySelectorAll("img[src], canvas + img");
+    const containerRect = container.getBoundingClientRect();
+    for (const img of imgs) {
+      try {
+        const rect = img.getBoundingClientRect();
+        const isSmall = rect.width > 20 && rect.width < 80 && rect.height > 20 && rect.height < 80;
+        const isNearTop = rect.top - containerRect.top < 80;
+        if (isSmall && isNearTop && img.src) {
+          const parentEl = img.closest("div, span, a") || img;
+          const computed = window.getComputedStyle(parentEl);
+          const isCircular = computed.borderRadius === "50%" || computed.clipPath?.includes("circle") || parseInt(computed.borderRadius) > 15;
+          if (isCircular || img.src.includes("scontent") || img.src.includes("profile")) {
+            return img.src;
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    return null;
+  }
+  function identifyCaptionByPattern(container) {
+    const candidates = [];
+    container.querySelectorAll("div, span, p").forEach((el) => {
+      try {
+        if (el.offsetHeight < 15 || el.offsetWidth < 80) return;
+      } catch (e) {
+        return;
+      }
+      if (el.closest('[role="button"]') || el.closest("button") || el.closest('[role="navigation"]') || el.closest("nav") || el.closest('[role="toolbar"]')) return;
+      const text = el.textContent?.trim() || "";
+      const containerText = container.textContent?.trim() || "";
+      if (text.length < 10 || text.length > containerText.length * 0.9) return;
+      let score = 0;
+      if (el.getAttribute("dir") === "auto") score += 3;
+      if (text.length > 30) score += 1;
+      if (text.length > 100) score += 1;
+      if (text.match(/#\w+/)) score += 1;
+      if (text.match(/@\w+/)) score += 1;
+      const directTextLength = Array.from(el.childNodes).filter((n) => n.nodeType === 3).reduce((sum, n) => sum + (n.textContent?.trim().length || 0), 0);
+      if (directTextLength > text.length * 0.3) score += 2;
+      if (text.match(/^\d+\s*(like|comment|view|share)s?$/i)) return;
+      if (text.match(/^(like|comment|share|save|more)$/i)) return;
+      candidates.push({ text, score, el });
+    });
+    candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+    return candidates[0]?.text || "";
+  }
+  function identifyTimestampByPattern2(container) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let node;
+    while (node = walker.nextNode()) {
+      const text = node.textContent?.trim();
+      if (!text || text.length > 50) continue;
+      if (text.match(/^(\d+[hmd]|yesterday|just now|\d+\s+(hour|minute|day|week|month)s?\s+ago)$/i)) {
+        return text;
+      }
+      if (text.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}/i)) {
+        return text;
+      }
+    }
+    return null;
+  }
+  function buildArticleFromRawText2(container) {
     const postText = extractTextFromElement2(container);
     const author = extractAuthorFromElement2(container);
     const timestamp = extractTimestampFromElement2(container);
@@ -13497,7 +14116,7 @@ Enter option (1-4):`;
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
     const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
     const isReel = /\/reel\//.test(window.location.pathname);
-    let contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
+    const contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
     const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
     return {
       title,
@@ -13513,7 +14132,47 @@ Enter option (1-4):`;
       publicationIcon: "https://www.instagram.com/favicon.ico",
       platform: "instagram",
       contentType: isReel ? "video" : "social_post",
-      // Platform account data (NOT jammed into author)
+      platformAccount: {
+        username: author.name || "Unknown",
+        profileUrl: author.profileUrl || null,
+        avatarUrl: author.avatarUrl || null,
+        platform: "instagram"
+      },
+      engagement,
+      wordCount: postText.split(/\s+/).filter((w) => w).length,
+      readingTimeMinutes: 1,
+      structuredData: { type: "SocialMediaPosting" },
+      keywords: extractHashtags3(postText),
+      language: document.documentElement.lang || "en",
+      isPaywalled: false,
+      section: null,
+      dateModified: null
+    };
+  }
+  function buildArticleFromExtractedData2(data, container) {
+    const images = data.images && data.images.length > 0 ? data.images : extractImagesFromElement2(container);
+    const engagement = extractEngagementFromElement2(container);
+    const postText = data.text;
+    const author = data.author || { name: "", profileUrl: null, avatarUrl: null };
+    const timestamp = data.timestamp || extractTimestampFromElement2(container);
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+    const isReel = /\/reel\//.test(window.location.pathname);
+    const contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
+    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
+    return {
+      title,
+      byline: author.name || "Instagram User",
+      url: ogUrl,
+      domain: "instagram.com",
+      siteName: "Instagram",
+      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      content: contentHtml,
+      textContent: postText,
+      excerpt: postText.substring(0, 200),
+      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
+      publicationIcon: "https://www.instagram.com/favicon.ico",
+      platform: "instagram",
+      contentType: isReel ? "video" : "social_post",
       platformAccount: {
         username: author.name || "Unknown",
         profileUrl: author.profileUrl || null,
@@ -13579,7 +14238,7 @@ Enter option (1-4):`;
   }
   function extractTextFromElement2(el) {
     const clone = el.cloneNode(true);
-    clone.querySelectorAll('svg, [role="button"], [role="navigation"], button, nav').forEach((x) => x.remove());
+    clone.querySelectorAll('svg, [role="button"], [role="navigation"], [role="toolbar"], button, nav').forEach((x) => x.remove());
     const text = clone.textContent?.trim() || "";
     return text.replace(/\s+/g, " ").trim();
   }
@@ -13602,7 +14261,7 @@ Enter option (1-4):`;
       const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
       result.name = ogTitle.match(/(.+?) on Instagram/)?.[1] || ogTitle.split("\u2022")[0]?.trim() || "";
     }
-    const avatarImg = el.querySelector('header img[src], img[alt*="profile"], img[src*="profile"]');
+    const avatarImg = el.querySelector('header img[src], img[alt*="profile" i], img[src*="profile"]');
     if (avatarImg) {
       result.avatarUrl = avatarImg.src;
     }
@@ -13640,6 +14299,13 @@ Enter option (1-4):`;
         if (!src.includes("profile_pic") && !images.includes(src)) {
           images.push(src);
         }
+      }
+    });
+    el.querySelectorAll('[role="img"][style*="background-image"]').forEach((imgEl) => {
+      const style = imgEl.getAttribute("style") || "";
+      const match = style.match(/url\(["']?([^"')]+)["']?\)/);
+      if (match && match[1] && !images.includes(match[1])) {
+        images.push(match[1]);
       }
     });
     if (images.length === 0) {
@@ -13735,9 +14401,11 @@ Enter option (1-4):`;
         },
         extractComments: async (articleUrl) => {
           try {
-            const commentEls = document.querySelectorAll('ul li[role="menuitem"], [class*="comment"] span[dir="auto"]');
             const comments = [];
-            for (const el of commentEls) {
+            const commentEls = document.querySelectorAll('ul li[role="menuitem"], [role="article"]');
+            const fallbackEls = document.querySelectorAll('[class*="comment"] span[dir="auto"]');
+            const allEls = commentEls.length > 0 ? commentEls : fallbackEls;
+            for (const el of allEls) {
               const authorEl = el.querySelector('a[href*="/"], h3 a');
               const author = authorEl?.textContent?.trim() || "";
               const spans = el.querySelectorAll('span[dir="auto"]');
