@@ -108,6 +108,71 @@ export const STYLES = `
     margin: 0 auto;
   }
   
+  /* Masthead */
+  .nac-masthead {
+    margin: -24px -24px 24px -24px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--nac-border);
+    display: flex;
+    align-items: center;
+  }
+
+  .nac-masthead-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+  }
+
+  .nac-masthead-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .nac-masthead-name {
+    font-weight: 600;
+    font-size: 1.1em;
+    color: var(--nac-text);
+  }
+
+  .nac-masthead-domain {
+    font-size: 0.8em;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-masthead-link {
+    margin-left: auto;
+    color: var(--nac-primary);
+    text-decoration: none;
+    font-size: 0.85em;
+    padding: 6px 12px;
+    border: 1px solid var(--nac-primary);
+    border-radius: 6px;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .nac-masthead-link:hover {
+    background: var(--nac-primary);
+    color: white;
+  }
+
+  /* Featured Image */
+  .nac-featured-image {
+    margin: 0 -24px 24px -24px;
+    text-align: center;
+  }
+
+  .nac-featured-image img {
+    max-width: 100%;
+    max-height: 500px;
+    object-fit: contain;
+    border-radius: 0;
+  }
+
   /* Article Header */
   .nac-article-header {
     margin-bottom: 32px;
@@ -285,10 +350,19 @@ export const STYLES = `
   }
   
   .nac-article-body img {
-    max-width: 100%;
-    height: auto;
+    max-width: 100% !important;
+    height: auto !important;
+    display: block;
+    margin: 1em auto;
     border-radius: 8px;
-    margin: 1.5em 0;
+  }
+
+  /* Don't hide images on error — show a broken image indicator instead */
+  .nac-article-body img[onerror] {
+    min-height: 40px;
+    min-width: 100px;
+    background: var(--nac-surface);
+    border: 1px dashed var(--nac-border);
   }
 
   /* Fix B: Don't enlarge small inline images (avatars, icons, emoji) */

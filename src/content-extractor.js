@@ -109,6 +109,52 @@ export const ContentExtractor = {
           return null;
         }
         
+        // Post-process extracted content to fix image URLs
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = article.content;
+
+        tempDiv.querySelectorAll('img').forEach(img => {
+            let src = img.getAttribute('src') || '';
+            
+            // Fix relative URLs
+            if (src && !src.startsWith('http') && !src.startsWith('data:') && !src.startsWith('//')) {
+                try { src = new URL(src, window.location.href).href; } catch(e) {}
+                img.src = src;
+            }
+            
+            // Fix protocol-relative URLs
+            if (src.startsWith('//')) {
+                img.src = window.location.protocol + src;
+            }
+            
+            // Fix lazy-loaded images that Readability missed
+            if (!src || src.includes('data:') || src.includes('placeholder') || src.includes('blank')) {
+                const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') ||
+                               img.getAttribute('data-original') || img.getAttribute('data-lazy');
+                if (lazySrc) {
+                    try { img.src = new URL(lazySrc, window.location.href).href; } catch(e) { img.src = lazySrc; }
+                }
+                
+                // Try srcset
+                if (!img.src || img.src.includes('data:')) {
+                    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+                    if (srcset) {
+                        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+                        if (firstUrl) {
+                            try { img.src = new URL(firstUrl, window.location.href).href; } catch(e) { img.src = firstUrl; }
+                        }
+                    }
+                }
+            }
+            
+            // Remove images that still have no valid src
+            if (!img.src || img.src === window.location.href || img.src === 'about:blank') {
+                img.remove();
+            }
+        });
+
+        article.content = tempDiv.innerHTML;
+        
         // Add metadata
         article.url = ContentExtractor.getCanonicalUrl();
         article.domain = ContentExtractor.getDomain(article.url);

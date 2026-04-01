@@ -79,6 +79,16 @@ export const ReaderView = {
       
       <div class="nac-reader-content">
         <div class="nac-reader-article">
+          <div class="nac-masthead" style="background: linear-gradient(135deg, ${ReaderView._getMastheadGradient(article.platform)});">
+            <div class="nac-masthead-inner">
+              <img class="nac-masthead-icon" src="${Utils.escapeHtml(article.publicationIcon || '')}" onerror="this.style.display='none'" width="32" height="32">
+              <div class="nac-masthead-info">
+                <div class="nac-masthead-name">${Utils.escapeHtml(article.siteName || article.domain || '')}</div>
+                <div class="nac-masthead-domain">${Utils.escapeHtml(article.domain || '')}</div>
+              </div>
+              <a class="nac-masthead-link" href="${Utils.escapeHtml(article.url)}" target="_blank" title="View original">↗ Original</a>
+            </div>
+          </div>
           <div class="nac-article-header">
             <h1 class="nac-article-title" contenteditable="false" id="nac-title">${Utils.escapeHtml(article.title || 'Untitled')}</h1>
             <div class="nac-article-meta">
@@ -141,6 +151,8 @@ export const ReaderView = {
               Archived: ${new Date().toLocaleDateString()}
             </div>
           </div>
+          
+          ${article.featuredImage ? `<figure class="nac-featured-image"><img src="${Utils.escapeHtml(article.featuredImage)}" alt="Featured image" loading="lazy"></figure>` : ''}
           
           <div class="nac-article-body" id="nac-content" contenteditable="false">
             ${article.content || ''}
@@ -563,6 +575,19 @@ export const ReaderView = {
     } catch (e) {
       return dateStr;
     }
+  },
+
+  // Get masthead gradient colors based on platform
+  _getMastheadGradient: (platform) => {
+    const colors = {
+      youtube: 'rgba(255, 0, 0, 0.08), rgba(255, 0, 0, 0.03)',
+      twitter: 'rgba(29, 161, 242, 0.08), rgba(29, 161, 242, 0.03)',
+      facebook: 'rgba(24, 119, 242, 0.08), rgba(24, 119, 242, 0.03)',
+      instagram: 'rgba(225, 48, 108, 0.08), rgba(225, 48, 108, 0.03)',
+      tiktok: 'rgba(254, 44, 85, 0.08), rgba(254, 44, 85, 0.03)',
+      substack: 'rgba(255, 102, 0, 0.08), rgba(255, 102, 0, 0.03)'
+    };
+    return colors[platform] || 'rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.03)';
   },
 
   // Start inline editing of a metadata field

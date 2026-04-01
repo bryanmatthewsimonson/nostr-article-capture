@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      3.11.0
+// @version      3.12.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "3.11.0",
+        version: "3.12.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -4099,6 +4099,48 @@
                 console.log("[NAC] Readability extraction failed or content too short");
                 return null;
               }
+              const tempDiv = document.createElement("div");
+              tempDiv.innerHTML = article.content;
+              tempDiv.querySelectorAll("img").forEach((img) => {
+                let src = img.getAttribute("src") || "";
+                if (src && !src.startsWith("http") && !src.startsWith("data:") && !src.startsWith("//")) {
+                  try {
+                    src = new URL(src, window.location.href).href;
+                  } catch (e) {
+                  }
+                  img.src = src;
+                }
+                if (src.startsWith("//")) {
+                  img.src = window.location.protocol + src;
+                }
+                if (!src || src.includes("data:") || src.includes("placeholder") || src.includes("blank")) {
+                  const lazySrc = img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || img.getAttribute("data-original") || img.getAttribute("data-lazy");
+                  if (lazySrc) {
+                    try {
+                      img.src = new URL(lazySrc, window.location.href).href;
+                    } catch (e) {
+                      img.src = lazySrc;
+                    }
+                  }
+                  if (!img.src || img.src.includes("data:")) {
+                    const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset");
+                    if (srcset) {
+                      const firstUrl = srcset.split(",")[0].trim().split(/\s+/)[0];
+                      if (firstUrl) {
+                        try {
+                          img.src = new URL(firstUrl, window.location.href).href;
+                        } catch (e) {
+                          img.src = firstUrl;
+                        }
+                      }
+                    }
+                  }
+                }
+                if (!img.src || img.src === window.location.href || img.src === "about:blank") {
+                  img.remove();
+                }
+              });
+              article.content = tempDiv.innerHTML;
               article.url = ContentExtractor.getCanonicalUrl();
               article.domain = ContentExtractor.getDomain(article.url);
               article.extractedAt = Math.floor(Date.now() / 1e3);
@@ -6886,6 +6928,16 @@ ${extractDescription()}`;
       
       <div class="nac-reader-content">
         <div class="nac-reader-article">
+          <div class="nac-masthead" style="background: linear-gradient(135deg, ${ReaderView._getMastheadGradient(article.platform)});">
+            <div class="nac-masthead-inner">
+              <img class="nac-masthead-icon" src="${Utils.escapeHtml(article.publicationIcon || "")}" onerror="this.style.display='none'" width="32" height="32">
+              <div class="nac-masthead-info">
+                <div class="nac-masthead-name">${Utils.escapeHtml(article.siteName || article.domain || "")}</div>
+                <div class="nac-masthead-domain">${Utils.escapeHtml(article.domain || "")}</div>
+              </div>
+              <a class="nac-masthead-link" href="${Utils.escapeHtml(article.url)}" target="_blank" title="View original">\u2197 Original</a>
+            </div>
+          </div>
           <div class="nac-article-header">
             <h1 class="nac-article-title" contenteditable="false" id="nac-title">${Utils.escapeHtml(article.title || "Untitled")}</h1>
             <div class="nac-article-meta">
@@ -6948,6 +7000,8 @@ ${extractDescription()}`;
               Archived: ${(/* @__PURE__ */ new Date()).toLocaleDateString()}
             </div>
           </div>
+          
+          ${article.featuredImage ? `<figure class="nac-featured-image"><img src="${Utils.escapeHtml(article.featuredImage)}" alt="Featured image" loading="lazy"></figure>` : ""}
           
           <div class="nac-article-body" id="nac-content" contenteditable="false">
             ${article.content || ""}
@@ -7321,6 +7375,18 @@ ${extractDescription()}`;
           } catch (e) {
             return dateStr;
           }
+        },
+        // Get masthead gradient colors based on platform
+        _getMastheadGradient: (platform) => {
+          const colors = {
+            youtube: "rgba(255, 0, 0, 0.08), rgba(255, 0, 0, 0.03)",
+            twitter: "rgba(29, 161, 242, 0.08), rgba(29, 161, 242, 0.03)",
+            facebook: "rgba(24, 119, 242, 0.08), rgba(24, 119, 242, 0.03)",
+            instagram: "rgba(225, 48, 108, 0.08), rgba(225, 48, 108, 0.03)",
+            tiktok: "rgba(254, 44, 85, 0.08), rgba(254, 44, 85, 0.03)",
+            substack: "rgba(255, 102, 0, 0.08), rgba(255, 102, 0, 0.03)"
+          };
+          return colors[platform] || "rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.03)";
         },
         // Start inline editing of a metadata field
         _startInlineEdit: (element, fieldKey) => {
@@ -9543,6 +9609,71 @@ Enter option (1-4):`;
     margin: 0 auto;
   }
   
+  /* Masthead */
+  .nac-masthead {
+    margin: -24px -24px 24px -24px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--nac-border);
+    display: flex;
+    align-items: center;
+  }
+
+  .nac-masthead-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+  }
+
+  .nac-masthead-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .nac-masthead-name {
+    font-weight: 600;
+    font-size: 1.1em;
+    color: var(--nac-text);
+  }
+
+  .nac-masthead-domain {
+    font-size: 0.8em;
+    color: var(--nac-text-muted);
+  }
+
+  .nac-masthead-link {
+    margin-left: auto;
+    color: var(--nac-primary);
+    text-decoration: none;
+    font-size: 0.85em;
+    padding: 6px 12px;
+    border: 1px solid var(--nac-primary);
+    border-radius: 6px;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .nac-masthead-link:hover {
+    background: var(--nac-primary);
+    color: white;
+  }
+
+  /* Featured Image */
+  .nac-featured-image {
+    margin: 0 -24px 24px -24px;
+    text-align: center;
+  }
+
+  .nac-featured-image img {
+    max-width: 100%;
+    max-height: 500px;
+    object-fit: contain;
+    border-radius: 0;
+  }
+
   /* Article Header */
   .nac-article-header {
     margin-bottom: 32px;
@@ -9720,10 +9851,19 @@ Enter option (1-4):`;
   }
   
   .nac-article-body img {
-    max-width: 100%;
-    height: auto;
+    max-width: 100% !important;
+    height: auto !important;
+    display: block;
+    margin: 1em auto;
     border-radius: 8px;
-    margin: 1.5em 0;
+  }
+
+  /* Don't hide images on error \u2014 show a broken image indicator instead */
+  .nac-article-body img[onerror] {
+    min-height: 40px;
+    min-width: 100px;
+    background: var(--nac-surface);
+    border: 1px dashed var(--nac-border);
   }
 
   /* Fix B: Don't enlarge small inline images (avatars, icons, emoji) */
