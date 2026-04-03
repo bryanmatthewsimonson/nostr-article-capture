@@ -13677,7 +13677,7 @@ Enter option (1-4):`;
               const postContainer = handler.findPostContainer ? handler.findPostContainer(textSel.container) : findVisualPostBoundary(textSel.container);
               console.log("[NAC] Post container found:", postContainer?.tagName, postContainer?.getAttribute("role"), "text length:", postContainer?.innerText?.length);
               console.log("[NAC] Calling handler.extract() with container");
-              article = await handler.extract(postContainer);
+              article = await handler.extract(postContainer, textSel.text);
               console.log("[NAC] Extract returned:", article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : "null");
               if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
                 console.log("[NAC] Overriding textContent with selection text (", textSel.text.length, "chars vs", article.textContent?.length, "chars)");
@@ -14171,6 +14171,42 @@ Enter option (1-4):`;
   });
 
   // src/platforms/facebook.js
+  function cleanContainerText(text) {
+    if (!text) return "";
+    const lines = text.split("\n");
+    const cleanLines = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed === "Facebook") continue;
+      if (trimmed === "Like") continue;
+      if (trimmed === "Comment") continue;
+      if (trimmed === "Share") continue;
+      if (trimmed === "Send") continue;
+      if (trimmed === "Copy link") continue;
+      if (trimmed === "More") continue;
+      if (trimmed === "Most relevant") continue;
+      if (trimmed === "Newest") continue;
+      if (trimmed === "All comments") continue;
+      if (trimmed === "Write a comment\u2026") continue;
+      if (trimmed === "Write a comment...") continue;
+      if (trimmed === "Write a public comment\u2026") continue;
+      if (trimmed === "See more") continue;
+      if (trimmed === "See less") continue;
+      if (trimmed === "View more comments") continue;
+      if (trimmed === "Hide") continue;
+      if (trimmed === "Report") continue;
+      if (trimmed === "Embed") continue;
+      if (trimmed === "Turn on notifications") continue;
+      if (trimmed === "Not now") continue;
+      if (/^.+'s Post$/i.test(trimmed)) continue;
+      if (/^\d+[hdwmy]$/.test(trimmed)) continue;
+      if (/^\d+[KkMm]?\s*(likes?|comments?|shares?|reactions?|views?)$/i.test(trimmed)) continue;
+      if (trimmed.length <= 2 && !/[a-zA-Z]/.test(trimmed)) continue;
+      cleanLines.push(trimmed);
+    }
+    return cleanLines.join("\n").trim();
+  }
   var FacebookHandler;
   var init_facebook = __esm({
     "src/platforms/facebook.js"() {
@@ -14186,35 +14222,44 @@ Enter option (1-4):`;
         },
         findPostContainer: (clickTarget) => {
           let el = clickTarget;
+          let bestCandidate = clickTarget;
           while (el && el !== document.body) {
             if (el.getAttribute("role") === "article") {
               console.log('[NAC Facebook] Post container found: role="article"', el.tagName);
               return el;
             }
-            if (el.tagName === "DIV" && el.offsetHeight > 150 && el.innerText.length > 50) {
-              console.log("[NAC Facebook] Post container found: large div", el.offsetHeight + "px,", el.innerText.length, "chars");
+            if (el.getAttribute("dir") === "auto" && el.innerText.length > 30) {
+              console.log('[NAC Facebook] Post container found: dir="auto" div', el.innerText.length, "chars");
               return el;
+            }
+            if (el.tagName === "DIV" && el.offsetHeight > 100 && el.innerText.length > 50) {
+              const text = el.innerText;
+              const fbCount = (text.match(/^Facebook$/gm) || []).length;
+              if (fbCount < 3) {
+                bestCandidate = el;
+              }
             }
             el = el.parentElement;
           }
-          console.log("[NAC Facebook] No post container found, using click target");
-          return clickTarget;
+          console.log("[NAC Facebook] Using best candidate container", bestCandidate.tagName, bestCandidate.innerText?.length, "chars");
+          return bestCandidate;
         },
-        extract: async (containerEl) => {
+        extract: async (containerEl, selectedText) => {
           try {
-            console.log("[NAC Facebook] extract() called, container:", containerEl?.tagName, containerEl?.getAttribute("role"));
+            console.log("[NAC Facebook] extract() called, container:", containerEl?.tagName, containerEl?.getAttribute("role"), "selectedText:", selectedText?.substring(0, 80));
             const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
             const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
             const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
             const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
             console.log("[NAC Facebook] OG tags:", { ogTitle: ogTitle.substring(0, 50), ogDesc: ogDesc.substring(0, 50), hasImage: !!ogImage });
-            let postText = "";
-            if (containerEl && containerEl.innerText) {
-              postText = containerEl.innerText.trim();
+            let postText = selectedText || "";
+            if (!postText && containerEl?.innerText) {
+              postText = cleanContainerText(containerEl.innerText);
+              console.log("[NAC Facebook] No selected text, using cleaned container text");
             }
             if (postText.length < 10) {
               postText = ogDesc || ogTitle || "";
-              console.log("[NAC Facebook] Container text too short, using OG data");
+              console.log("[NAC Facebook] Text too short, using OG data");
             }
             const images = [];
             if (containerEl) {
@@ -14248,7 +14293,14 @@ Enter option (1-4):`;
               contentHtml += "</div>";
             }
             contentHtml += "</div>";
-            const title = authorName ? `${authorName}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80) || ogTitle || "Facebook Post";
+            let titleText = postText;
+            const firstNewline = postText.indexOf("\n");
+            if (firstNewline > 10 && firstNewline < 200) {
+              titleText = postText.substring(0, firstNewline);
+            } else {
+              titleText = postText.substring(0, 80);
+            }
+            const title = authorName ? `${authorName}: "${titleText}${postText.length > titleText.length ? "..." : ""}"` : titleText + (postText.length > titleText.length ? "..." : "") || ogTitle || "Facebook Post";
             console.log("[NAC Facebook] Extract result:", {
               title: title.substring(0, 50),
               textLength: postText.length,

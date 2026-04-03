@@ -6,16 +6,55 @@ import { Utils } from '../utils.js';
  * Facebook containers include repeated "Facebook" nav text, UI buttons, etc.
  */
 function cleanContainerText(text) {
-    let cleaned = text;
-    // Remove repeated "Facebook" navigation text
-    cleaned = cleaned.replace(/(Facebook\n)+/g, '');
-    // Remove common UI elements
-    cleaned = cleaned.replace(/^(Like|Comment|Share|Send|Copy link|More|Write a comment|Most relevant|Newest|All comments)\n?/gm, '');
-    // Remove engagement counts
-    cleaned = cleaned.replace(/^\d+[KkMm]?\s*(likes?|comments?|shares?|reactions?|views?)\n?/gm, '');
-    // Remove timestamps that look like "2h" "3d" "1w" etc
-    cleaned = cleaned.replace(/^\d+[hdwmy]\n/gm, '');
-    return cleaned.trim();
+    if (!text) return '';
+
+    // Split into lines for line-by-line processing
+    const lines = text.split('\n');
+    const cleanLines = [];
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Skip navigation/UI lines
+        if (trimmed === 'Facebook') continue;
+        if (trimmed === 'Like') continue;
+        if (trimmed === 'Comment') continue;
+        if (trimmed === 'Share') continue;
+        if (trimmed === 'Send') continue;
+        if (trimmed === 'Copy link') continue;
+        if (trimmed === 'More') continue;
+        if (trimmed === 'Most relevant') continue;
+        if (trimmed === 'Newest') continue;
+        if (trimmed === 'All comments') continue;
+        if (trimmed === 'Write a comment…') continue;
+        if (trimmed === 'Write a comment...') continue;
+        if (trimmed === 'Write a public comment…') continue;
+        if (trimmed === 'See more') continue;
+        if (trimmed === 'See less') continue;
+        if (trimmed === 'View more comments') continue;
+        if (trimmed === 'Hide') continue;
+        if (trimmed === 'Report') continue;
+        if (trimmed === 'Embed') continue;
+        if (trimmed === 'Turn on notifications') continue;
+        if (trimmed === 'Not now') continue;
+
+        // Skip header patterns like "Author's Post"
+        if (/^.+'s Post$/i.test(trimmed)) continue;
+
+        // Skip relative timestamps (2h, 3d, 1w, etc.)
+        if (/^\d+[hdwmy]$/.test(trimmed)) continue;
+
+        // Skip engagement counts
+        if (/^\d+[KkMm]?\s*(likes?|comments?|shares?|reactions?|views?)$/i.test(trimmed)) continue;
+
+        // Skip very short lines that are probably UI (1-2 chars like emoji buttons)
+        if (trimmed.length <= 2 && !/[a-zA-Z]/.test(trimmed)) continue;
+
+        cleanLines.push(trimmed);
+    }
+
+    return cleanLines.join('\n').trim();
 }
 
 const FacebookHandler = {
@@ -29,22 +68,38 @@ const FacebookHandler = {
     },
 
     findPostContainer: (clickTarget) => {
-        // Simple: walk up to find the nearest large container
         let el = clickTarget;
+        let bestCandidate = clickTarget;
+
         while (el && el !== document.body) {
+            // Strong signal: role="article"
             if (el.getAttribute('role') === 'article') {
                 console.log('[NAC Facebook] Post container found: role="article"', el.tagName);
                 return el;
             }
-            // Any div larger than 150px that has substantial text
-            if (el.tagName === 'DIV' && el.offsetHeight > 150 && el.innerText.length > 50) {
-                console.log('[NAC Facebook] Post container found: large div', el.offsetHeight + 'px,', el.innerText.length, 'chars');
+
+            // A div with dir="auto" that has substantial text is likely the post text area
+            if (el.getAttribute('dir') === 'auto' && el.innerText.length > 30) {
+                console.log('[NAC Facebook] Post container found: dir="auto" div', el.innerText.length, 'chars');
                 return el;
             }
+
+            // Look for divs that contain text but NOT the "Facebook" navigation
+            if (el.tagName === 'DIV' && el.offsetHeight > 100 && el.innerText.length > 50) {
+                // Check if this div contains the "Facebook" navigation noise
+                const text = el.innerText;
+                const fbCount = (text.match(/^Facebook$/gm) || []).length;
+                if (fbCount < 3) {
+                    // This div doesn't have much navigation noise — good candidate
+                    bestCandidate = el;
+                }
+            }
+
             el = el.parentElement;
         }
-        console.log('[NAC Facebook] No post container found, using click target');
-        return clickTarget;
+
+        console.log('[NAC Facebook] Using best candidate container', bestCandidate.tagName, bestCandidate.innerText?.length, 'chars');
+        return bestCandidate;
     },
 
     extract: async (containerEl, selectedText) => {
@@ -115,9 +170,17 @@ const FacebookHandler = {
             }
             contentHtml += '</div>';
 
+            // Get first real sentence for title (not a short fragment)
+            let titleText = postText;
+            const firstNewline = postText.indexOf('\n');
+            if (firstNewline > 10 && firstNewline < 200) {
+                titleText = postText.substring(0, firstNewline);
+            } else {
+                titleText = postText.substring(0, 80);
+            }
             const title = authorName
-                ? `${authorName}: "${postText.substring(0, 60)}${postText.length > 60 ? '...' : ''}"`
-                : (postText.substring(0, 80) + (postText.length > 80 ? '...' : '')) || ogTitle || 'Facebook Post';
+                ? `${authorName}: "${titleText}${postText.length > titleText.length ? '...' : ''}"`
+                : (titleText + (postText.length > titleText.length ? '...' : '')) || ogTitle || 'Facebook Post';
 
             console.log('[NAC Facebook] Extract result:', {
                 title: title.substring(0, 50),
