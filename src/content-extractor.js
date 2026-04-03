@@ -520,6 +520,91 @@ export const ContentExtractor = {
           }
         });
 
+        // Handle Facebook post blocks
+        turndown.addRule('facebookPost', {
+          filter: function(node) {
+            return node.nodeName === 'DIV' && node.classList.contains('nac-facebook-post');
+          },
+          replacement: function(content, node) {
+            const authorName = node.querySelector('.nac-fb-author-name')?.textContent?.trim() || '';
+            const timestamp = node.querySelector('.nac-fb-timestamp')?.textContent?.trim() || '';
+            const postText = node.querySelector('.nac-fb-text')?.textContent?.trim() || '';
+
+            let md = '> 📘 **Facebook Post';
+            if (authorName) md += ` by ${authorName}`;
+            md += '**\n> \n';
+
+            if (postText) {
+              postText.split('\n').forEach(line => {
+                md += `> ${line}\n`;
+              });
+            }
+
+            if (timestamp) {
+              md += '> \n';
+              md += `> *${timestamp}*\n`;
+            }
+
+            // Include images
+            const images = node.querySelectorAll('.nac-fb-image');
+            images.forEach(img => {
+              const src = img.getAttribute('src') || '';
+              if (src) md += `> \n> ![Post image](${src})\n`;
+            });
+
+            // Include shared links
+            const links = node.querySelectorAll('.nac-fb-link');
+            links.forEach(link => {
+              const href = link.getAttribute('href') || '';
+              const text = link.textContent?.trim() || href;
+              if (href) md += `> \n> [${text}](${href})\n`;
+            });
+
+            return '\n' + md + '\n';
+          }
+        });
+
+        // Handle Instagram post blocks
+        turndown.addRule('instagramPost', {
+          filter: function(node) {
+            return node.nodeName === 'DIV' && node.classList.contains('nac-instagram-post');
+          },
+          replacement: function(content, node) {
+            const authorName = node.querySelector('.nac-ig-author-name')?.textContent?.trim() || '';
+            const timestamp = node.querySelector('.nac-ig-timestamp')?.textContent?.trim() || '';
+            const captionEl = node.querySelector('.nac-ig-caption');
+            let caption = captionEl?.textContent?.trim() || '';
+
+            let md = '> 📷 **Instagram Post';
+            if (authorName) md += ` by ${authorName}`;
+            md += '**\n> \n';
+
+            // Include images
+            const images = node.querySelectorAll('.nac-ig-image');
+            images.forEach(img => {
+              const src = img.getAttribute('src') || '';
+              if (src) md += `> ![Instagram media](${src})\n> \n`;
+            });
+
+            if (caption) {
+              // Remove the author name prefix if present (it's in a separate span)
+              if (authorName && caption.startsWith(authorName)) {
+                caption = caption.substring(authorName.length).trim();
+              }
+              caption.split('\n').forEach(line => {
+                md += `> ${line}\n`;
+              });
+            }
+
+            if (timestamp) {
+              md += '> \n';
+              md += `> *${timestamp}*\n`;
+            }
+
+            return '\n' + md + '\n';
+          }
+        });
+
       return turndown.turndown(html);
     } catch (e) {
       console.error('[NAC] Markdown conversion failed:', e);

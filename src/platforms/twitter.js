@@ -124,6 +124,12 @@ function extractTweet() {
 
         platform: 'twitter',
         contentType: 'social_post',
+        platformAccount: {
+            username: tweetData.authorHandle ? `@${tweetData.authorHandle}` : (tweetData.authorName || 'Unknown'),
+            profileUrl: tweetData.authorHandle ? `https://x.com/${tweetData.authorHandle}` : null,
+            avatarUrl: tweetData.avatarUrl || null,
+            platform: 'twitter'
+        },
         tweetMeta: {
             tweetId,
             authorHandle: tweetData.authorHandle || '',

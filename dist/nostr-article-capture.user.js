@@ -4446,6 +4446,82 @@
                 return "\n" + md + "\n";
               }
             });
+            turndown.addRule("facebookPost", {
+              filter: function(node) {
+                return node.nodeName === "DIV" && node.classList.contains("nac-facebook-post");
+              },
+              replacement: function(content, node) {
+                const authorName = node.querySelector(".nac-fb-author-name")?.textContent?.trim() || "";
+                const timestamp = node.querySelector(".nac-fb-timestamp")?.textContent?.trim() || "";
+                const postText = node.querySelector(".nac-fb-text")?.textContent?.trim() || "";
+                let md = "> \u{1F4D8} **Facebook Post";
+                if (authorName) md += ` by ${authorName}`;
+                md += "**\n> \n";
+                if (postText) {
+                  postText.split("\n").forEach((line) => {
+                    md += `> ${line}
+`;
+                  });
+                }
+                if (timestamp) {
+                  md += "> \n";
+                  md += `> *${timestamp}*
+`;
+                }
+                const images = node.querySelectorAll(".nac-fb-image");
+                images.forEach((img) => {
+                  const src = img.getAttribute("src") || "";
+                  if (src) md += `> 
+> ![Post image](${src})
+`;
+                });
+                const links = node.querySelectorAll(".nac-fb-link");
+                links.forEach((link) => {
+                  const href = link.getAttribute("href") || "";
+                  const text = link.textContent?.trim() || href;
+                  if (href) md += `> 
+> [${text}](${href})
+`;
+                });
+                return "\n" + md + "\n";
+              }
+            });
+            turndown.addRule("instagramPost", {
+              filter: function(node) {
+                return node.nodeName === "DIV" && node.classList.contains("nac-instagram-post");
+              },
+              replacement: function(content, node) {
+                const authorName = node.querySelector(".nac-ig-author-name")?.textContent?.trim() || "";
+                const timestamp = node.querySelector(".nac-ig-timestamp")?.textContent?.trim() || "";
+                const captionEl = node.querySelector(".nac-ig-caption");
+                let caption = captionEl?.textContent?.trim() || "";
+                let md = "> \u{1F4F7} **Instagram Post";
+                if (authorName) md += ` by ${authorName}`;
+                md += "**\n> \n";
+                const images = node.querySelectorAll(".nac-ig-image");
+                images.forEach((img) => {
+                  const src = img.getAttribute("src") || "";
+                  if (src) md += `> ![Instagram media](${src})
+> 
+`;
+                });
+                if (caption) {
+                  if (authorName && caption.startsWith(authorName)) {
+                    caption = caption.substring(authorName.length).trim();
+                  }
+                  caption.split("\n").forEach((line) => {
+                    md += `> ${line}
+`;
+                  });
+                }
+                if (timestamp) {
+                  md += "> \n";
+                  md += `> *${timestamp}*
+`;
+                }
+                return "\n" + md + "\n";
+              }
+            });
             return turndown.turndown(html);
           } catch (e) {
             console.error("[NAC] Markdown conversion failed:", e);
@@ -5278,7 +5354,7 @@ ${items}
       EventBuilder = {
         // Build NIP-23 article event (kind 30023)
         buildArticleEvent: async (article, entities, userPubkey, claims = []) => {
-          let markdownContent = article.content;
+          let markdownContent = article.content || "";
           if (markdownContent && markdownContent.includes("<")) {
             markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
           }
@@ -5370,9 +5446,6 @@ ${items}
             if (article.tweetMeta.authorHandle) tags.push(["author_handle", "@" + article.tweetMeta.authorHandle]);
             if (article.tweetMeta.isThread) tags.push(["thread", "true"]);
             if (article.tweetMeta.threadLength > 1) tags.push(["thread_length", String(article.tweetMeta.threadLength)]);
-          }
-          if (article.platform === "twitter" && article.keywords?.length) {
-            article.keywords.forEach((kw) => tags.push(["t", kw]));
           }
           if (article.engagement) {
             if (article.engagement.likes) tags.push(["engagement_likes", String(article.engagement.likes)]);
@@ -13267,6 +13340,12 @@ Enter option (1-4):`;
       publicationIcon: "https://abs.twimg.com/favicons/twitter.3.ico",
       platform: "twitter",
       contentType: "social_post",
+      platformAccount: {
+        username: tweetData.authorHandle ? `@${tweetData.authorHandle}` : tweetData.authorName || "Unknown",
+        profileUrl: tweetData.authorHandle ? `https://x.com/${tweetData.authorHandle}` : null,
+        avatarUrl: tweetData.avatarUrl || null,
+        platform: "twitter"
+      },
       tweetMeta: {
         tweetId,
         authorHandle: tweetData.authorHandle || "",
@@ -13430,6 +13509,28 @@ Enter option (1-4):`;
   });
 
   // src/platforms/facebook.js
+  function parseTimestampToUnix(timestamp) {
+    if (!timestamp) return Math.floor(Date.now() / 1e3);
+    if (typeof timestamp === "number") {
+      return timestamp > 4102444800 ? Math.floor(timestamp / 1e3) : timestamp;
+    }
+    const parsed = new Date(timestamp);
+    if (!isNaN(parsed.getTime())) {
+      return Math.floor(parsed.getTime() / 1e3);
+    }
+    const now = Date.now();
+    const relMatch = String(timestamp).match(/^(\d+)\s*(h|m|d|hour|minute|day|week|month)s?\s*(ago)?$/i);
+    if (relMatch) {
+      const amount = parseInt(relMatch[1]);
+      const unit = relMatch[2].toLowerCase();
+      const msMap = { h: 36e5, m: 6e4, d: 864e5, hour: 36e5, minute: 6e4, day: 864e5, week: 6048e5, month: 2592e6 };
+      const ms = msMap[unit] || 36e5;
+      return Math.floor((now - amount * ms) / 1e3);
+    }
+    if (/^yesterday$/i.test(timestamp)) return Math.floor((now - 864e5) / 1e3);
+    if (/^just now$/i.test(timestamp)) return Math.floor(now / 1e3);
+    return Math.floor(now / 1e3);
+  }
   function extractFromContainer(container) {
     const fiberData = getReactFiberData(container);
     if (fiberData && (fiberData.text || fiberData.authorName)) {
@@ -13508,7 +13609,7 @@ Enter option (1-4):`;
       url: fiberData.url || window.location.href,
       domain: "facebook.com",
       siteName: "Facebook",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -13696,7 +13797,7 @@ Enter option (1-4):`;
       url: window.location.href,
       domain: "facebook.com",
       siteName: "Facebook",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -13736,7 +13837,7 @@ Enter option (1-4):`;
       url: window.location.href,
       domain: "facebook.com",
       siteName: "Facebook",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -13999,6 +14100,28 @@ Enter option (1-4):`;
   });
 
   // src/platforms/instagram.js
+  function parseTimestampToUnix2(timestamp) {
+    if (!timestamp) return Math.floor(Date.now() / 1e3);
+    if (typeof timestamp === "number") {
+      return timestamp > 4102444800 ? Math.floor(timestamp / 1e3) : timestamp;
+    }
+    const parsed = new Date(timestamp);
+    if (!isNaN(parsed.getTime())) {
+      return Math.floor(parsed.getTime() / 1e3);
+    }
+    const now = Date.now();
+    const relMatch = String(timestamp).match(/^(\d+)\s*(h|m|d|hour|minute|day|week|month)s?\s*(ago)?$/i);
+    if (relMatch) {
+      const amount = parseInt(relMatch[1]);
+      const unit = relMatch[2].toLowerCase();
+      const msMap = { h: 36e5, m: 6e4, d: 864e5, hour: 36e5, minute: 6e4, day: 864e5, week: 6048e5, month: 2592e6 };
+      const ms = msMap[unit] || 36e5;
+      return Math.floor((now - amount * ms) / 1e3);
+    }
+    if (/^yesterday$/i.test(timestamp)) return Math.floor((now - 864e5) / 1e3);
+    if (/^just now$/i.test(timestamp)) return Math.floor(now / 1e3);
+    return Math.floor(now / 1e3);
+  }
   function extractFromContainer2(container) {
     const fiberData = getReactFiberData2(container);
     if (fiberData && (fiberData.text || fiberData.authorName)) {
@@ -14092,7 +14215,7 @@ Enter option (1-4):`;
       url: fiberData.url || ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix2(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -14338,7 +14461,7 @@ Enter option (1-4):`;
       url: ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix2(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -14379,7 +14502,7 @@ Enter option (1-4):`;
       url: ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1e3) : Math.floor(Date.now() / 1e3),
+      publishedAt: parseTimestampToUnix2(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),

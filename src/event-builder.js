@@ -6,7 +6,7 @@ export const EventBuilder = {
   // Build NIP-23 article event (kind 30023)
   buildArticleEvent: async (article, entities, userPubkey, claims = []) => {
     // Convert content to markdown, preserving formatting and images
-    let markdownContent = article.content;
+    let markdownContent = article.content || '';
     if (markdownContent && markdownContent.includes('<')) {
       markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
     }
@@ -134,10 +134,6 @@ export const EventBuilder = {
       if (article.tweetMeta.authorHandle) tags.push(['author_handle', '@' + article.tweetMeta.authorHandle]);
       if (article.tweetMeta.isThread) tags.push(['thread', 'true']);
       if (article.tweetMeta.threadLength > 1) tags.push(['thread_length', String(article.tweetMeta.threadLength)]);
-    }
-    // Hashtags as topic tags
-    if (article.platform === 'twitter' && article.keywords?.length) {
-      article.keywords.forEach(kw => tags.push(['t', kw]));
     }
 
     // Add engagement metrics tags (Phase 4)

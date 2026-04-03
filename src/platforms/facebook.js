@@ -97,6 +97,36 @@ const FacebookHandler = {
     })
 };
 
+// --- Safe timestamp parser (handles relative times like "2h", "Yesterday") ---
+
+function parseTimestampToUnix(timestamp) {
+    if (!timestamp) return Math.floor(Date.now() / 1000);
+    // If already a number (unix seconds), use it
+    if (typeof timestamp === 'number') {
+        // Sanity check: if it looks like milliseconds (>year 2100 in seconds), convert
+        return timestamp > 4102444800 ? Math.floor(timestamp / 1000) : timestamp;
+    }
+    // Try standard date parsing first
+    const parsed = new Date(timestamp);
+    if (!isNaN(parsed.getTime())) {
+        return Math.floor(parsed.getTime() / 1000);
+    }
+    // Handle relative time strings
+    const now = Date.now();
+    const relMatch = String(timestamp).match(/^(\d+)\s*(h|m|d|hour|minute|day|week|month)s?\s*(ago)?$/i);
+    if (relMatch) {
+        const amount = parseInt(relMatch[1]);
+        const unit = relMatch[2].toLowerCase();
+        const msMap = { h: 3600000, m: 60000, d: 86400000, hour: 3600000, minute: 60000, day: 86400000, week: 604800000, month: 2592000000 };
+        const ms = msMap[unit] || 3600000;
+        return Math.floor((now - amount * ms) / 1000);
+    }
+    if (/^yesterday$/i.test(timestamp)) return Math.floor((now - 86400000) / 1000);
+    if (/^just now$/i.test(timestamp)) return Math.floor(now / 1000);
+    // Fallback to current time
+    return Math.floor(now / 1000);
+}
+
 // ============================================================
 // Anti-obfuscation extraction strategies (cascading fallbacks)
 // ============================================================
@@ -212,7 +242,7 @@ function buildArticleFromFiberData(fiberData, container) {
         url: fiberData.url || window.location.href,
         domain: 'facebook.com',
         siteName: 'Facebook',
-        publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000),
+        publishedAt: parseTimestampToUnix(timestamp),
         content: contentHtml,
         textContent: postText,
         excerpt: postText.substring(0, 200),
@@ -485,7 +515,7 @@ function buildArticleFromRawText(container) {
         url: window.location.href,
         domain: 'facebook.com',
         siteName: 'Facebook',
-        publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000),
+        publishedAt: parseTimestampToUnix(timestamp),
         content: contentHtml,
         textContent: postText,
         excerpt: postText.substring(0, 200),
@@ -533,7 +563,7 @@ function buildArticleFromExtractedData(data, container) {
         url: window.location.href,
         domain: 'facebook.com',
         siteName: 'Facebook',
-        publishedAt: timestamp ? Math.floor(new Date(timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000),
+        publishedAt: parseTimestampToUnix(timestamp),
         content: contentHtml,
         textContent: postText,
         excerpt: postText.substring(0, 200),
