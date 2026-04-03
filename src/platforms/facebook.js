@@ -1,6 +1,23 @@
 import { PlatformHandler } from '../platform-handler.js';
 import { Utils } from '../utils.js';
 
+/**
+ * Strip navigation noise from Facebook container innerText.
+ * Facebook containers include repeated "Facebook" nav text, UI buttons, etc.
+ */
+function cleanContainerText(text) {
+    let cleaned = text;
+    // Remove repeated "Facebook" navigation text
+    cleaned = cleaned.replace(/(Facebook\n)+/g, '');
+    // Remove common UI elements
+    cleaned = cleaned.replace(/^(Like|Comment|Share|Send|Copy link|More|Write a comment|Most relevant|Newest|All comments)\n?/gm, '');
+    // Remove engagement counts
+    cleaned = cleaned.replace(/^\d+[KkMm]?\s*(likes?|comments?|shares?|reactions?|views?)\n?/gm, '');
+    // Remove timestamps that look like "2h" "3d" "1w" etc
+    cleaned = cleaned.replace(/^\d+[hdwmy]\n/gm, '');
+    return cleaned.trim();
+}
+
 const FacebookHandler = {
     type: 'social_post',
     platform: 'facebook',
@@ -30,9 +47,9 @@ const FacebookHandler = {
         return clickTarget;
     },
 
-    extract: async (containerEl) => {
+    extract: async (containerEl, selectedText) => {
         try {
-            console.log('[NAC Facebook] extract() called, container:', containerEl?.tagName, containerEl?.getAttribute('role'));
+            console.log('[NAC Facebook] extract() called, container:', containerEl?.tagName, containerEl?.getAttribute('role'), 'selectedText:', selectedText?.substring(0, 80));
 
             // Get OG tags — these ALWAYS work on Facebook
             const ogTitle = document.querySelector('meta[property="og:title"]')?.content || '';
@@ -42,16 +59,19 @@ const FacebookHandler = {
 
             console.log('[NAC Facebook] OG tags:', { ogTitle: ogTitle.substring(0, 50), ogDesc: ogDesc.substring(0, 50), hasImage: !!ogImage });
 
-            // Get text from container (or selected text passed via init.js)
-            let postText = '';
-            if (containerEl && containerEl.innerText) {
-                postText = containerEl.innerText.trim();
+            // Use selected text as primary content (most reliable — user highlighted exactly what they want)
+            let postText = selectedText || '';
+
+            // Only fall back to container text if no selection
+            if (!postText && containerEl?.innerText) {
+                postText = cleanContainerText(containerEl.innerText);
+                console.log('[NAC Facebook] No selected text, using cleaned container text');
             }
 
-            // If container text is too short, use OG description
+            // If still too short, use OG description
             if (postText.length < 10) {
                 postText = ogDesc || ogTitle || '';
-                console.log('[NAC Facebook] Container text too short, using OG data');
+                console.log('[NAC Facebook] Text too short, using OG data');
             }
 
             // Try to find images in the container
@@ -97,7 +117,7 @@ const FacebookHandler = {
 
             const title = authorName
                 ? `${authorName}: "${postText.substring(0, 60)}${postText.length > 60 ? '...' : ''}"`
-                : postText.substring(0, 80) || ogTitle || 'Facebook Post';
+                : (postText.substring(0, 80) + (postText.length > 80 ? '...' : '')) || ogTitle || 'Facebook Post';
 
             console.log('[NAC Facebook] Extract result:', {
                 title: title.substring(0, 50),

@@ -328,7 +328,7 @@ function createFAB() {
           
           // Pass the selected text as a hint to the extractor
           console.log('[NAC] Calling handler.extract() with container');
-          article = await handler.extract(postContainer);
+          article = await handler.extract(postContainer, textSel.text);
           console.log('[NAC] Extract returned:', article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : 'null');
           // If the handler didn't capture text well, use the selection text
           if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
