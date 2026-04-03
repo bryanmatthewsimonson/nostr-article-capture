@@ -1163,6 +1163,21 @@ export const ReaderView = {
         }
       }
       html += '</div>';
+
+      // If ALL relays failed and CSP is blocking, show a clear explanation
+      if (successCount === 0 && RelayClient.isCSPBlocked()) {
+        const cspMsg = `<div class="nac-error" style="margin-top: 12px; padding: 12px; border-radius: 8px; background: #2d1b1b; border: 1px solid #5a2d2d;">
+          <strong>⚠ Publishing failed — this site's security policy blocks relay connections.</strong><br>
+          <span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 6px;">
+            Copy the article URL and publish from a different page, or use Settings → Export Entities to back up your data.
+          </span>
+        </div>`;
+        statusEl.innerHTML = html + cspMsg;
+        btn.textContent = 'Blocked by Site CSP';
+        btn.disabled = false;
+        Utils.showToast('Relay connections blocked by site security policy', 'error');
+        return;
+      }
       
       // Load entity registry for claim enrichment and relationship publishing
       const entityRegistry = await Storage.entities.getAll();
@@ -1401,10 +1416,21 @@ export const ReaderView = {
       }
     } catch (e) {
       console.error('[NAC] Publish error:', e);
-      statusEl.innerHTML = `<div class="nac-error">Error: ${e.message}</div>`;
-      btn.textContent = 'Publish Failed';
+      if (RelayClient.isCSPBlocked()) {
+        statusEl.innerHTML = `<div class="nac-error" style="padding: 12px; border-radius: 8px; background: #2d1b1b; border: 1px solid #5a2d2d;">
+          <strong>⚠ Publishing failed — this site's security policy blocks relay connections.</strong><br>
+          <span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 6px;">
+            Copy the article URL and publish from a different page, or use Settings → Export Entities to back up your data.
+          </span>
+        </div>`;
+        btn.textContent = 'Blocked by Site CSP';
+        Utils.showToast('Relay connections blocked by site security policy', 'error');
+      } else {
+        statusEl.innerHTML = `<div class="nac-error">Error: ${e.message}</div>`;
+        btn.textContent = 'Publish Failed';
+        Utils.showToast('Failed to publish article', 'error');
+      }
       btn.disabled = false;
-      Utils.showToast('Failed to publish article', 'error');
     }
   },
 

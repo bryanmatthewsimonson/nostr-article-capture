@@ -5182,6 +5182,7 @@ ${items}
       init_crypto();
       RelayClient = {
         connections: /* @__PURE__ */ new Map(),
+        _cspBlocked: false,
         // Connect to relay
         connect: (url) => {
           const attemptConnect = () => {
@@ -5208,17 +5209,31 @@ ${items}
                   RelayClient.connections.delete(url);
                 };
               } catch (e) {
-                reject(e);
+                const msg = (e.message || "").toLowerCase();
+                const isCSP = msg.includes("content security policy") || msg.includes("connect-src") || msg.includes("refused to connect") || e.name === "SecurityError";
+                if (isCSP) {
+                  RelayClient._cspBlocked = true;
+                  console.warn("[NAC Relay] WebSocket blocked (CSP):", url, e.message);
+                  reject(new Error(`Connection to ${url} blocked \u2014 site CSP may prevent relay connections`));
+                } else {
+                  reject(e);
+                }
               }
             });
           };
           const MAX_RETRIES = 3;
           const BASE_DELAY = 1e3;
           return (async () => {
+            if (RelayClient._cspBlocked) {
+              throw new Error(`Connection to ${url} blocked \u2014 site CSP prevents relay connections on this page`);
+            }
             for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
               try {
                 return await attemptConnect();
               } catch (err) {
+                if (RelayClient._cspBlocked) {
+                  throw new Error(`Connection to ${url} blocked \u2014 site CSP prevents relay connections on this page`);
+                }
                 if (attempt < MAX_RETRIES) {
                   const delay = BASE_DELAY * Math.pow(2, attempt);
                   console.log(`[NAC Relay] Connection to ${url} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms...`);
@@ -5285,6 +5300,8 @@ ${items}
           const ws = RelayClient.connections.get(url);
           return ws && ws.readyState === WebSocket.OPEN;
         },
+        // Check if CSP is blocking WebSocket connections on this page
+        isCSPBlocked: () => RelayClient._cspBlocked,
         // Subscribe to relay events (REQ/EOSE pattern)
         // options.onProgress(info) — optional callback for connection-level progress
         subscribe: async (filter, relayUrls, options = {}) => {
@@ -5294,8 +5311,16 @@ ${items}
           });
           const events = [];
           const subId = Crypto.bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
-          const connectionStats = { attempted: 0, connected: 0, failed: 0, errors: [] };
+          const connectionStats = { attempted: 0, connected: 0, failed: 0, errors: [], cspBlocked: false };
           for (const url of relayUrls) {
+            if (RelayClient._cspBlocked) {
+              connectionStats.cspBlocked = true;
+              connectionStats.failed++;
+              connectionStats.attempted++;
+              connectionStats.errors.push({ url, error: "CSP blocks relay connections on this page" });
+              onProgress({ phase: "relay_error", url, error: "CSP blocks relay connections on this page", ...connectionStats });
+              continue;
+            }
             connectionStats.attempted++;
             onProgress({ phase: "connecting", url, ...connectionStats });
             try {
@@ -5335,6 +5360,9 @@ ${items}
               connectionStats.errors.push({ url, error: errMsg });
               console.error("[NAC RelayClient] Subscribe error:", url, e);
               onProgress({ phase: "relay_error", url, error: errMsg, ...connectionStats });
+              if (RelayClient._cspBlocked) {
+                connectionStats.cspBlocked = true;
+              }
             }
           }
           events._connectionStats = connectionStats;
@@ -7920,6 +7948,19 @@ ${eventJson}`;
               }
             }
             html += "</div>";
+            if (successCount === 0 && RelayClient.isCSPBlocked()) {
+              const cspMsg = `<div class="nac-error" style="margin-top: 12px; padding: 12px; border-radius: 8px; background: #2d1b1b; border: 1px solid #5a2d2d;">
+          <strong>\u26A0 Publishing failed \u2014 this site's security policy blocks relay connections.</strong><br>
+          <span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 6px;">
+            Copy the article URL and publish from a different page, or use Settings \u2192 Export Entities to back up your data.
+          </span>
+        </div>`;
+              statusEl.innerHTML = html + cspMsg;
+              btn.textContent = "Blocked by Site CSP";
+              btn.disabled = false;
+              Utils.showToast("Relay connections blocked by site security policy", "error");
+              return;
+            }
             const entityRegistry = await Storage.entities.getAll();
             const claims = ReaderView.claims || [];
             let claimSuccessCount = 0;
@@ -8118,10 +8159,21 @@ ${eventJson}`;
             }
           } catch (e) {
             console.error("[NAC] Publish error:", e);
-            statusEl.innerHTML = `<div class="nac-error">Error: ${e.message}</div>`;
-            btn.textContent = "Publish Failed";
+            if (RelayClient.isCSPBlocked()) {
+              statusEl.innerHTML = `<div class="nac-error" style="padding: 12px; border-radius: 8px; background: #2d1b1b; border: 1px solid #5a2d2d;">
+          <strong>\u26A0 Publishing failed \u2014 this site's security policy blocks relay connections.</strong><br>
+          <span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 6px;">
+            Copy the article URL and publish from a different page, or use Settings \u2192 Export Entities to back up your data.
+          </span>
+        </div>`;
+              btn.textContent = "Blocked by Site CSP";
+              Utils.showToast("Relay connections blocked by site security policy", "error");
+            } else {
+              statusEl.innerHTML = `<div class="nac-error">Error: ${e.message}</div>`;
+              btn.textContent = "Publish Failed";
+              Utils.showToast("Failed to publish article", "error");
+            }
             btn.disabled = false;
-            Utils.showToast("Failed to publish article", "error");
           }
         },
         // Hide settings panel

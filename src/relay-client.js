@@ -2,6 +2,7 @@ import { Crypto } from './crypto.js';
 
 export const RelayClient = {
   connections: new Map(),
+  _cspBlocked: false,
 
   // Connect to relay
   connect: (url) => {
@@ -34,20 +35,42 @@ export const RelayClient = {
             RelayClient.connections.delete(url);
           };
         } catch (e) {
-          reject(e);
+          // CSP or security policy blocks WebSocket creation synchronously
+          const msg = (e.message || '').toLowerCase();
+          const isCSP = msg.includes('content security policy') ||
+                        msg.includes('connect-src') ||
+                        msg.includes('refused to connect') ||
+                        e.name === 'SecurityError';
+          if (isCSP) {
+            RelayClient._cspBlocked = true;
+            console.warn('[NAC Relay] WebSocket blocked (CSP):', url, e.message);
+            reject(new Error(`Connection to ${url} blocked — site CSP may prevent relay connections`));
+          } else {
+            reject(e);
+          }
         }
       });
     };
 
     // Retry with exponential backoff: 1s → 2s → 4s
+    // Skip retries entirely if CSP is blocking connections
     const MAX_RETRIES = 3;
     const BASE_DELAY = 1000;
 
     return (async () => {
+      // If we already know CSP is blocking, fail fast
+      if (RelayClient._cspBlocked) {
+        throw new Error(`Connection to ${url} blocked — site CSP prevents relay connections on this page`);
+      }
+
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         try {
           return await attemptConnect();
         } catch (err) {
+          // If CSP was detected on this attempt, don't retry — it will never work
+          if (RelayClient._cspBlocked) {
+            throw new Error(`Connection to ${url} blocked — site CSP prevents relay connections on this page`);
+          }
           if (attempt < MAX_RETRIES) {
             const delay = BASE_DELAY * Math.pow(2, attempt);
             console.log(`[NAC Relay] Connection to ${url} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms...`);
@@ -130,6 +153,9 @@ export const RelayClient = {
     return ws && ws.readyState === WebSocket.OPEN;
   },
 
+  // Check if CSP is blocking WebSocket connections on this page
+  isCSPBlocked: () => RelayClient._cspBlocked,
+
   // Subscribe to relay events (REQ/EOSE pattern)
   // options.onProgress(info) — optional callback for connection-level progress
   subscribe: async (filter, relayUrls, options = {}) => {
@@ -138,9 +164,19 @@ export const RelayClient = {
     const onProgress = options.onProgress || (() => {});
     const events = [];
     const subId = Crypto.bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
-    const connectionStats = { attempted: 0, connected: 0, failed: 0, errors: [] };
+    const connectionStats = { attempted: 0, connected: 0, failed: 0, errors: [], cspBlocked: false };
 
     for (const url of relayUrls) {
+      // If CSP is blocking, skip remaining relays immediately
+      if (RelayClient._cspBlocked) {
+        connectionStats.cspBlocked = true;
+        connectionStats.failed++;
+        connectionStats.attempted++;
+        connectionStats.errors.push({ url, error: 'CSP blocks relay connections on this page' });
+        onProgress({ phase: 'relay_error', url, error: 'CSP blocks relay connections on this page', ...connectionStats });
+        continue;
+      }
+
       connectionStats.attempted++;
       onProgress({ phase: 'connecting', url, ...connectionStats });
       try {
@@ -180,6 +216,11 @@ export const RelayClient = {
         connectionStats.errors.push({ url, error: errMsg });
         console.error('[NAC RelayClient] Subscribe error:', url, e);
         onProgress({ phase: 'relay_error', url, error: errMsg, ...connectionStats });
+
+        // If CSP was just detected, flag it on stats
+        if (RelayClient._cspBlocked) {
+          connectionStats.cspBlocked = true;
+        }
       }
     }
     // Attach connection stats to the returned array for caller inspection
