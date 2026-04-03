@@ -1,5 +1,6 @@
 import { PlatformHandler } from '../platform-handler.js';
 import { Utils } from '../utils.js';
+import { APIInterceptor } from '../api-interceptor.js';
 
 const FacebookHandler = {
     type: 'social_post',
@@ -54,7 +55,22 @@ const FacebookHandler = {
     },
 
     extractComments: async (articleUrl) => {
-        // Try to find comments in the current view
+        // Try API-cached comments first (structured data from GraphQL)
+        const cachedComments = APIInterceptor.getCachedComments();
+        if (cachedComments.length > 0) {
+            return cachedComments.map(c => ({
+                authorName: c.author || 'Facebook User',
+                text: c.text,
+                timestamp: c.timestamp ? new Date(c.timestamp * 1000).toISOString() : null,
+                avatarUrl: c.authorAvatar || null,
+                profileUrl: c.authorUrl || null,
+                likes: c.likes || 0,
+                platform: 'facebook',
+                sourceUrl: articleUrl
+            }));
+        }
+
+        // Fallback: Try to find comments in the current view DOM
         try {
             const comments = [];
             // Facebook comments are often in [role="article"] nested under the main post
@@ -132,6 +148,13 @@ function parseTimestampToUnix(timestamp) {
 // ============================================================
 
 function extractFromContainer(container) {
+    // Strategy 0: Use intercepted API data (most reliable, cleanest)
+    const apiData = APIInterceptor.getBestPostData();
+    if (apiData) {
+        console.log('[NAC Facebook] Extracted via API interception');
+        return buildArticleFromAPIData(apiData, container);
+    }
+
     // Strategy 1: Try React fiber data (fastest, most data-rich)
     const fiberData = getReactFiberData(container);
     if (fiberData && (fiberData.text || fiberData.authorName)) {
@@ -802,6 +825,56 @@ function buildFacebookStyledContent(text, author, timestamp, images, links) {
 
     html += '</div>';
     return html;
+}
+
+// --- Strategy 0: Build article from API-intercepted data ---
+
+function buildArticleFromAPIData(data, container) {
+    const postText = data.message || '';
+    const author = {
+        name: data.author || '',
+        profileUrl: data.authorUrl || null,
+        avatarUrl: data.authorAvatar || null
+    };
+    const timestamp = data.timestamp ? new Date(data.timestamp * 1000).toISOString() : null;
+    const images = data.images || [];
+
+    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, []);
+
+    const title = author.name
+        ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? '...' : ''}"`
+        : postText.substring(0, 80);
+
+    return {
+        title,
+        byline: author.name || 'Facebook User',
+        url: data.url || window.location.href,
+        domain: 'facebook.com',
+        siteName: 'Facebook',
+        publishedAt: data.timestamp || Math.floor(Date.now() / 1000),
+        content: contentHtml,
+        textContent: postText,
+        excerpt: postText.substring(0, 200),
+        featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || '',
+        publicationIcon: 'https://www.facebook.com/favicon.ico',
+        platform: 'facebook',
+        contentType: 'social_post',
+        platformAccount: {
+            username: author.name || 'Unknown',
+            profileUrl: author.profileUrl || null,
+            avatarUrl: author.avatarUrl || null,
+            platform: 'facebook'
+        },
+        engagement: data.engagement || { likes: 0, comments: 0, shares: 0, views: 0 },
+        wordCount: postText.split(/\s+/).filter(w => w).length,
+        readingTimeMinutes: 1,
+        structuredData: { type: 'SocialMediaPosting' },
+        keywords: extractHashtags(postText),
+        language: document.documentElement.lang || 'en',
+        isPaywalled: false,
+        section: null,
+        dateModified: null
+    };
 }
 
 // Register

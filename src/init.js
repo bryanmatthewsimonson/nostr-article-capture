@@ -6,6 +6,7 @@ import { ContentDetector } from './content-detector.js';
 import { PlatformHandler } from './platform-handler.js';
 import { ReaderView } from './reader-view.js';
 import { EntityMigration } from './entity-migration.js';
+import { APIInterceptor } from './api-interceptor.js';
 import { STYLES } from './styles.js';
 
 /**
@@ -394,6 +395,13 @@ async function init() {
       await EntityMigration.migrateAliasesToEntities();
     } catch (e) {
       console.error('[NAC] Entity migration failed:', e);
+    }
+    
+    // Start API interception early for Facebook/Instagram (before FAB creation)
+    // This hooks fetch/XHR to capture structured data from Meta's GraphQL APIs
+    const earlyDetection = ContentDetector.detect();
+    if (earlyDetection.platform === 'facebook' || earlyDetection.platform === 'instagram') {
+      APIInterceptor.start(earlyDetection.platform);
     }
     
     // Add styles
