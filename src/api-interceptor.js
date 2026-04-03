@@ -4,7 +4,25 @@
  * 
  * This runs from page load, accumulating data in a cache.
  * Platform handlers query the cache when the user clicks the FAB.
+ * 
+ * Enhanced with:
+ * - Request body parsing for GraphQL operation names (fb_api_req_friendly_name, doc_id)
+ * - Global data store probing (Relay Store, _sharedData, LD+JSON, webpack)
+ * - Facebook module registry access via ModuleHook
  */
+import { ModuleHook } from './module-hook.js';
+
+/**
+ * Convert FormData to a URL-encoded string for body parsing.
+ */
+function formDataToString(formData) {
+    const parts = [];
+    for (const [key, value] of formData.entries()) {
+        parts.push(`${key}=${value}`);
+    }
+    return parts.join('&');
+}
+
 export const APIInterceptor = {
     _cache: [],           // Array of captured API response data objects
     _active: false,       // Whether interception is active
@@ -27,6 +45,13 @@ export const APIInterceptor = {
         
         // Hook XMLHttpRequest
         APIInterceptor._hookXHR(platform);
+        
+        // Probe global data stores on initialization
+        try {
+            APIInterceptor.probeGlobalStores(platform);
+        } catch(e) {
+            console.log('[NAC API] Initial store probe failed:', e.message);
+        }
     },
     
     /**
@@ -56,8 +81,23 @@ export const APIInterceptor = {
     /**
      * Get the most relevant post data from the cache.
      * Looks for the most recent/largest post-like data object.
+     * Re-probes global stores if cache is empty.
      */
-    getBestPostData: () => {
+    getBestPostData: (platform) => {
+        // Re-probe if cache is empty — data may have loaded since init
+        if (APIInterceptor._cache.filter(d => d._type === 'post' || d._type === 'media').length === 0) {
+            try {
+                const probePlatform = platform || 
+                    (window.location.hostname.includes('instagram') ? 'instagram' : 
+                     window.location.hostname.includes('facebook') ? 'facebook' : '');
+                if (probePlatform) {
+                    APIInterceptor.probeGlobalStores(probePlatform);
+                }
+            } catch(e) {
+                console.log('[NAC API] Re-probe failed:', e.message);
+            }
+        }
+        
         // Sort by relevance: prefer objects with message text, author, images
         const scored = APIInterceptor._cache
             .filter(d => d._type === 'post' || d._type === 'media')
@@ -79,33 +119,55 @@ export const APIInterceptor = {
     
     /**
      * Hook the global fetch() function.
+     * Enhanced: parses request body for GraphQL operation metadata.
      */
     _hookFetch: (platform) => {
         const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
         APIInterceptor._originalFetch = win.fetch;
         
         win.fetch = async function(...args) {
-            const response = await APIInterceptor._originalFetch.apply(this, args);
+            let requestInfo = { url: '', operationName: '', docId: '', variables: null };
             
             try {
-                const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+                const [input, init] = args;
+                requestInfo.url = typeof input === 'string' ? input : input?.url || '';
                 
-                // Only intercept Meta API calls
-                if (APIInterceptor._isMetaAPI(url, platform)) {
-                    // Clone the response so we can read it without consuming it
-                    const clone = response.clone();
+                // Parse POST body for GraphQL operation metadata
+                if (init?.body && APIInterceptor._isMetaAPI(requestInfo.url, platform)) {
+                    const bodyStr = typeof init.body === 'string' ? init.body : 
+                                   init.body instanceof URLSearchParams ? init.body.toString() :
+                                   init.body instanceof FormData ? formDataToString(init.body) : '';
                     
-                    // Read and parse in background (don't block the original caller)
-                    clone.text().then(text => {
+                    if (bodyStr) {
+                        // Extract operation name (URL-encoded or JSON format)
+                        const friendlyName = bodyStr.match(/fb_api_req_friendly_name=([^&]+)/)?.[1] || 
+                                            bodyStr.match(/"fb_api_req_friendly_name":"([^"]+)"/)?.[1];
+                        const docId = bodyStr.match(/doc_id=([^&]+)/)?.[1] || 
+                                     bodyStr.match(/"doc_id":"([^"]+)"/)?.[1];
+                        const opName = bodyStr.match(/"operationName":"([^"]+)"/)?.[1];
+                        
+                        requestInfo.operationName = friendlyName || opName || '';
+                        requestInfo.docId = docId || '';
+                        
+                        // Try to parse variables
                         try {
-                            APIInterceptor._processResponse(text, url, platform);
-                        } catch(e) {
-                            // Silently ignore parse errors
-                        }
-                    }).catch(() => {});
+                            const varsMatch = bodyStr.match(/variables=([^&]+)/);
+                            if (varsMatch) requestInfo.variables = JSON.parse(decodeURIComponent(varsMatch[1]));
+                        } catch(e) {}
+                    }
                 }
-            } catch(e) {
-                // Never interfere with the original request
+            } catch(e) {}
+            
+            const response = await APIInterceptor._originalFetch.apply(this, args);
+            
+            // Pass requestInfo to the response processor
+            if (APIInterceptor._isMetaAPI(requestInfo.url, platform)) {
+                const clone = response.clone();
+                clone.text().then(text => {
+                    try {
+                        APIInterceptor._processResponse(text, requestInfo.url, platform, requestInfo);
+                    } catch(e) {}
+                }).catch(() => {});
             }
             
             return response;
@@ -173,8 +235,9 @@ export const APIInterceptor = {
     
     /**
      * Process an API response and extract relevant data.
+     * Enhanced: accepts requestInfo with operation name and doc_id.
      */
-    _processResponse: (text, url, platform) => {
+    _processResponse: (text, url, platform, requestInfo = {}) => {
         if (!text) return;
         
         // Facebook/Instagram sometimes return multiple JSON objects separated by newlines
@@ -183,7 +246,7 @@ export const APIInterceptor = {
         for (const block of jsonBlocks) {
             try {
                 const json = JSON.parse(block);
-                APIInterceptor._extractFromJSON(json, platform, 0);
+                APIInterceptor._extractFromJSON(json, platform, 0, requestInfo);
             } catch(e) {
                 // Not valid JSON — skip
             }
@@ -198,8 +261,9 @@ export const APIInterceptor = {
     /**
      * Recursively extract post/comment data from a JSON structure.
      * Meta's GraphQL responses have deeply nested structures.
+     * Enhanced: tags extracted items with _queryName and _docId from requestInfo.
      */
-    _extractFromJSON: (obj, platform, depth) => {
+    _extractFromJSON: (obj, platform, depth, requestInfo = {}) => {
         if (!obj || typeof obj !== 'object' || depth > 15) return;
         
         // --- Facebook GraphQL patterns ---
@@ -210,6 +274,8 @@ export const APIInterceptor = {
             if (post) {
                 post._type = 'post';
                 post._platform = platform;
+                post._queryName = requestInfo?.operationName || '';
+                post._docId = requestInfo?.docId || '';
                 APIInterceptor._cache.push(post);
                 console.log('[NAC API] Cached FB post:', post.message?.substring(0, 60));
             }
@@ -221,6 +287,8 @@ export const APIInterceptor = {
             if (comment) {
                 comment._type = 'comment';
                 comment._platform = platform;
+                comment._queryName = requestInfo?.operationName || '';
+                comment._docId = requestInfo?.docId || '';
                 APIInterceptor._cache.push(comment);
             }
         }
@@ -234,6 +302,8 @@ export const APIInterceptor = {
             if (media) {
                 media._type = 'media';
                 media._platform = platform;
+                media._queryName = requestInfo?.operationName || '';
+                media._docId = requestInfo?.docId || '';
                 APIInterceptor._cache.push(media);
                 console.log('[NAC API] Cached IG media:', media.message?.substring(0, 60));
             }
@@ -245,6 +315,8 @@ export const APIInterceptor = {
             if (post) {
                 post._type = 'post';
                 post._platform = platform;
+                post._queryName = requestInfo?.operationName || '';
+                post._docId = requestInfo?.docId || '';
                 APIInterceptor._cache.push(post);
             }
         }
@@ -252,17 +324,145 @@ export const APIInterceptor = {
         // Recurse into arrays and objects
         if (Array.isArray(obj)) {
             for (const item of obj) {
-                APIInterceptor._extractFromJSON(item, platform, depth + 1);
+                APIInterceptor._extractFromJSON(item, platform, depth + 1, requestInfo);
             }
         } else {
             for (const key of Object.keys(obj)) {
                 if (key.startsWith('_')) continue; // Skip internal keys
                 const val = obj[key];
                 if (val && typeof val === 'object') {
-                    APIInterceptor._extractFromJSON(val, platform, depth + 1);
+                    APIInterceptor._extractFromJSON(val, platform, depth + 1, requestInfo);
                 }
             }
         }
+    },
+    
+    /**
+     * Probe for Facebook/Instagram global data stores.
+     * These contain the complete normalized data graph.
+     */
+    probeGlobalStores: (platform) => {
+        const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const results = [];
+        
+        console.log('[NAC API] Probing global data stores...');
+        
+        // 1. Check for Relay store
+        try {
+            // Facebook sometimes exposes the Relay store
+            if (win.__RELAY_STORE__) {
+                console.log('[NAC API] Found __RELAY_STORE__');
+                results.push({ source: 'RELAY_STORE', data: win.__RELAY_STORE__ });
+            }
+        } catch(e) {}
+        
+        // 2. Check for Instagram's _sharedData (legacy but sometimes present)
+        try {
+            if (platform === 'instagram' && win._sharedData) {
+                console.log('[NAC API] Found Instagram _sharedData');
+                const data = win._sharedData;
+                if (data.entry_data?.PostPage?.[0]?.graphql?.shortcode_media) {
+                    const media = data.entry_data.PostPage[0].graphql.shortcode_media;
+                    const extracted = APIInterceptor._extractIGMedia(media);
+                    if (extracted) {
+                        extracted._type = 'media';
+                        extracted._platform = 'instagram';
+                        extracted._source = 'sharedData';
+                        APIInterceptor._cache.push(extracted);
+                    }
+                }
+            }
+        } catch(e) {}
+        
+        // 3. Check for __initialData or __NEXT_DATA__ (used by some Meta properties)
+        try {
+            if (win.__initialData) {
+                console.log('[NAC API] Found __initialData');
+                APIInterceptor._extractFromJSON(win.__initialData, platform, 0);
+            }
+        } catch(e) {}
+        
+        // 4. Scan window properties for data caches
+        try {
+            const dataProps = Object.keys(win).filter(k => {
+                try {
+                    return (k.startsWith('__') || k.includes('Store') || k.includes('Cache') || k.includes('Data')) &&
+                           typeof win[k] === 'object' && win[k] !== null;
+                } catch(e) { return false; }
+            });
+            
+            for (const prop of dataProps.slice(0, 20)) { // Limit scanning
+                try {
+                    const val = win[prop];
+                    if (val && typeof val === 'object') {
+                        // Look for Relay-like record maps
+                        if (val.__mutationHandlers || val._recordSource || val.getSource) {
+                            console.log('[NAC API] Found potential Relay store at window.' + prop);
+                            // Try to access records
+                            const source = val._recordSource || val.getSource?.() || val;
+                            if (source._records || source.__records) {
+                                const records = source._records || source.__records;
+                                console.log('[NAC API] Found', Object.keys(records).length, 'Relay records');
+                                // Extract post-like records
+                                for (const [id, record] of Object.entries(records)) {
+                                    if (record && record.__typename) {
+                                        APIInterceptor._extractFromJSON(record, platform, 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }
+        } catch(e) {}
+        
+        // 5. Try require('RelayModernStore') if Facebook's module system is available
+        try {
+            if (win.require) {
+                const relayStore = win.require('RelayModernStore');
+                if (relayStore) {
+                    console.log('[NAC API] Found RelayModernStore via require()');
+                }
+            }
+        } catch(e) {}
+        
+        // 6. Check for Instagram's additional data endpoints
+        try {
+            if (platform === 'instagram') {
+                // Instagram embeds post data in a <script> with type="application/ld+json"
+                document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+                    try {
+                        const json = JSON.parse(script.textContent);
+                        if (json['@type'] === 'ImageObject' || json['@type'] === 'VideoObject') {
+                            console.log('[NAC API] Found Instagram LD+JSON');
+                        }
+                        APIInterceptor._extractFromJSON(json, platform, 0);
+                    } catch(e) {}
+                });
+                
+                // Also check for __additionalDataLoaded
+                if (win.__additionalDataLoaded) {
+                    console.log('[NAC API] Found Instagram __additionalDataLoaded');
+                    for (const path in win.__additionalDataLoaded) {
+                        APIInterceptor._extractFromJSON(win.__additionalDataLoaded[path], platform, 0);
+                    }
+                }
+            }
+        } catch(e) {}
+        
+        // 7. Probe Facebook module registry via ModuleHook
+        try {
+            const modules = ModuleHook.probeModules();
+            const moduleData = ModuleHook.extractFromModules();
+            for (const record of moduleData) {
+                APIInterceptor._extractFromJSON(record, platform, 0);
+            }
+        } catch(e) {
+            console.log('[NAC API] Module probe failed:', e.message);
+        }
+        
+        console.log('[NAC API] Store probe complete, cache now has', APIInterceptor._cache.length, 'items');
+        return results;
     },
     
     /**

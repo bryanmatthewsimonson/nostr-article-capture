@@ -20,6 +20,7 @@ import { EntityBrowser } from './entity-browser.js';
 import { ReaderView } from './reader-view.js';
 import { EntityMigration } from './entity-migration.js';
 import { APIInterceptor } from './api-interceptor.js';
+import { ModuleHook } from './module-hook.js';
 import { STYLES } from './styles.js';
 import { init } from './init.js';
 import './platforms/substack.js';  // Self-registering
