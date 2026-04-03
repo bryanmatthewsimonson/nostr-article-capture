@@ -300,82 +300,102 @@ function createFAB() {
 
   // Attach click handler
   fab.addEventListener('click', async () => {
-    try {
-      Utils.log('FAB clicked');
-      
-      // Detect content type
-      const detection = ContentDetector.detect();
-      Utils.log('Content detected:', detection);
-      
-      // Extract article — dual-mode: text selection first, then click-to-select
-      let article;
-      if (detection.platform && PlatformHandler.has(detection.platform)) {
-        const handler = PlatformHandler.get(detection.platform);
-        try {
-          // MODE 1: Check if user has text selected (most obfuscation-proof)
-          const textSel = getTextSelection();
+  try {
+    console.log('[NAC] FAB clicked');
+    Utils.log('FAB clicked');
+    
+    // Detect content type
+    const detection = ContentDetector.detect();
+    console.log('[NAC] Content detected:', detection.platform, detection.type, 'confidence:', detection.confidence);
+    Utils.log('Content detected:', detection);
+    
+    // Extract article — dual-mode: text selection first, then click-to-select
+    let article;
+    if (detection.platform && PlatformHandler.has(detection.platform)) {
+      const handler = PlatformHandler.get(detection.platform);
+      try {
+        // MODE 1: Check if user has text selected (most obfuscation-proof)
+        const textSel = getTextSelection();
+        
+        if (textSel && handler.needsUserSelection) {
+          // User already selected text — use the selection's container
+          console.log('[NAC] Text selection detected:', JSON.stringify(textSel.text.substring(0, 80)) + '...');
+          console.log('[NAC] Selection container:', textSel.container?.tagName, textSel.container?.getAttribute('role'));
+          const postContainer = handler.findPostContainer
+            ? handler.findPostContainer(textSel.container)
+            : findVisualPostBoundary(textSel.container);
+          console.log('[NAC] Post container found:', postContainer?.tagName, postContainer?.getAttribute('role'), 'text length:', postContainer?.innerText?.length);
           
-          if (textSel && handler.needsUserSelection) {
-            // User already selected text — use the selection's container
-            console.log('[NAC] Using text selection for capture');
-            const postContainer = handler.findPostContainer
-              ? handler.findPostContainer(textSel.container)
-              : findVisualPostBoundary(textSel.container);
-            
-            // Pass the selected text as a hint to the extractor
-            article = await handler.extract(postContainer);
-            // If the handler didn't capture text well, use the selection text
-            if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
-              article.textContent = textSel.text;
-              if (!article.content || article.content.length < textSel.text.length) {
-                // Rebuild content HTML from selected text
-                article.content = article.content || '';
-              }
+          // Pass the selected text as a hint to the extractor
+          console.log('[NAC] Calling handler.extract() with container');
+          article = await handler.extract(postContainer);
+          console.log('[NAC] Extract returned:', article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : 'null');
+          // If the handler didn't capture text well, use the selection text
+          if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
+            console.log('[NAC] Overriding textContent with selection text (', textSel.text.length, 'chars vs', article.textContent?.length, 'chars)');
+            article.textContent = textSel.text;
+            if (!article.content || article.content.length < textSel.text.length) {
+              // Rebuild content HTML from selected text
+              article.content = article.content || '';
             }
-            // Clear the selection after capture
-            window.getSelection().removeAllRanges();
-            
-          } else if (handler.needsUserSelection) {
-            // MODE 2: Click-to-select with enhanced visual boundary detection
-            const selectedElement = await promptUserSelection(handler.platform || detection.type);
-            if (!selectedElement) return; // User cancelled (Escape)
-
-            const postContainer = handler.findPostContainer
-              ? handler.findPostContainer(selectedElement)
-              : selectedElement;
-
-            article = await handler.extract(postContainer);
-          } else {
-            // MODE 3: Automatic extraction (YouTube, Twitter single tweets, articles)
-            article = await handler.extract();
           }
-        } catch (handlerError) {
-          console.warn('[NAC] Platform handler failed, falling back to generic:', handlerError.message);
-          article = null;
+          // Clear the selection after capture
+          window.getSelection().removeAllRanges();
+          
+        } else if (handler.needsUserSelection) {
+          // MODE 2: Click-to-select with enhanced visual boundary detection
+          console.log('[NAC] No text selection, showing click overlay for', handler.platform || detection.type);
+          const selectedElement = await promptUserSelection(handler.platform || detection.type);
+          if (!selectedElement) {
+            console.log('[NAC] User cancelled selection (Escape)');
+            return;
+          }
+          console.log('[NAC] User clicked element:', selectedElement.tagName, selectedElement.getAttribute('role'), 'text length:', selectedElement.innerText?.length);
+
+          const postContainer = handler.findPostContainer
+            ? handler.findPostContainer(selectedElement)
+            : selectedElement;
+          console.log('[NAC] Post container found:', postContainer?.tagName, postContainer?.getAttribute('role'), 'text length:', postContainer?.innerText?.length);
+
+          console.log('[NAC] Calling handler.extract() with container');
+          article = await handler.extract(postContainer);
+          console.log('[NAC] Extract returned:', article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : 'null');
+        } else {
+          // MODE 3: Automatic extraction (YouTube, Twitter single tweets, articles)
+          console.log('[NAC] Automatic extraction (no user selection needed)');
+          article = await handler.extract();
+          console.log('[NAC] Extract returned:', article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length } : 'null');
         }
+      } catch (handlerError) {
+        console.warn('[NAC] Platform handler failed, falling back to generic:', handlerError.message, handlerError.stack);
+        article = null;
       }
-      if (!article) {
-        article = ContentExtractor.extractArticle();
-      }
-      
-      if (!article) {
-        Utils.showToast('No article content found on this page', 'error');
-        return;
-      }
-      
-      // Attach content detection metadata to article
-      article.contentType = detection.type;
-      article.platform = detection.platform;
-      article.platformMetadata = detection.metadata;
-      article.contentConfidence = detection.confidence;
-      article.hasComments = ContentDetector.hasComments();
-      
-      // Show reader view
-      await ReaderView.show(article);
-    } catch (clickError) {
-      console.error('[NAC] FAB click handler error:', clickError);
     }
-  });
+    if (!article) {
+      console.log('[NAC] No platform article, trying generic ContentExtractor');
+      article = ContentExtractor.extractArticle();
+    }
+    
+    if (!article) {
+      console.log('[NAC] No article content found at all');
+      Utils.showToast('No article content found on this page', 'error');
+      return;
+    }
+    
+    // Attach content detection metadata to article
+    article.contentType = detection.type;
+    article.platform = detection.platform;
+    article.platformMetadata = detection.metadata;
+    article.contentConfidence = detection.confidence;
+    article.hasComments = ContentDetector.hasComments();
+    
+    // Show reader view
+    console.log('[NAC] Opening reader view with article:', article.title?.substring(0, 60));
+    await ReaderView.show(article);
+  } catch (clickError) {
+    console.error('[NAC] FAB click handler error:', clickError, clickError.stack);
+  }
+});
 
   _fab = fab;
   _state.nacFabRef = fab;

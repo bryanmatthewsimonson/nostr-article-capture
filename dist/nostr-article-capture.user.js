@@ -13609,8 +13609,10 @@ Enter option (1-4):`;
     }
     fab.addEventListener("click", async () => {
       try {
+        console.log("[NAC] FAB clicked");
         Utils.log("FAB clicked");
         const detection2 = ContentDetector.detect();
+        console.log("[NAC] Content detected:", detection2.platform, detection2.type, "confidence:", detection2.confidence);
         Utils.log("Content detected:", detection2);
         let article;
         if (detection2.platform && PlatformHandler.has(detection2.platform)) {
@@ -13618,10 +13620,15 @@ Enter option (1-4):`;
           try {
             const textSel = getTextSelection();
             if (textSel && handler.needsUserSelection) {
-              console.log("[NAC] Using text selection for capture");
+              console.log("[NAC] Text selection detected:", JSON.stringify(textSel.text.substring(0, 80)) + "...");
+              console.log("[NAC] Selection container:", textSel.container?.tagName, textSel.container?.getAttribute("role"));
               const postContainer = handler.findPostContainer ? handler.findPostContainer(textSel.container) : findVisualPostBoundary(textSel.container);
+              console.log("[NAC] Post container found:", postContainer?.tagName, postContainer?.getAttribute("role"), "text length:", postContainer?.innerText?.length);
+              console.log("[NAC] Calling handler.extract() with container");
               article = await handler.extract(postContainer);
+              console.log("[NAC] Extract returned:", article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : "null");
               if (article && (!article.textContent || article.textContent.length < textSel.text.length)) {
+                console.log("[NAC] Overriding textContent with selection text (", textSel.text.length, "chars vs", article.textContent?.length, "chars)");
                 article.textContent = textSel.text;
                 if (!article.content || article.content.length < textSel.text.length) {
                   article.content = article.content || "";
@@ -13629,22 +13636,34 @@ Enter option (1-4):`;
               }
               window.getSelection().removeAllRanges();
             } else if (handler.needsUserSelection) {
+              console.log("[NAC] No text selection, showing click overlay for", handler.platform || detection2.type);
               const selectedElement = await promptUserSelection(handler.platform || detection2.type);
-              if (!selectedElement) return;
+              if (!selectedElement) {
+                console.log("[NAC] User cancelled selection (Escape)");
+                return;
+              }
+              console.log("[NAC] User clicked element:", selectedElement.tagName, selectedElement.getAttribute("role"), "text length:", selectedElement.innerText?.length);
               const postContainer = handler.findPostContainer ? handler.findPostContainer(selectedElement) : selectedElement;
+              console.log("[NAC] Post container found:", postContainer?.tagName, postContainer?.getAttribute("role"), "text length:", postContainer?.innerText?.length);
+              console.log("[NAC] Calling handler.extract() with container");
               article = await handler.extract(postContainer);
+              console.log("[NAC] Extract returned:", article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length, hasContent: !!article.content } : "null");
             } else {
+              console.log("[NAC] Automatic extraction (no user selection needed)");
               article = await handler.extract();
+              console.log("[NAC] Extract returned:", article ? { title: article.title?.substring(0, 50), textLength: article.textContent?.length } : "null");
             }
           } catch (handlerError) {
-            console.warn("[NAC] Platform handler failed, falling back to generic:", handlerError.message);
+            console.warn("[NAC] Platform handler failed, falling back to generic:", handlerError.message, handlerError.stack);
             article = null;
           }
         }
         if (!article) {
+          console.log("[NAC] No platform article, trying generic ContentExtractor");
           article = ContentExtractor.extractArticle();
         }
         if (!article) {
+          console.log("[NAC] No article content found at all");
           Utils.showToast("No article content found on this page", "error");
           return;
         }
@@ -13653,9 +13672,10 @@ Enter option (1-4):`;
         article.platformMetadata = detection2.metadata;
         article.contentConfidence = detection2.confidence;
         article.hasComments = ContentDetector.hasComments();
+        console.log("[NAC] Opening reader view with article:", article.title?.substring(0, 60));
         await ReaderView.show(article);
       } catch (clickError) {
-        console.error("[NAC] FAB click handler error:", clickError);
+        console.error("[NAC] FAB click handler error:", clickError, clickError.stack);
       }
     });
     _fab = fab;
@@ -14099,6 +14119,141 @@ Enter option (1-4):`;
   });
 
   // src/platforms/facebook.js
+  var FacebookHandler;
+  var init_facebook = __esm({
+    "src/platforms/facebook.js"() {
+      init_platform_handler();
+      init_utils();
+      FacebookHandler = {
+        type: "social_post",
+        platform: "facebook",
+        needsUserSelection: true,
+        canCapture: () => {
+          const h = window.location.hostname;
+          return h.includes("facebook.com") || h.includes("fb.com");
+        },
+        findPostContainer: (clickTarget) => {
+          let el = clickTarget;
+          while (el && el !== document.body) {
+            if (el.getAttribute("role") === "article") {
+              console.log('[NAC Facebook] Post container found: role="article"', el.tagName);
+              return el;
+            }
+            if (el.tagName === "DIV" && el.offsetHeight > 150 && el.innerText.length > 50) {
+              console.log("[NAC Facebook] Post container found: large div", el.offsetHeight + "px,", el.innerText.length, "chars");
+              return el;
+            }
+            el = el.parentElement;
+          }
+          console.log("[NAC Facebook] No post container found, using click target");
+          return clickTarget;
+        },
+        extract: async (containerEl) => {
+          try {
+            console.log("[NAC Facebook] extract() called, container:", containerEl?.tagName, containerEl?.getAttribute("role"));
+            const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
+            const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
+            const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
+            console.log("[NAC Facebook] OG tags:", { ogTitle: ogTitle.substring(0, 50), ogDesc: ogDesc.substring(0, 50), hasImage: !!ogImage });
+            let postText = "";
+            if (containerEl && containerEl.innerText) {
+              postText = containerEl.innerText.trim();
+            }
+            if (postText.length < 10) {
+              postText = ogDesc || ogTitle || "";
+              console.log("[NAC Facebook] Container text too short, using OG data");
+            }
+            const images = [];
+            if (containerEl) {
+              containerEl.querySelectorAll("img[src]").forEach((img) => {
+                const src = img.src;
+                if (src && !src.includes("emoji") && !src.includes("icon") && (img.width > 50 || img.naturalWidth > 50 || src.includes("scontent") || src.includes("fbcdn"))) {
+                  images.push(src);
+                }
+              });
+            }
+            let authorName = "";
+            if (ogTitle) {
+              const dashIdx = ogTitle.indexOf(" - ");
+              const pipeIdx = ogTitle.indexOf(" | ");
+              if (dashIdx > 0 && dashIdx < 50) {
+                authorName = ogTitle.substring(0, dashIdx).trim();
+              } else if (pipeIdx > 0 && pipeIdx < 50) {
+                authorName = ogTitle.substring(0, pipeIdx).trim();
+              }
+            }
+            let contentHtml = '<div class="nac-facebook-post">';
+            contentHtml += '<div class="nac-fb-header">';
+            contentHtml += `<div class="nac-fb-author-name">${Utils.escapeHtml(authorName || "Facebook Post")}</div>`;
+            contentHtml += "</div>";
+            contentHtml += `<div class="nac-fb-text">${Utils.escapeHtml(postText).replace(/\n/g, "<br>")}</div>`;
+            if (images.length > 0) {
+              contentHtml += '<div class="nac-fb-images">';
+              images.slice(0, 5).forEach((src) => {
+                contentHtml += `<img class="nac-fb-image" src="${Utils.escapeHtml(src)}" alt="Post image" loading="lazy">`;
+              });
+              contentHtml += "</div>";
+            }
+            contentHtml += "</div>";
+            const title = authorName ? `${authorName}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80) || ogTitle || "Facebook Post";
+            console.log("[NAC Facebook] Extract result:", {
+              title: title.substring(0, 50),
+              textLength: postText.length,
+              imageCount: images.length,
+              hasOgData: !!ogTitle
+            });
+            return {
+              title,
+              byline: authorName || "",
+              url: ogUrl,
+              domain: "facebook.com",
+              siteName: "Facebook",
+              publishedAt: Math.floor(Date.now() / 1e3),
+              content: contentHtml,
+              textContent: postText,
+              excerpt: postText.substring(0, 200) || ogDesc,
+              featuredImage: ogImage || images[0] || "",
+              publicationIcon: "https://www.facebook.com/favicon.ico",
+              platform: "facebook",
+              contentType: "social_post",
+              platformAccount: {
+                username: authorName || "Facebook User",
+                profileUrl: null,
+                avatarUrl: null,
+                platform: "facebook"
+              },
+              engagement: { likes: 0, comments: 0, shares: 0, views: 0 },
+              wordCount: postText.split(/\s+/).filter((w) => w).length,
+              readingTimeMinutes: 1,
+              structuredData: { type: "SocialMediaPosting" },
+              keywords: (postText.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase()),
+              language: document.documentElement.lang || "en",
+              isPaywalled: false,
+              section: null,
+              dateModified: null
+            };
+          } catch (e) {
+            console.error("[NAC Facebook] Extract failed:", e);
+            return null;
+          }
+        },
+        extractComments: async () => [],
+        // Skip for now
+        getReaderViewConfig: () => ({
+          showEditor: true,
+          // Let users edit the content
+          showEntityBar: true,
+          showClaimsBar: true,
+          showComments: false,
+          platformLabel: "f Facebook Post"
+        })
+      };
+      PlatformHandler.register("facebook", FacebookHandler);
+    }
+  });
+
+  // src/platforms/instagram.js
   function parseTimestampToUnix(timestamp) {
     if (!timestamp) return Math.floor(Date.now() / 1e3);
     if (typeof timestamp === "number") {
@@ -14124,25 +14279,25 @@ Enter option (1-4):`;
   function extractFromContainer(container) {
     const apiData = APIInterceptor.getBestPostData();
     if (apiData) {
-      console.log("[NAC Facebook] Extracted via API interception");
+      console.log("[NAC Instagram] Extracted via API interception");
       return buildArticleFromAPIData(apiData, container);
     }
     const fiberData = getReactFiberData(container);
     if (fiberData && (fiberData.text || fiberData.authorName)) {
-      console.log("[NAC Facebook] Extracted via React fiber");
+      console.log("[NAC Instagram] Extracted via React fiber");
       return buildArticleFromFiberData(fiberData, container);
     }
     const ariaData = extractViaARIA(container);
-    if (ariaData.text && ariaData.text.length > 10) {
-      console.log("[NAC Facebook] Extracted via ARIA attributes");
+    if (ariaData.text && ariaData.text.length > 5) {
+      console.log("[NAC Instagram] Extracted via ARIA attributes");
       return buildArticleFromExtractedData(ariaData, container);
     }
     const patternData = extractViaPatterns(container);
-    if (patternData.text && patternData.text.length > 10) {
-      console.log("[NAC Facebook] Extracted via text patterns");
+    if (patternData.text && patternData.text.length > 5) {
+      console.log("[NAC Instagram] Extracted via text patterns");
       return buildArticleFromExtractedData(patternData, container);
     }
-    console.log("[NAC Facebook] Falling back to raw text extraction");
+    console.log("[NAC Instagram] Falling back to raw text extraction");
     return buildArticleFromRawText(container);
   }
   function getReactFiberData(element) {
@@ -14155,666 +14310,14 @@ Enter option (1-4):`;
       for (let i = 0; i < 30 && fiber; i++) {
         const props = fiber.memoizedProps || fiber.pendingProps || {};
         if (props.post) return flattenPostData(props.post);
-        if (props.story) return flattenPostData(props.story);
-        if (props.feedUnit) return flattenPostData(props.feedUnit);
-        if (props.__typename === "Story" || props.__typename === "Post") return flattenPostData(props);
-        if (props.data?.post) return flattenPostData(props.data.post);
-        if (props.data?.story) return flattenPostData(props.data.story);
-        if (props.data?.node) return flattenPostData(props.data.node);
-        fiber = fiber.return;
-      }
-    } catch (e) {
-      console.log("[NAC Facebook] React fiber traversal failed:", e.message);
-    }
-    return null;
-  }
-  function flattenPostData(post) {
-    return {
-      text: post.message?.text || post.message || post.body?.text || post.comet_sections?.content?.story?.message?.text || "",
-      authorName: post.author?.name || post.actor?.name || post.actors?.[0]?.name || post.owner?.name || "",
-      authorId: post.author?.id || post.actor?.id || post.owner?.id || "",
-      authorUrl: post.author?.url || post.actor?.url || post.owner?.url || "",
-      authorAvatar: post.author?.profile_picture?.uri || post.actor?.profile_picture?.uri || "",
-      timestamp: post.creation_time || post.created_time || post.timestamp || null,
-      url: post.url || post.permalink || post.wwwURL || "",
-      attachments: post.attachments || post.media || []
-    };
-  }
-  function buildArticleFromFiberData(fiberData, container) {
-    const images = extractImagesFromElement(container);
-    const engagement = extractEngagementFromElement(container);
-    const postText = fiberData.text || extractTextFromElement(container);
-    const author = {
-      name: fiberData.authorName || "",
-      profileUrl: fiberData.authorUrl || null,
-      avatarUrl: fiberData.authorAvatar || null
-    };
-    if (!author.name) {
-      const domAuthor = extractAuthorFromElement(container);
-      author.name = domAuthor.name;
-      author.profileUrl = domAuthor.profileUrl;
-      author.avatarUrl = domAuthor.avatarUrl;
-    }
-    const timestamp = fiberData.timestamp ? typeof fiberData.timestamp === "number" ? new Date(fiberData.timestamp * 1e3).toISOString() : fiberData.timestamp : extractTimestampFromElement(container);
-    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, []);
-    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
-    return {
-      title,
-      byline: author.name || "Facebook User",
-      url: fiberData.url || window.location.href,
-      domain: "facebook.com",
-      siteName: "Facebook",
-      publishedAt: parseTimestampToUnix(timestamp),
-      content: contentHtml,
-      textContent: postText,
-      excerpt: postText.substring(0, 200),
-      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
-      publicationIcon: "https://www.facebook.com/favicon.ico",
-      platform: "facebook",
-      contentType: "social_post",
-      platformAccount: {
-        username: author.name || "Unknown",
-        profileUrl: author.profileUrl || null,
-        avatarUrl: author.avatarUrl || null,
-        platform: "facebook"
-      },
-      engagement,
-      wordCount: postText.split(/\s+/).filter((w) => w).length,
-      readingTimeMinutes: 1,
-      structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags2(postText),
-      language: document.documentElement.lang || "en",
-      isPaywalled: false,
-      section: null,
-      dateModified: null
-    };
-  }
-  function extractViaARIA(container) {
-    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
-    const articles = container.querySelectorAll('[role="article"]');
-    const mainArticle = articles[0] || container;
-    const authorLink = mainArticle.querySelector(
-      'a[role="link"][href*="facebook.com/"]:not([href*="/posts/"]):not([href*="/photos/"]):not([href*="/videos/"]):not([href*="/watch"])'
-    );
-    if (authorLink) {
-      data.author.name = authorLink.textContent?.trim() || authorLink.getAttribute("aria-label") || "";
-      data.author.profileUrl = authorLink.href;
-    }
-    const avatarImg = mainArticle.querySelector('svg image[href], img[alt*="profile"], [role="img"] image, image[preserveAspectRatio]');
-    if (avatarImg) {
-      data.author.avatarUrl = avatarImg.getAttribute("href") || avatarImg.getAttribute("xlink:href") || avatarImg.src || "";
-    }
-    const textBlocks = [];
-    mainArticle.querySelectorAll('div[dir="auto"], span[dir="auto"]').forEach((el) => {
-      const text = el.textContent?.trim();
-      if (text && text.length > 10 && !el.closest('[role="button"]') && !el.closest('[role="navigation"]') && !el.closest('[role="toolbar"]')) {
-        textBlocks.push({ text, length: text.length, el });
-      }
-    });
-    textBlocks.sort((a, b) => b.length - a.length);
-    data.text = textBlocks[0]?.text || "";
-    mainArticle.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]').forEach((img) => {
-      const w = img.naturalWidth || img.width || 0;
-      if (w === 0 || w > 50) {
-        data.images.push(img.src);
-      }
-    });
-    const timeEl = mainArticle.querySelector('abbr[data-utime], time[datetime], [data-testid*="timestamp"], a[href*="/posts/"] span');
-    if (timeEl) {
-      data.timestamp = timeEl.getAttribute("data-utime") ? new Date(parseInt(timeEl.getAttribute("data-utime")) * 1e3).toISOString() : timeEl.getAttribute("datetime") || timeEl.textContent?.trim() || null;
-    }
-    return data;
-  }
-  function extractViaPatterns(container) {
-    const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
-    const authorResult = identifyAuthorByStyle(container);
-    if (authorResult) {
-      data.author.name = authorResult.name;
-      data.author.profileUrl = authorResult.profileUrl;
-    }
-    const avatarResult = identifyAvatarByStyle(container);
-    if (avatarResult) {
-      data.author.avatarUrl = avatarResult;
-    }
-    const textResult = identifyPostTextByPattern(container);
-    data.text = textResult || "";
-    container.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]').forEach((img) => {
-      const w = img.naturalWidth || img.width || 0;
-      if (w === 0 || w > 50) {
-        if (!img.src.includes("emoji") && !img.src.includes("icon")) {
-          data.images.push(img.src);
-        }
-      }
-    });
-    const timestampResult = identifyTimestampByPattern(container);
-    data.timestamp = timestampResult;
-    return data;
-  }
-  function identifyAuthorByStyle(container) {
-    const links = container.querySelectorAll("a[href]");
-    for (const link of links) {
-      try {
-        const computed = window.getComputedStyle(link);
-        const rect = link.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const isBold = parseInt(computed.fontWeight) >= 600 || computed.fontWeight === "bold";
-        const isNearTop = rect.top - containerRect.top < 100;
-        const isReasonableSize = rect.height > 10 && rect.height < 50;
-        const isProfileLink = link.href.match(/facebook\.com\/[a-zA-Z0-9.]+(\/?|\?[^/]*)$/) && !link.href.includes("/posts/") && !link.href.includes("/photos/") && !link.href.includes("/videos/") && !link.href.includes("/watch");
-        if (isBold && isNearTop && isReasonableSize && isProfileLink) {
-          const name = link.textContent?.trim();
-          if (name && name.length > 1 && name.length < 100) {
-            return { name, profileUrl: link.href, element: link };
-          }
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    return null;
-  }
-  function identifyAvatarByStyle(container) {
-    const imgs = container.querySelectorAll("img[src], svg image[href], image[preserveAspectRatio]");
-    const containerRect = container.getBoundingClientRect();
-    for (const img of imgs) {
-      try {
-        const rect = img.getBoundingClientRect();
-        const isSmall = rect.width > 20 && rect.width < 80 && rect.height > 20 && rect.height < 80;
-        const isNearTop = rect.top - containerRect.top < 80;
-        const isNearLeft = rect.left - containerRect.left < 80;
-        const src = img.src || img.getAttribute("href") || img.getAttribute("xlink:href") || "";
-        if (isSmall && isNearTop && isNearLeft && src) {
-          const computed = window.getComputedStyle(img.closest("div, span, a") || img);
-          const isCircular = computed.borderRadius === "50%" || computed.clipPath?.includes("circle") || parseInt(computed.borderRadius) > 15;
-          if (isCircular || src.includes("scontent") || src.includes("profile")) {
-            return src;
-          }
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    return null;
-  }
-  function identifyPostTextByPattern(container) {
-    const candidates = [];
-    container.querySelectorAll("div, span, p").forEach((el) => {
-      try {
-        if (el.offsetHeight < 20 || el.offsetWidth < 100) return;
-      } catch (e) {
-        return;
-      }
-      if (el.closest('[role="button"]') || el.closest('[role="navigation"]') || el.closest('[role="toolbar"]') || el.closest("nav")) return;
-      const text = el.textContent?.trim() || "";
-      const containerText = container.textContent?.trim() || "";
-      if (text.length < 15 || text.length > containerText.length * 0.9) return;
-      let score = 0;
-      if (el.getAttribute("dir") === "auto") score += 3;
-      if (el.getAttribute("data-ad-preview") !== null) score -= 5;
-      if (text.length > 30) score += 1;
-      if (text.length > 100) score += 1;
-      const directTextLength = Array.from(el.childNodes).filter((n) => n.nodeType === 3).reduce((sum, n) => sum + (n.textContent?.trim().length || 0), 0);
-      if (directTextLength > text.length * 0.3) score += 2;
-      if (text.match(/^\d+[hm]$|^yesterday$/i)) return;
-      if (text.match(/^\d+\s*(like|comment|share|view)s?$/i)) return;
-      candidates.push({ text, score, el });
-    });
-    candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
-    return candidates[0]?.text || "";
-  }
-  function identifyTimestampByPattern(container) {
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-    let node;
-    while (node = walker.nextNode()) {
-      const text = node.textContent?.trim();
-      if (!text || text.length > 50) continue;
-      if (text.match(/^(\d+[hmd]|yesterday|just now|\d+\s+(hour|minute|day|week|month)s?\s+ago)$/i)) {
-        return text;
-      }
-      if (text.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}/i)) {
-        return text;
-      }
-    }
-    return null;
-  }
-  function buildArticleFromRawText(container) {
-    const postText = extractTextFromElement(container);
-    const author = extractAuthorFromElement(container);
-    const timestamp = extractTimestampFromElement(container);
-    const images = extractImagesFromElement(container);
-    const links = extractLinksFromElement(container);
-    const engagement = extractEngagementFromElement(container);
-    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
-    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
-    return {
-      title,
-      byline: author.name || "Facebook User",
-      url: window.location.href,
-      domain: "facebook.com",
-      siteName: "Facebook",
-      publishedAt: parseTimestampToUnix(timestamp),
-      content: contentHtml,
-      textContent: postText,
-      excerpt: postText.substring(0, 200),
-      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
-      publicationIcon: "https://www.facebook.com/favicon.ico",
-      platform: "facebook",
-      contentType: "social_post",
-      platformAccount: {
-        username: author.name || "Unknown",
-        profileUrl: author.profileUrl || null,
-        avatarUrl: author.avatarUrl || null,
-        platform: "facebook"
-      },
-      engagement,
-      wordCount: postText.split(/\s+/).filter((w) => w).length,
-      readingTimeMinutes: 1,
-      structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags2(postText),
-      language: document.documentElement.lang || "en",
-      isPaywalled: false,
-      section: null,
-      dateModified: null
-    };
-  }
-  function buildArticleFromExtractedData(data, container) {
-    const images = data.images && data.images.length > 0 ? data.images : extractImagesFromElement(container);
-    const engagement = extractEngagementFromElement(container);
-    const links = extractLinksFromElement(container);
-    const postText = data.text;
-    const author = data.author || { name: "", profileUrl: null, avatarUrl: null };
-    const timestamp = data.timestamp || extractTimestampFromElement(container);
-    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, links);
-    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
-    return {
-      title,
-      byline: author.name || "Facebook User",
-      url: window.location.href,
-      domain: "facebook.com",
-      siteName: "Facebook",
-      publishedAt: parseTimestampToUnix(timestamp),
-      content: contentHtml,
-      textContent: postText,
-      excerpt: postText.substring(0, 200),
-      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
-      publicationIcon: "https://www.facebook.com/favicon.ico",
-      platform: "facebook",
-      contentType: "social_post",
-      platformAccount: {
-        username: author.name || "Unknown",
-        profileUrl: author.profileUrl || null,
-        avatarUrl: author.avatarUrl || null,
-        platform: "facebook"
-      },
-      engagement,
-      wordCount: postText.split(/\s+/).filter((w) => w).length,
-      readingTimeMinutes: 1,
-      structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags2(postText),
-      language: document.documentElement.lang || "en",
-      isPaywalled: false,
-      section: null,
-      dateModified: null
-    };
-  }
-  function extractFromOGTags() {
-    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
-    const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
-    const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
-    const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
-    const text = ogDesc || ogTitle;
-    return {
-      title: ogTitle || "Facebook Post",
-      byline: ogTitle.split(" - ")[0] || "",
-      url: ogUrl,
-      domain: "facebook.com",
-      siteName: "Facebook",
-      publishedAt: Math.floor(Date.now() / 1e3),
-      content: `<blockquote class="nac-facebook-post"><p>${Utils.escapeHtml(text)}</p></blockquote>`,
-      textContent: text,
-      excerpt: text.substring(0, 200),
-      featuredImage: ogImage,
-      publicationIcon: "https://www.facebook.com/favicon.ico",
-      platform: "facebook",
-      contentType: "social_post",
-      platformAccount: { username: ogTitle.split(" - ")[0] || "Unknown", profileUrl: null, avatarUrl: null, platform: "facebook" },
-      engagement: { likes: 0, comments: 0, shares: 0, views: 0 },
-      wordCount: text.split(/\s+/).filter((w) => w).length,
-      readingTimeMinutes: 1,
-      structuredData: { type: "SocialMediaPosting" },
-      keywords: [],
-      language: "en",
-      isPaywalled: false,
-      section: null,
-      dateModified: null
-    };
-  }
-  function extractTextFromElement(el) {
-    const clone = el.cloneNode(true);
-    clone.querySelectorAll('svg, [role="button"], [role="navigation"], [role="toolbar"], [data-testid="like_button"], [data-testid="comment_button"], [data-testid="share_button"]').forEach((x) => x.remove());
-    const text = clone.textContent?.trim() || "";
-    return text.replace(/\s+/g, " ").trim();
-  }
-  function extractAuthorFromElement(el) {
-    const result = { name: "", profileUrl: null, avatarUrl: null };
-    const links = el.querySelectorAll('a[href*="facebook.com"]');
-    for (const link of links) {
-      const href = link.href;
-      if (href.match(/facebook\.com\/(profile\.php|[a-zA-Z0-9.]+)(\?|$)/) && !href.includes("/posts/") && !href.includes("/photos/") && !href.includes("/videos/")) {
-        const text = link.textContent?.trim();
-        if (text && text.length > 1 && text.length < 100) {
-          result.name = text;
-          result.profileUrl = href;
-          break;
-        }
-      }
-    }
-    const avatarImg = el.querySelector('image[href], img[src*="profile"], img[src*="scontent"]');
-    if (avatarImg) {
-      result.avatarUrl = avatarImg.getAttribute("href") || avatarImg.src;
-    }
-    return result;
-  }
-  function extractTimestampFromElement(el) {
-    const timeEl = el.querySelector('abbr[data-utime], time, a[href*="/posts/"] span');
-    if (timeEl) {
-      const utime = timeEl.getAttribute("data-utime");
-      if (utime) return new Date(parseInt(utime) * 1e3).toISOString();
-      const datetime = timeEl.getAttribute("datetime");
-      if (datetime) return datetime;
-      const text = timeEl.textContent?.trim();
-      if (text) return text;
-    }
-    return null;
-  }
-  function extractImagesFromElement(el) {
-    const images = [];
-    el.querySelectorAll("img[src]").forEach((img) => {
-      const src = img.src;
-      const width = img.naturalWidth || img.width || 0;
-      if (width > 0 && width < 50) return;
-      if (src.includes("emoji") || src.includes("icon") || src.includes("static")) return;
-      if (src.includes("scontent") || src.includes("fbcdn")) {
-        images.push(src);
-      }
-    });
-    el.querySelectorAll('[role="img"][style*="background-image"]').forEach((imgEl) => {
-      const style = imgEl.getAttribute("style") || "";
-      const match = style.match(/url\(["']?([^"')]+)["']?\)/);
-      if (match && match[1] && (match[1].includes("scontent") || match[1].includes("fbcdn"))) {
-        images.push(match[1]);
-      }
-    });
-    return images;
-  }
-  function extractLinksFromElement(el) {
-    const links = [];
-    el.querySelectorAll("a[href]").forEach((a) => {
-      const href = a.href;
-      if (href.includes("/profile.php") || href.includes("facebook.com/#") || href.includes("l.facebook.com/l.php")) return;
-      if (!href.includes("facebook.com") || href.includes("/posts/") || href.includes("/videos/")) {
-        const text = a.textContent?.trim();
-        if (text && text.length > 3) {
-          links.push({ url: href, text });
-        }
-      }
-    });
-    return links;
-  }
-  function extractEngagementFromElement(el) {
-    const result = { likes: 0, comments: 0, shares: 0, views: 0 };
-    const allText = el.textContent || "";
-    const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*(like|reaction|Love|Haha|Wow|Sad|Angry)/i);
-    if (likeMatch) result.likes = parseCount(likeMatch[1]);
-    const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
-    if (commentMatch) result.comments = parseCount(commentMatch[1]);
-    const shareMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*share/i);
-    if (shareMatch) result.shares = parseCount(shareMatch[1]);
-    return result;
-  }
-  function parseCount(text) {
-    if (!text) return 0;
-    text = text.replace(/,/g, "");
-    if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
-    if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
-    return parseInt(text) || 0;
-  }
-  function extractHashtags2(text) {
-    return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
-  }
-  function buildFacebookStyledContent(text, author, timestamp, images, links) {
-    let html = '<div class="nac-facebook-post">';
-    html += '<div class="nac-fb-header">';
-    if (author.avatarUrl) {
-      html += `<img class="nac-fb-avatar" src="${Utils.escapeHtml(author.avatarUrl)}" width="40" height="40" onerror="this.style.display='none'">`;
-    }
-    html += '<div class="nac-fb-author-info">';
-    html += `<div class="nac-fb-author-name">${Utils.escapeHtml(author.name || "Facebook User")}</div>`;
-    if (timestamp) {
-      html += `<div class="nac-fb-timestamp">${Utils.escapeHtml(typeof timestamp === "string" ? timestamp : new Date(timestamp).toLocaleString())}</div>`;
-    }
-    html += "</div></div>";
-    if (text) {
-      html += `<div class="nac-fb-text">${Utils.escapeHtml(text).replace(/\n/g, "<br>")}</div>`;
-    }
-    if (images.length > 0) {
-      html += '<div class="nac-fb-images">';
-      images.forEach((src) => {
-        html += `<img class="nac-fb-image" src="${Utils.escapeHtml(src)}" alt="Post image" loading="lazy">`;
-      });
-      html += "</div>";
-    }
-    if (links.length > 0) {
-      html += '<div class="nac-fb-links">';
-      links.forEach((link) => {
-        html += `<a class="nac-fb-link" href="${Utils.escapeHtml(link.url)}" target="_blank">${Utils.escapeHtml(link.text)}</a>`;
-      });
-      html += "</div>";
-    }
-    html += "</div>";
-    return html;
-  }
-  function buildArticleFromAPIData(data, container) {
-    const postText = data.message || "";
-    const author = {
-      name: data.author || "",
-      profileUrl: data.authorUrl || null,
-      avatarUrl: data.authorAvatar || null
-    };
-    const timestamp = data.timestamp ? new Date(data.timestamp * 1e3).toISOString() : null;
-    const images = data.images || [];
-    const contentHtml = buildFacebookStyledContent(postText, author, timestamp, images, []);
-    const title = author.name ? `${author.name}: "${postText.substring(0, 60)}${postText.length > 60 ? "..." : ""}"` : postText.substring(0, 80);
-    return {
-      title,
-      byline: author.name || "Facebook User",
-      url: data.url || window.location.href,
-      domain: "facebook.com",
-      siteName: "Facebook",
-      publishedAt: data.timestamp || Math.floor(Date.now() / 1e3),
-      content: contentHtml,
-      textContent: postText,
-      excerpt: postText.substring(0, 200),
-      featuredImage: images[0] || document.querySelector('meta[property="og:image"]')?.content || "",
-      publicationIcon: "https://www.facebook.com/favicon.ico",
-      platform: "facebook",
-      contentType: "social_post",
-      platformAccount: {
-        username: author.name || "Unknown",
-        profileUrl: author.profileUrl || null,
-        avatarUrl: author.avatarUrl || null,
-        platform: "facebook"
-      },
-      engagement: data.engagement || { likes: 0, comments: 0, shares: 0, views: 0 },
-      wordCount: postText.split(/\s+/).filter((w) => w).length,
-      readingTimeMinutes: 1,
-      structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags2(postText),
-      language: document.documentElement.lang || "en",
-      isPaywalled: false,
-      section: null,
-      dateModified: null
-    };
-  }
-  var FacebookHandler;
-  var init_facebook = __esm({
-    "src/platforms/facebook.js"() {
-      init_platform_handler();
-      init_utils();
-      init_api_interceptor();
-      FacebookHandler = {
-        type: "social_post",
-        platform: "facebook",
-        needsUserSelection: true,
-        canCapture: () => {
-          const h = window.location.hostname;
-          return h.includes("facebook.com") || h.includes("fb.com");
-        },
-        findPostContainer: (clickTarget) => {
-          let el = clickTarget;
-          let bestCandidate = clickTarget;
-          while (el && el !== document.body) {
-            if (el.getAttribute("role") === "article") return el;
-            if (el.getAttribute("data-pagelet")?.includes("FeedUnit")) return el;
-            if (el.getAttribute("data-testid")?.includes("Keycommand_wrapper")) return el;
-            const hasText = el.textContent?.length > 50;
-            const hasButtons = el.querySelectorAll('[role="button"]').length > 2;
-            const hasLinks = el.querySelectorAll("a[href]").length > 1;
-            const isLargeEnough = el.offsetHeight > 100;
-            if (hasText && (hasButtons || hasLinks) && isLargeEnough) {
-              bestCandidate = el;
-            }
-            el = el.parentElement;
-          }
-          return bestCandidate;
-        },
-        extract: async (containerEl) => {
-          try {
-            if (!containerEl) {
-              return extractFromOGTags();
-            }
-            return extractFromContainer(containerEl);
-          } catch (e) {
-            console.error("[NAC Facebook] Extraction failed:", e);
-            return extractFromOGTags();
-          }
-        },
-        extractComments: async (articleUrl) => {
-          const cachedComments = APIInterceptor.getCachedComments();
-          if (cachedComments.length > 0) {
-            return cachedComments.map((c) => ({
-              authorName: c.author || "Facebook User",
-              text: c.text,
-              timestamp: c.timestamp ? new Date(c.timestamp * 1e3).toISOString() : null,
-              avatarUrl: c.authorAvatar || null,
-              profileUrl: c.authorUrl || null,
-              likes: c.likes || 0,
-              platform: "facebook",
-              sourceUrl: articleUrl
-            }));
-          }
-          try {
-            const comments = [];
-            const commentEls = document.querySelectorAll('[role="article"]');
-            const potentialComments = Array.from(commentEls).slice(1);
-            for (const el of potentialComments.slice(0, 50)) {
-              const text = extractTextFromElement(el);
-              if (text.length < 5) continue;
-              const author = extractAuthorFromElement(el);
-              comments.push({
-                authorName: author.name || "Facebook User",
-                text: text.substring(0, 2e3),
-                timestamp: extractTimestampFromElement(el),
-                avatarUrl: author.avatarUrl,
-                profileUrl: author.profileUrl,
-                likes: 0,
-                platform: "facebook",
-                sourceUrl: articleUrl
-              });
-            }
-            return comments;
-          } catch (e) {
-            console.error("[NAC Facebook] Comment extraction failed:", e);
-            return [];
-          }
-        },
-        getReaderViewConfig: () => ({
-          showEditor: false,
-          showEntityBar: true,
-          showClaimsBar: true,
-          showComments: true,
-          platformLabel: "f Facebook Post"
-        })
-      };
-      PlatformHandler.register("facebook", FacebookHandler);
-    }
-  });
-
-  // src/platforms/instagram.js
-  function parseTimestampToUnix2(timestamp) {
-    if (!timestamp) return Math.floor(Date.now() / 1e3);
-    if (typeof timestamp === "number") {
-      return timestamp > 4102444800 ? Math.floor(timestamp / 1e3) : timestamp;
-    }
-    const parsed = new Date(timestamp);
-    if (!isNaN(parsed.getTime())) {
-      return Math.floor(parsed.getTime() / 1e3);
-    }
-    const now = Date.now();
-    const relMatch = String(timestamp).match(/^(\d+)\s*(h|m|d|hour|minute|day|week|month)s?\s*(ago)?$/i);
-    if (relMatch) {
-      const amount = parseInt(relMatch[1]);
-      const unit = relMatch[2].toLowerCase();
-      const msMap = { h: 36e5, m: 6e4, d: 864e5, hour: 36e5, minute: 6e4, day: 864e5, week: 6048e5, month: 2592e6 };
-      const ms = msMap[unit] || 36e5;
-      return Math.floor((now - amount * ms) / 1e3);
-    }
-    if (/^yesterday$/i.test(timestamp)) return Math.floor((now - 864e5) / 1e3);
-    if (/^just now$/i.test(timestamp)) return Math.floor(now / 1e3);
-    return Math.floor(now / 1e3);
-  }
-  function extractFromContainer2(container) {
-    const apiData = APIInterceptor.getBestPostData();
-    if (apiData) {
-      console.log("[NAC Instagram] Extracted via API interception");
-      return buildArticleFromAPIData2(apiData, container);
-    }
-    const fiberData = getReactFiberData2(container);
-    if (fiberData && (fiberData.text || fiberData.authorName)) {
-      console.log("[NAC Instagram] Extracted via React fiber");
-      return buildArticleFromFiberData2(fiberData, container);
-    }
-    const ariaData = extractViaARIA2(container);
-    if (ariaData.text && ariaData.text.length > 5) {
-      console.log("[NAC Instagram] Extracted via ARIA attributes");
-      return buildArticleFromExtractedData2(ariaData, container);
-    }
-    const patternData = extractViaPatterns2(container);
-    if (patternData.text && patternData.text.length > 5) {
-      console.log("[NAC Instagram] Extracted via text patterns");
-      return buildArticleFromExtractedData2(patternData, container);
-    }
-    console.log("[NAC Instagram] Falling back to raw text extraction");
-    return buildArticleFromRawText2(container);
-  }
-  function getReactFiberData2(element) {
-    try {
-      const fiberKey = Object.keys(element).find(
-        (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$") || k.startsWith("__reactProps$")
-      );
-      if (!fiberKey) return null;
-      let fiber = element[fiberKey];
-      for (let i = 0; i < 30 && fiber; i++) {
-        const props = fiber.memoizedProps || fiber.pendingProps || {};
-        if (props.post) return flattenPostData2(props.post);
-        if (props.media) return flattenPostData2(props.media);
-        if (props.shortcode_media) return flattenPostData2(props.shortcode_media);
+        if (props.media) return flattenPostData(props.media);
+        if (props.shortcode_media) return flattenPostData(props.shortcode_media);
         if (props.__typename === "XDTGraphImage" || props.__typename === "XDTGraphVideo" || props.__typename === "XDTGraphSidecar") {
-          return flattenPostData2(props);
+          return flattenPostData(props);
         }
-        if (props.data?.shortcode_media) return flattenPostData2(props.data.shortcode_media);
-        if (props.data?.xdt_shortcode_media) return flattenPostData2(props.data.xdt_shortcode_media);
-        if (props.data?.node) return flattenPostData2(props.data.node);
+        if (props.data?.shortcode_media) return flattenPostData(props.data.shortcode_media);
+        if (props.data?.xdt_shortcode_media) return flattenPostData(props.data.xdt_shortcode_media);
+        if (props.data?.node) return flattenPostData(props.data.node);
         fiber = fiber.return;
       }
     } catch (e) {
@@ -14822,7 +14325,7 @@ Enter option (1-4):`;
     }
     return null;
   }
-  function flattenPostData2(post) {
+  function flattenPostData(post) {
     const caption = post.edge_media_to_caption?.edges?.[0]?.node?.text || post.caption?.text || post.caption || post.text || "";
     return {
       text: typeof caption === "string" ? caption : "",
@@ -14840,9 +14343,9 @@ Enter option (1-4):`;
       comments: post.edge_media_to_comment?.count || post.comment_count || 0
     };
   }
-  function buildArticleFromFiberData2(fiberData, container) {
-    const images = fiberData.displayUrl ? [fiberData.displayUrl] : extractImagesFromElement2(container);
-    const postText = fiberData.text || extractTextFromElement2(container);
+  function buildArticleFromFiberData(fiberData, container) {
+    const images = fiberData.displayUrl ? [fiberData.displayUrl] : extractImagesFromElement(container);
+    const postText = fiberData.text || extractTextFromElement(container);
     const engagement = {
       likes: fiberData.likes || 0,
       comments: fiberData.comments || 0,
@@ -14855,12 +14358,12 @@ Enter option (1-4):`;
       avatarUrl: fiberData.authorAvatar || null
     };
     if (!author.name) {
-      const domAuthor = extractAuthorFromElement2(container);
+      const domAuthor = extractAuthorFromElement(container);
       author.name = domAuthor.name;
       author.profileUrl = domAuthor.profileUrl;
       author.avatarUrl = domAuthor.avatarUrl;
     }
-    const timestamp = fiberData.timestamp ? typeof fiberData.timestamp === "number" ? new Date(fiberData.timestamp * 1e3).toISOString() : fiberData.timestamp : extractTimestampFromElement2(container);
+    const timestamp = fiberData.timestamp ? typeof fiberData.timestamp === "number" ? new Date(fiberData.timestamp * 1e3).toISOString() : fiberData.timestamp : extractTimestampFromElement(container);
     const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
     const isReel = /\/reel\//.test(window.location.pathname) || fiberData.isVideo;
     const contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
@@ -14871,7 +14374,7 @@ Enter option (1-4):`;
       url: fiberData.url || ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: parseTimestampToUnix2(timestamp),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -14889,14 +14392,14 @@ Enter option (1-4):`;
       wordCount: postText.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags3(postText),
+      keywords: extractHashtags2(postText),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
       dateModified: null
     };
   }
-  function extractViaARIA2(container) {
+  function extractViaARIA(container) {
     const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
     const mainArticle = container.closest("article") || container.querySelector("article") || container;
     const headerEl = mainArticle.querySelector("header") || mainArticle;
@@ -14955,14 +14458,14 @@ Enter option (1-4):`;
     }
     return data;
   }
-  function extractViaPatterns2(container) {
+  function extractViaPatterns(container) {
     const data = { text: "", author: { name: "", profileUrl: "", avatarUrl: "" }, timestamp: null, images: [] };
-    const authorResult = identifyAuthorByStyle2(container);
+    const authorResult = identifyAuthorByStyle(container);
     if (authorResult) {
       data.author.name = authorResult.name;
       data.author.profileUrl = authorResult.profileUrl;
     }
-    const avatarResult = identifyAvatarByStyle2(container);
+    const avatarResult = identifyAvatarByStyle(container);
     if (avatarResult) {
       data.author.avatarUrl = avatarResult;
     }
@@ -14991,11 +14494,11 @@ Enter option (1-4):`;
     if (timeEl) {
       data.timestamp = timeEl.getAttribute("datetime");
     } else {
-      data.timestamp = identifyTimestampByPattern2(container);
+      data.timestamp = identifyTimestampByPattern(container);
     }
     return data;
   }
-  function identifyAuthorByStyle2(container) {
+  function identifyAuthorByStyle(container) {
     const headerEl = container.querySelector("header") || container;
     const links = headerEl.querySelectorAll("a[href]");
     for (const link of links) {
@@ -15035,7 +14538,7 @@ Enter option (1-4):`;
     }
     return null;
   }
-  function identifyAvatarByStyle2(container) {
+  function identifyAvatarByStyle(container) {
     const headerEl = container.querySelector("header") || container;
     const imgs = headerEl.querySelectorAll("img[src], canvas + img");
     const containerRect = container.getBoundingClientRect();
@@ -15085,7 +14588,7 @@ Enter option (1-4):`;
     candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
     return candidates[0]?.text || "";
   }
-  function identifyTimestampByPattern2(container) {
+  function identifyTimestampByPattern(container) {
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
     let node;
     while (node = walker.nextNode()) {
@@ -15100,12 +14603,12 @@ Enter option (1-4):`;
     }
     return null;
   }
-  function buildArticleFromRawText2(container) {
-    const postText = extractTextFromElement2(container);
-    const author = extractAuthorFromElement2(container);
-    const timestamp = extractTimestampFromElement2(container);
-    const images = extractImagesFromElement2(container);
-    const engagement = extractEngagementFromElement2(container);
+  function buildArticleFromRawText(container) {
+    const postText = extractTextFromElement(container);
+    const author = extractAuthorFromElement(container);
+    const timestamp = extractTimestampFromElement(container);
+    const images = extractImagesFromElement(container);
+    const engagement = extractEngagementFromElement(container);
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
     const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
     const isReel = /\/reel\//.test(window.location.pathname);
@@ -15117,7 +14620,7 @@ Enter option (1-4):`;
       url: ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: parseTimestampToUnix2(timestamp),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -15135,19 +14638,19 @@ Enter option (1-4):`;
       wordCount: postText.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags3(postText),
+      keywords: extractHashtags2(postText),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
       dateModified: null
     };
   }
-  function buildArticleFromExtractedData2(data, container) {
-    const images = data.images && data.images.length > 0 ? data.images : extractImagesFromElement2(container);
-    const engagement = extractEngagementFromElement2(container);
+  function buildArticleFromExtractedData(data, container) {
+    const images = data.images && data.images.length > 0 ? data.images : extractImagesFromElement(container);
+    const engagement = extractEngagementFromElement(container);
     const postText = data.text;
     const author = data.author || { name: "", profileUrl: null, avatarUrl: null };
-    const timestamp = data.timestamp || extractTimestampFromElement2(container);
+    const timestamp = data.timestamp || extractTimestampFromElement(container);
     const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
     const isReel = /\/reel\//.test(window.location.pathname);
     const contentHtml = buildInstagramStyledContent(postText, author, timestamp, images);
@@ -15158,7 +14661,7 @@ Enter option (1-4):`;
       url: ogUrl,
       domain: "instagram.com",
       siteName: "Instagram",
-      publishedAt: parseTimestampToUnix2(timestamp),
+      publishedAt: parseTimestampToUnix(timestamp),
       content: contentHtml,
       textContent: postText,
       excerpt: postText.substring(0, 200),
@@ -15176,14 +14679,14 @@ Enter option (1-4):`;
       wordCount: postText.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags3(postText),
+      keywords: extractHashtags2(postText),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
       dateModified: null
     };
   }
-  function extractFromOGTags2() {
+  function extractFromOGTags() {
     const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
     const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
@@ -15222,20 +14725,20 @@ Enter option (1-4):`;
       wordCount: caption.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags3(caption),
+      keywords: extractHashtags2(caption),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
       dateModified: null
     };
   }
-  function extractTextFromElement2(el) {
+  function extractTextFromElement(el) {
     const clone = el.cloneNode(true);
     clone.querySelectorAll('svg, [role="button"], [role="navigation"], [role="toolbar"], button, nav').forEach((x) => x.remove());
     const text = clone.textContent?.trim() || "";
     return text.replace(/\s+/g, " ").trim();
   }
-  function extractAuthorFromElement2(el) {
+  function extractAuthorFromElement(el) {
     const result = { name: "", profileUrl: null, avatarUrl: null };
     const headerEl = el.querySelector("header") || el;
     const links = headerEl.querySelectorAll('a[href*="/"]');
@@ -15260,7 +14763,7 @@ Enter option (1-4):`;
     }
     return result;
   }
-  function extractTimestampFromElement2(el) {
+  function extractTimestampFromElement(el) {
     const timeEl = el.querySelector("time[datetime]");
     if (timeEl) {
       return timeEl.getAttribute("datetime");
@@ -15272,7 +14775,7 @@ Enter option (1-4):`;
     }
     return null;
   }
-  function extractImagesFromElement2(el) {
+  function extractImagesFromElement(el) {
     const images = [];
     el.querySelectorAll("img[src]").forEach((img) => {
       const src = img.src;
@@ -15307,25 +14810,25 @@ Enter option (1-4):`;
     }
     return images;
   }
-  function extractEngagementFromElement2(el) {
+  function extractEngagementFromElement(el) {
     const result = { likes: 0, comments: 0, shares: 0, views: 0 };
     const allText = el.textContent || "";
     const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*like/i);
-    if (likeMatch) result.likes = parseCount2(likeMatch[1]);
+    if (likeMatch) result.likes = parseCount(likeMatch[1]);
     const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
-    if (commentMatch) result.comments = parseCount2(commentMatch[1]);
+    if (commentMatch) result.comments = parseCount(commentMatch[1]);
     const viewMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*view/i);
-    if (viewMatch) result.views = parseCount2(viewMatch[1]);
+    if (viewMatch) result.views = parseCount(viewMatch[1]);
     return result;
   }
-  function parseCount2(text) {
+  function parseCount(text) {
     if (!text) return 0;
     text = text.replace(/,/g, "");
     if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
     if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
     return parseInt(text) || 0;
   }
-  function extractHashtags3(text) {
+  function extractHashtags2(text) {
     return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
   }
   function buildInstagramStyledContent(text, author, timestamp, images) {
@@ -15353,7 +14856,7 @@ Enter option (1-4):`;
     html += "</div>";
     return html;
   }
-  function buildArticleFromAPIData2(data, container) {
+  function buildArticleFromAPIData(data, container) {
     const postText = data.message || "";
     const author = {
       name: data.author || "",
@@ -15390,7 +14893,7 @@ Enter option (1-4):`;
       wordCount: postText.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "SocialMediaPosting" },
-      keywords: extractHashtags3(postText),
+      keywords: extractHashtags2(postText),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
@@ -15429,12 +14932,12 @@ Enter option (1-4):`;
         extract: async (containerEl) => {
           try {
             if (!containerEl) {
-              return extractFromOGTags2();
+              return extractFromOGTags();
             }
-            return extractFromContainer2(containerEl);
+            return extractFromContainer(containerEl);
           } catch (e) {
             console.error("[NAC Instagram] Extraction failed:", e);
-            return extractFromOGTags2();
+            return extractFromOGTags();
           }
         },
         extractComments: async (articleUrl) => {
@@ -15492,13 +14995,13 @@ Enter option (1-4):`;
   });
 
   // src/platforms/tiktok.js
-  function extractFromContainer3(container) {
-    const postText = extractTextFromElement3(container);
-    const author = extractAuthorFromElement3(container);
-    const timestamp = extractTimestampFromElement3(container);
+  function extractFromContainer2(container) {
+    const postText = extractTextFromElement2(container);
+    const author = extractAuthorFromElement2(container);
+    const timestamp = extractTimestampFromElement2(container);
     const thumbnail = extractThumbnailFromElement(container);
-    const engagement = extractEngagementFromElement3(container);
-    const hashtags = extractHashtags4(postText);
+    const engagement = extractEngagementFromElement2(container);
+    const hashtags = extractHashtags3(postText);
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
     const ogUrl = document.querySelector('meta[property="og:url"]')?.content || window.location.href;
     let contentHtml = buildTikTokStyledContent(postText, author, timestamp, thumbnail || ogImage, hashtags);
@@ -15540,7 +15043,7 @@ Enter option (1-4):`;
       dateModified: null
     };
   }
-  function extractFromOGTags3() {
+  function extractFromOGTags2() {
     const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
     const ogDesc = document.querySelector('meta[property="og:description"]')?.content || "";
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || "";
@@ -15595,20 +15098,20 @@ Enter option (1-4):`;
       wordCount: caption.split(/\s+/).filter((w) => w).length,
       readingTimeMinutes: 1,
       structuredData: { type: "VideoObject" },
-      keywords: extractHashtags4(caption),
+      keywords: extractHashtags3(caption),
       language: document.documentElement.lang || "en",
       isPaywalled: false,
       section: null,
       dateModified: null
     };
   }
-  function extractTextFromElement3(el) {
+  function extractTextFromElement2(el) {
     const clone = el.cloneNode(true);
     clone.querySelectorAll('svg, [role="button"], [role="navigation"], button, nav, video').forEach((x) => x.remove());
     const text = clone.textContent?.trim() || "";
     return text.replace(/\s+/g, " ").trim();
   }
-  function extractAuthorFromElement3(el) {
+  function extractAuthorFromElement2(el) {
     const result = { name: "", profileUrl: null, avatarUrl: null };
     const usernameEl = el.querySelector(
       '[data-e2e="browse-username"], [data-e2e="video-author-uniqueid"], a[href*="/@"] [class*="uniqueId"], a[href*="/@"] [class*="username"]'
@@ -15648,7 +15151,7 @@ Enter option (1-4):`;
     }
     return result;
   }
-  function extractTimestampFromElement3(el) {
+  function extractTimestampFromElement2(el) {
     const timeEl = el.querySelector("time[datetime]");
     if (timeEl) {
       return timeEl.getAttribute("datetime");
@@ -15686,37 +15189,37 @@ Enter option (1-4):`;
     }
     return null;
   }
-  function extractEngagementFromElement3(el) {
+  function extractEngagementFromElement2(el) {
     const result = { likes: 0, comments: 0, shares: 0, views: 0 };
     const likesEl = el.querySelector('[data-e2e="browse-like-count"], [data-e2e="like-count"]');
     const commentsEl = el.querySelector('[data-e2e="browse-comment-count"], [data-e2e="comment-count"]');
     const sharesEl = el.querySelector('[data-e2e="share-count"]');
     const viewsEl = el.querySelector('[data-e2e="video-views"]');
-    if (likesEl) result.likes = parseCount3(likesEl.textContent?.trim());
-    if (commentsEl) result.comments = parseCount3(commentsEl.textContent?.trim());
-    if (sharesEl) result.shares = parseCount3(sharesEl.textContent?.trim());
-    if (viewsEl) result.views = parseCount3(viewsEl.textContent?.trim());
+    if (likesEl) result.likes = parseCount2(likesEl.textContent?.trim());
+    if (commentsEl) result.comments = parseCount2(commentsEl.textContent?.trim());
+    if (sharesEl) result.shares = parseCount2(sharesEl.textContent?.trim());
+    if (viewsEl) result.views = parseCount2(viewsEl.textContent?.trim());
     if (result.likes === 0 && result.comments === 0) {
       const allText = el.textContent || "";
       const likeMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*like/i);
-      if (likeMatch) result.likes = parseCount3(likeMatch[1]);
+      if (likeMatch) result.likes = parseCount2(likeMatch[1]);
       const commentMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*comment/i);
-      if (commentMatch) result.comments = parseCount3(commentMatch[1]);
+      if (commentMatch) result.comments = parseCount2(commentMatch[1]);
       const shareMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*share/i);
-      if (shareMatch) result.shares = parseCount3(shareMatch[1]);
+      if (shareMatch) result.shares = parseCount2(shareMatch[1]);
       const viewMatch = allText.match(/(\d+[.,]?\d*[KkMm]?)\s*view/i);
-      if (viewMatch) result.views = parseCount3(viewMatch[1]);
+      if (viewMatch) result.views = parseCount2(viewMatch[1]);
     }
     return result;
   }
-  function parseCount3(text) {
+  function parseCount2(text) {
     if (!text) return 0;
     text = text.replace(/,/g, "");
     if (text.match(/[Kk]/)) return Math.round(parseFloat(text) * 1e3);
     if (text.match(/[Mm]/)) return Math.round(parseFloat(text) * 1e6);
     return parseInt(text) || 0;
   }
-  function extractHashtags4(text) {
+  function extractHashtags3(text) {
     return (text.match(/#\w+/g) || []).map((h) => h.replace("#", "").toLowerCase());
   }
   function buildTikTokStyledContent(text, author, timestamp, thumbnail, hashtags) {
@@ -15787,12 +15290,12 @@ Enter option (1-4):`;
         extract: async (containerEl) => {
           try {
             if (!containerEl) {
-              return extractFromOGTags3();
+              return extractFromOGTags2();
             }
-            return extractFromContainer3(containerEl);
+            return extractFromContainer2(containerEl);
           } catch (e) {
             console.error("[NAC TikTok] Extraction failed:", e);
-            return extractFromOGTags3();
+            return extractFromOGTags2();
           }
         },
         extractComments: async (articleUrl) => {
