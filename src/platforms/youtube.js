@@ -12,6 +12,7 @@ const YouTubeHandler = {
 
     extract: async () => {
         try {
+            const description = extractDescription();
             const article = {
                 title: extractVideoTitle(),
                 byline: extractChannelName(),
@@ -21,7 +22,8 @@ const YouTubeHandler = {
                 publishedAt: extractPublishDate(),
                 content: buildVideoContent(),       // HTML representation
                 textContent: buildTextContent(),     // Plain text
-                excerpt: extractDescription().substring(0, 200),
+                excerpt: description.substring(0, 200),
+                description: description,            // Store separately for structured access
                 featuredImage: extractThumbnail(),
                 publicationIcon: 'https://www.youtube.com/favicon.ico',
 
@@ -121,14 +123,41 @@ function extractVideoTitle() {
 }
 
 function extractChannelName() {
-    // Channel name is separate from video title — target channel-specific elements
-    return document.querySelector(
-        'ytd-channel-name yt-formatted-string a, ' +
-        '#channel-name a, ' +
-        '#owner #channel-name a, ' +
-        'a.yt-simple-endpoint[href*="/@"]'
-    )?.textContent?.trim() ||
-    document.querySelector('link[itemprop="name"]')?.content || '';
+    // Priority 1: The most visible channel name on the page
+    // YouTube always shows the channel name prominently
+    const selectors = [
+        '#channel-name a',                           // Desktop main
+        'ytd-channel-name yt-formatted-string a',    // Desktop alt
+        '#owner #channel-name a',                    // Desktop owner section
+        '#owner-name a',                             // Alt layout
+        'a.yt-simple-endpoint[href*="/@"]',          // Handle-based link
+        '#upload-info a[href*="/@"]',                // Upload info section
+        'link[itemprop="name"]',                     // Structured data
+    ];
+    
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+            const text = el.textContent?.trim() || el.content?.trim();
+            if (text && text.length > 0 && text.length < 100) {
+                console.log('[NAC YouTube] Channel name found via:', sel, '→', text);
+                return text;
+            }
+        }
+    }
+    
+    // Fallback: OG title often ends with " - YouTube"
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || '';
+    // Channel name might be in og:site_name on channel pages
+    const ogSiteName = document.querySelector('meta[property="og:site_name"]')?.content;
+    
+    // Last resort: page title parsing
+    const pageTitle = document.title;
+    // YouTube titles are usually "Video Title - Channel Name"
+    // But only on video pages, not search/home
+    
+    console.log('[NAC YouTube] Channel name: falling back to OG/title data');
+    return ogSiteName !== 'YouTube' ? ogSiteName : '';
 }
 
 function getCanonicalVideoUrl() {
@@ -455,11 +484,11 @@ function buildVideoContent() {
     if (meta.isLive) html += `<p>🔴 <strong>Live Stream</strong></p>`;
     html += '</div>';
 
-    // Description
+    // Description — clearly labeled section
     if (desc) {
         html += `<div class="nac-video-description">
-            <h3>Description</h3>
-            ${desc.split('\n').filter(l => l.trim()).map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}
+            <h3>📄 Description</h3>
+            <div class="nac-video-description-text">${desc.split('\n').filter(l => l.trim()).map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}</div>
         </div>`;
     }
 
@@ -470,7 +499,71 @@ function buildTextContent() {
     return `${extractVideoTitle()}\n\nChannel: ${extractChannelName()}\n\n${extractDescription()}`;
 }
 
+// Parse a pasted YouTube transcript with timestamps + duration text
+function parseYouTubeTranscript(rawText) {
+    const lines = rawText.split('\n');
+    const segments = [];
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Match timestamp at start: "0:00", "1:06", "12:34"
+        const tsMatch = trimmed.match(/^(\d{1,2}:\d{2})/);
+        if (!tsMatch) {
+            // No timestamp — might be continuation text
+            if (segments.length > 0) {
+                segments[segments.length - 1].text += ' ' + trimmed;
+            }
+            continue;
+        }
+
+        const timestamp = tsMatch[1];
+        let remaining = trimmed.substring(tsMatch[0].length);
+
+        // Remove the duration text that YouTube adds
+        // Patterns: "8 seconds", "1 minute, 6 seconds", "2 minutes, 52 seconds"
+        remaining = remaining.replace(/^\d+\s*(second|minute|hour)s?(,\s*\d+\s*(second|minute|hour)s?)?/i, '');
+
+        const text = remaining.trim();
+        if (text) {
+            segments.push({ timestamp, text });
+        }
+    }
+
+    return {
+        // Clean article-like text (timestamps removed, proper sentences)
+        cleanText: segments.map(s => s.text).join(' '),
+        // Timestamped version (for metadata)
+        timestampedText: segments.map(s => `[${s.timestamp}] ${s.text}`).join('\n'),
+        // Raw segments for structured access
+        segments
+    };
+}
+
+// Format clean transcript text into paragraphs (every ~3-4 sentences)
+function formatTranscriptAsParagraphs(cleanText) {
+    const sentences = cleanText.match(/[^.!?]+[.!?]+\s*/g) || [cleanText];
+    let html = '';
+    let paragraph = '';
+    let sentenceCount = 0;
+
+    for (const sentence of sentences) {
+        paragraph += sentence;
+        sentenceCount++;
+        if (sentenceCount >= 3) {
+            html += `<p>${Utils.escapeHtml(paragraph.trim())}</p>`;
+            paragraph = '';
+            sentenceCount = 0;
+        }
+    }
+    if (paragraph.trim()) {
+        html += `<p>${Utils.escapeHtml(paragraph.trim())}</p>`;
+    }
+    return html;
+}
+
 // Register
 PlatformHandler.register('youtube', YouTubeHandler);
 
-export { YouTubeHandler, extractTranscript as youtubeExtractTranscript };
+export { YouTubeHandler, extractTranscript as youtubeExtractTranscript, parseYouTubeTranscript, formatTranscriptAsParagraphs };

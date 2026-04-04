@@ -11,19 +11,19 @@ export const EventBuilder = {
       markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
     }
 
-    // Append transcript for video content
-    if (article.transcript) {
-      markdownContent += '\n\n---\n\n## Transcript\n\n```\n' + article.transcript + '\n```';
-    }
-
     // Build metadata header for published content
     let metadataHeader = '---\n';
     metadataHeader += `**Source**: [${article.title}](${article.url})\n`;
 
-    const metaParts = [];
-    if (article.siteName) metaParts.push(`**Publisher**: ${article.siteName}`);
-    if (article.byline) metaParts.push(`**Author**: ${article.byline}`);
-    if (metaParts.length) metadataHeader += metaParts.join(' | ') + '\n';
+    // For video content, use "Channel" instead of "Author"
+    if (article.contentType === 'video' && article.byline) {
+      metadataHeader += `**Channel**: ${article.byline}\n`;
+    } else {
+      const metaParts = [];
+      if (article.siteName) metaParts.push(`**Publisher**: ${article.siteName}`);
+      if (article.byline) metaParts.push(`**Author**: ${article.byline}`);
+      if (metaParts.length) metadataHeader += metaParts.join(' | ') + '\n';
+    }
 
     const dateParts = [];
     if (article.publishedAt) {
@@ -33,6 +33,24 @@ export const EventBuilder = {
     metadataHeader += dateParts.join(' | ') + '\n';
 
     metadataHeader += '---\n\n';
+
+    // For video content, include description and transcript as separate sections
+    if (article.contentType === 'video') {
+      // Include description section
+      if (article.description) {
+        markdownContent += '\n\n## Description\n\n' + article.description;
+      }
+
+      // Include clean transcript text as formatted paragraphs
+      if (article.transcript) {
+        markdownContent += '\n\n## Transcript\n\n' + article.transcript;
+      }
+    } else {
+      // Append transcript for non-video content (legacy format)
+      if (article.transcript) {
+        markdownContent += '\n\n---\n\n## Transcript\n\n```\n' + article.transcript + '\n```';
+      }
+    }
 
     // Prepend metadata header to content
     const content = metadataHeader + markdownContent;
@@ -126,6 +144,8 @@ export const EventBuilder = {
       if (article.videoMeta.duration) tags.push(['duration', article.videoMeta.duration]);
       if (article.byline) tags.push(['channel', article.byline]);
       if (article.transcript) tags.push(['transcript', 'true']);
+      if (article.transcriptTimestamped) tags.push(['transcript_timestamped', 'true']);
+      if (article.description) tags.push(['has_description', 'true']);
     }
 
     // Add Twitter/X-specific tags (Phase 6)

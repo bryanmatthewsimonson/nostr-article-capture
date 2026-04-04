@@ -5386,16 +5386,18 @@ ${items}
           if (markdownContent && markdownContent.includes("<")) {
             markdownContent = ContentExtractor.htmlToMarkdown(markdownContent);
           }
-          if (article.transcript) {
-            markdownContent += "\n\n---\n\n## Transcript\n\n```\n" + article.transcript + "\n```";
-          }
           let metadataHeader = "---\n";
           metadataHeader += `**Source**: [${article.title}](${article.url})
 `;
-          const metaParts = [];
-          if (article.siteName) metaParts.push(`**Publisher**: ${article.siteName}`);
-          if (article.byline) metaParts.push(`**Author**: ${article.byline}`);
-          if (metaParts.length) metadataHeader += metaParts.join(" | ") + "\n";
+          if (article.contentType === "video" && article.byline) {
+            metadataHeader += `**Channel**: ${article.byline}
+`;
+          } else {
+            const metaParts = [];
+            if (article.siteName) metaParts.push(`**Publisher**: ${article.siteName}`);
+            if (article.byline) metaParts.push(`**Author**: ${article.byline}`);
+            if (metaParts.length) metadataHeader += metaParts.join(" | ") + "\n";
+          }
           const dateParts = [];
           if (article.publishedAt) {
             dateParts.push(`**Published**: ${new Date(article.publishedAt * 1e3).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`);
@@ -5403,6 +5405,18 @@ ${items}
           dateParts.push(`**Archived**: ${(/* @__PURE__ */ new Date()).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`);
           metadataHeader += dateParts.join(" | ") + "\n";
           metadataHeader += "---\n\n";
+          if (article.contentType === "video") {
+            if (article.description) {
+              markdownContent += "\n\n## Description\n\n" + article.description;
+            }
+            if (article.transcript) {
+              markdownContent += "\n\n## Transcript\n\n" + article.transcript;
+            }
+          } else {
+            if (article.transcript) {
+              markdownContent += "\n\n---\n\n## Transcript\n\n```\n" + article.transcript + "\n```";
+            }
+          }
           const content = metadataHeader + markdownContent;
           const tags = [
             ["d", await EventBuilder.generateDTag(article.url)],
@@ -5468,6 +5482,8 @@ ${items}
             if (article.videoMeta.duration) tags.push(["duration", article.videoMeta.duration]);
             if (article.byline) tags.push(["channel", article.byline]);
             if (article.transcript) tags.push(["transcript", "true"]);
+            if (article.transcriptTimestamped) tags.push(["transcript_timestamped", "true"]);
+            if (article.description) tags.push(["has_description", "true"]);
           }
           if (article.tweetMeta) {
             if (article.tweetMeta.tweetId) tags.push(["tweet_id", article.tweetMeta.tweetId]);
@@ -6597,9 +6613,37 @@ Enter number:`);
     )?.textContent?.trim() || document.title.replace(" - YouTube", "").trim();
   }
   function extractChannelName() {
-    return document.querySelector(
-      'ytd-channel-name yt-formatted-string a, #channel-name a, #owner #channel-name a, a.yt-simple-endpoint[href*="/@"]'
-    )?.textContent?.trim() || document.querySelector('link[itemprop="name"]')?.content || "";
+    const selectors = [
+      "#channel-name a",
+      // Desktop main
+      "ytd-channel-name yt-formatted-string a",
+      // Desktop alt
+      "#owner #channel-name a",
+      // Desktop owner section
+      "#owner-name a",
+      // Alt layout
+      'a.yt-simple-endpoint[href*="/@"]',
+      // Handle-based link
+      '#upload-info a[href*="/@"]',
+      // Upload info section
+      'link[itemprop="name"]'
+      // Structured data
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const text = el.textContent?.trim() || el.content?.trim();
+        if (text && text.length > 0 && text.length < 100) {
+          console.log("[NAC YouTube] Channel name found via:", sel, "\u2192", text);
+          return text;
+        }
+      }
+    }
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.content || "";
+    const ogSiteName = document.querySelector('meta[property="og:site_name"]')?.content;
+    const pageTitle = document.title;
+    console.log("[NAC YouTube] Channel name: falling back to OG/title data");
+    return ogSiteName !== "YouTube" ? ogSiteName : "";
   }
   function getCanonicalVideoUrl() {
     const videoId = new URLSearchParams(window.location.search).get("v") || window.location.pathname.split("/").pop();
@@ -6858,8 +6902,8 @@ Enter number:`);
     html += "</div>";
     if (desc) {
       html += `<div class="nac-video-description">
-            <h3>Description</h3>
-            ${desc.split("\n").filter((l) => l.trim()).map((l) => `<p>${Utils.escapeHtml(l)}</p>`).join("")}
+            <h3>\u{1F4C4} Description</h3>
+            <div class="nac-video-description-text">${desc.split("\n").filter((l) => l.trim()).map((l) => `<p>${Utils.escapeHtml(l)}</p>`).join("")}</div>
         </div>`;
     }
     return html;
@@ -6870,6 +6914,55 @@ Enter number:`);
 Channel: ${extractChannelName()}
 
 ${extractDescription()}`;
+  }
+  function parseYouTubeTranscript(rawText) {
+    const lines = rawText.split("\n");
+    const segments = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const tsMatch = trimmed.match(/^(\d{1,2}:\d{2})/);
+      if (!tsMatch) {
+        if (segments.length > 0) {
+          segments[segments.length - 1].text += " " + trimmed;
+        }
+        continue;
+      }
+      const timestamp = tsMatch[1];
+      let remaining = trimmed.substring(tsMatch[0].length);
+      remaining = remaining.replace(/^\d+\s*(second|minute|hour)s?(,\s*\d+\s*(second|minute|hour)s?)?/i, "");
+      const text = remaining.trim();
+      if (text) {
+        segments.push({ timestamp, text });
+      }
+    }
+    return {
+      // Clean article-like text (timestamps removed, proper sentences)
+      cleanText: segments.map((s) => s.text).join(" "),
+      // Timestamped version (for metadata)
+      timestampedText: segments.map((s) => `[${s.timestamp}] ${s.text}`).join("\n"),
+      // Raw segments for structured access
+      segments
+    };
+  }
+  function formatTranscriptAsParagraphs(cleanText) {
+    const sentences = cleanText.match(/[^.!?]+[.!?]+\s*/g) || [cleanText];
+    let html = "";
+    let paragraph = "";
+    let sentenceCount = 0;
+    for (const sentence of sentences) {
+      paragraph += sentence;
+      sentenceCount++;
+      if (sentenceCount >= 3) {
+        html += `<p>${Utils.escapeHtml(paragraph.trim())}</p>`;
+        paragraph = "";
+        sentenceCount = 0;
+      }
+    }
+    if (paragraph.trim()) {
+      html += `<p>${Utils.escapeHtml(paragraph.trim())}</p>`;
+    }
+    return html;
   }
   var YouTubeHandler;
   var init_youtube = __esm({
@@ -6885,6 +6978,7 @@ ${extractDescription()}`;
         },
         extract: async () => {
           try {
+            const description = extractDescription();
             const article = {
               title: extractVideoTitle(),
               byline: extractChannelName(),
@@ -6896,7 +6990,9 @@ ${extractDescription()}`;
               // HTML representation
               textContent: buildTextContent(),
               // Plain text
-              excerpt: extractDescription().substring(0, 200),
+              excerpt: description.substring(0, 200),
+              description,
+              // Store separately for structured access
               featuredImage: extractThumbnail(),
               publicationIcon: "https://www.youtube.com/favicon.ico",
               // YouTube-specific
@@ -7125,6 +7221,12 @@ ${extractDescription()}`;
             ${article.content || ""}
           </div>
           
+          ${(article.contentType === "video" || article.platform === "youtube") && article.description ? `
+          <div class="nac-description-section" id="nac-description-section">
+            <h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">\u{1F4C4} Description</h3>
+            <div class="nac-description-body" id="nac-description-body" style="padding: 12px; background: var(--nac-bg-secondary, #1a1a2e); border-radius: 8px; margin-bottom: 1em; line-height: 1.6; white-space: pre-wrap; font-size: 14px; color: var(--nac-text-secondary, #ccc);">${Utils.escapeHtml(article.description)}</div>
+          </div>` : ""}
+          
           ${article.transcript ? `
           <div class="nac-transcript-section">
             <div class="nac-transcript-header" id="nac-transcript-toggle" role="button" tabindex="0" aria-expanded="false">
@@ -7343,27 +7445,35 @@ ${extractDescription()}`;
             transcriptSaveBtn.addEventListener("click", () => {
               const textarea = document.getElementById("nac-transcript-input");
               if (!textarea) return;
-              const text = textarea.value.trim();
-              if (!text) {
+              const rawText = textarea.value.trim();
+              if (!rawText) {
                 Utils.showToast("Paste transcript text first", "error");
                 return;
               }
-              ReaderView.article.transcript = text;
-              ReaderView.article.wordCount = text.split(/\s+/).filter((w) => w).length;
+              const parsed = parseYouTubeTranscript(rawText);
+              ReaderView.article.transcript = parsed.cleanText;
+              ReaderView.article.transcriptTimestamped = parsed.timestampedText;
+              ReaderView.article.transcriptSegments = parsed.segments;
+              ReaderView.article.wordCount = parsed.cleanText.split(/\s+/).filter((w) => w).length;
               ReaderView.article.readingTimeMinutes = Math.ceil(ReaderView.article.wordCount / 225);
+              const formattedHtml = formatTranscriptAsParagraphs(parsed.cleanText);
               const instructionsEl = textarea.previousElementSibling;
               if (instructionsEl && instructionsEl.classList.contains("nac-transcript-instructions")) {
                 instructionsEl.remove();
               }
-              const formattedDiv = document.createElement("pre");
-              formattedDiv.className = "nac-transcript-text";
-              formattedDiv.textContent = text;
-              textarea.parentNode.replaceChild(formattedDiv, textarea);
+              const contentEl2 = document.getElementById("nac-content");
+              if (contentEl2) {
+                const transcriptSection = document.createElement("div");
+                transcriptSection.className = "nac-transcript-content";
+                transcriptSection.innerHTML = `<h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">\u{1F4DD} Transcript</h3>${formattedHtml}`;
+                contentEl2.appendChild(transcriptSection);
+              }
+              textarea.remove();
               transcriptSaveBtn.remove();
               const body = document.getElementById("nac-transcript-body");
               const textEl = document.getElementById("nac-transcript-text");
               if (body && textEl) {
-                textEl.textContent = text;
+                textEl.textContent = parsed.timestampedText;
                 body.style.display = "";
               }
               const loadBtn = document.getElementById("nac-transcript-load-btn");

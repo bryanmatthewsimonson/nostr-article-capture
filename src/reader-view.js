@@ -12,7 +12,7 @@ import { EventBuilder } from './event-builder.js';
 import { EntityBrowser } from './entity-browser.js';
 import { CommentExtractor } from './comment-extractor.js';
 import { PlatformAccount } from './platform-account.js';
-import { youtubeExtractTranscript } from './platforms/youtube.js';
+import { youtubeExtractTranscript, parseYouTubeTranscript, formatTranscriptAsParagraphs } from './platforms/youtube.js';
 
 export const ReaderView = {
   container: null,
@@ -158,6 +158,12 @@ export const ReaderView = {
           <div class="nac-article-body" id="nac-content" contenteditable="false">
             ${article.content || ''}
           </div>
+          
+          ${(article.contentType === 'video' || article.platform === 'youtube') && article.description ? `
+          <div class="nac-description-section" id="nac-description-section">
+            <h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">📄 Description</h3>
+            <div class="nac-description-body" id="nac-description-body" style="padding: 12px; background: var(--nac-bg-secondary, #1a1a2e); border-radius: 8px; margin-bottom: 1em; line-height: 1.6; white-space: pre-wrap; font-size: 14px; color: var(--nac-text-secondary, #ccc);">${Utils.escapeHtml(article.description)}</div>
+          </div>` : ''}
           
           ${article.transcript ? `
           <div class="nac-transcript-section">
@@ -398,32 +404,49 @@ export const ReaderView = {
       transcriptSaveBtn.addEventListener('click', () => {
         const textarea = document.getElementById('nac-transcript-input');
         if (!textarea) return;
-        const text = textarea.value.trim();
-        if (!text) {
+        const rawText = textarea.value.trim();
+        if (!rawText) {
           Utils.showToast('Paste transcript text first', 'error');
           return;
         }
-        // Store transcript
-        ReaderView.article.transcript = text;
-        ReaderView.article.wordCount = text.split(/\s+/).filter(w => w).length;
+
+        // Parse the pasted transcript (handles YouTube's timestamp+duration format)
+        const parsed = parseYouTubeTranscript(rawText);
+
+        // Store structured transcript data
+        ReaderView.article.transcript = parsed.cleanText;
+        ReaderView.article.transcriptTimestamped = parsed.timestampedText;
+        ReaderView.article.transcriptSegments = parsed.segments;
+        ReaderView.article.wordCount = parsed.cleanText.split(/\s+/).filter(w => w).length;
         ReaderView.article.readingTimeMinutes = Math.ceil(ReaderView.article.wordCount / 225);
 
-        // Replace textarea with formatted text
+        // Build formatted HTML from clean text
+        const formattedHtml = formatTranscriptAsParagraphs(parsed.cleanText);
+
+        // Remove instructions
         const instructionsEl = textarea.previousElementSibling;
         if (instructionsEl && instructionsEl.classList.contains('nac-transcript-instructions')) {
           instructionsEl.remove();
         }
-        const formattedDiv = document.createElement('pre');
-        formattedDiv.className = 'nac-transcript-text';
-        formattedDiv.textContent = text;
-        textarea.parentNode.replaceChild(formattedDiv, textarea);
+
+        // Replace textarea with formatted paragraphs INSIDE the content area (taggable)
+        const contentEl = document.getElementById('nac-content');
+        if (contentEl) {
+          const transcriptSection = document.createElement('div');
+          transcriptSection.className = 'nac-transcript-content';
+          transcriptSection.innerHTML = `<h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">📝 Transcript</h3>${formattedHtml}`;
+          contentEl.appendChild(transcriptSection);
+        }
+
+        // Remove the textarea and save button
+        textarea.remove();
         transcriptSaveBtn.remove();
 
-        // Also show in the transcript body if it was hidden
+        // Also show in the collapsible transcript body (timestamped version)
         const body = document.getElementById('nac-transcript-body');
         const textEl = document.getElementById('nac-transcript-text');
         if (body && textEl) {
-          textEl.textContent = text;
+          textEl.textContent = parsed.timestampedText;
           body.style.display = '';
         }
 
