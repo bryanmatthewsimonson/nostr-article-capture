@@ -43,6 +43,21 @@ export const STYLES = `
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
   
+  /* YouTube video layout — half-page overlay leaving player visible */
+  .nac-reader-container.nac-video-layout {
+    top: 40vh !important;
+    height: 60vh !important;
+    border-top: 2px solid var(--nac-primary);
+    border-radius: 12px 12px 0 0;
+  }
+
+  @media (max-width: 768px) {
+    .nac-reader-container.nac-video-layout {
+      top: 35vh !important;
+      height: 65vh !important;
+    }
+  }
+  
   /* Toolbar */
   .nac-reader-toolbar {
     display: flex;

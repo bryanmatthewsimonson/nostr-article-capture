@@ -177,14 +177,30 @@ function extractPublishDate() {
 }
 
 function extractDescription() {
-    // YouTube description is in the expandable section
-    const descEl = document.querySelector(
-        '#description-inline-expander yt-attributed-string, ' +
-        '#description yt-formatted-string, ' +
-        'meta[property="og:description"], ' +
-        'meta[name="description"]'
+    // Try the expanded description first (after "Show more" is clicked)
+    const expandedDesc = document.querySelector(
+        '#description-inline-expander .ytd-text-inline-expander, ' +
+        '#description-inner .ytd-text-inline-expander, ' +
+        'ytd-text-inline-expander[slot="content"], ' +
+        '#description ytd-attributed-string[slot="content"]'
     );
-    return descEl?.textContent?.trim() || descEl?.content || '';
+    if (expandedDesc?.textContent?.trim()) {
+        return expandedDesc.textContent.trim();
+    }
+    
+    // Try the collapsed version
+    const collapsedDesc = document.querySelector(
+        '#description-inline-expander, ' +
+        '#description yt-formatted-string, ' +
+        '#description ytd-attributed-string'
+    );
+    if (collapsedDesc?.textContent?.trim()) {
+        return collapsedDesc.textContent.trim();
+    }
+    
+    // OG description fallback
+    return document.querySelector('meta[property="og:description"]')?.content ||
+           document.querySelector('meta[name="description"]')?.content || '';
 }
 
 function extractThumbnail() {
@@ -460,37 +476,18 @@ async function extractTranscript() {
 
 function buildVideoContent() {
     const meta = extractVideoMeta();
-    const desc = extractDescription();
-    const thumbnail = extractThumbnail();
 
-    let html = '';
-
-    // Embed the actual video player via iframe
-    if (meta.videoId) {
-        html += `<div class="nac-video-embed" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;margin:1em 0;">
-            <iframe src="https://www.youtube.com/embed/${meta.videoId}"
-                    style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
-                    allowfullscreen loading="lazy"></iframe>
-        </div>`;
-    } else if (thumbnail) {
-        html += `<figure><img src="${thumbnail}" alt="Video thumbnail"></figure>`;
-    }
-
-    // Video metadata
-    html += '<div class="nac-video-meta">';
+    // No iframe embed — the original YouTube player is visible above the half-page overlay.
+    // Just show video metadata (channel, duration, live status).
+    let html = '<div class="nac-video-meta">';
     const channel = extractChannelName();
     if (channel) html += `<p><strong>Channel:</strong> ${Utils.escapeHtml(channel)}</p>`;
     if (meta.duration) html += `<p><strong>Duration:</strong> ${Utils.escapeHtml(meta.duration)}</p>`;
     if (meta.isLive) html += `<p>🔴 <strong>Live Stream</strong></p>`;
     html += '</div>';
 
-    // Description — clearly labeled section
-    if (desc) {
-        html += `<div class="nac-video-description">
-            <h3>📄 Description</h3>
-            <div class="nac-video-description-text">${desc.split('\n').filter(l => l.trim()).map(l => `<p>${Utils.escapeHtml(l)}</p>`).join('')}</div>
-        </div>`;
-    }
+    // Description is NOT included here — it is shown in the reader-view.js description section
+    // to avoid duplication.
 
     return html;
 }

@@ -45,14 +45,17 @@ export const ReaderView = {
     }
     
     // Hide original page content by hiding each child element,
-    // rather than hiding the body itself (which would also hide our reader view)
+    // rather than hiding the body itself (which would also hide our reader view).
+    // For video content (YouTube), keep the page visible so the player stays accessible.
     ReaderView._hiddenElements = [];
-    Array.from(document.body.children).forEach(child => {
-      if (child.style.display !== 'none') {
-        ReaderView._hiddenElements.push({ el: child, prev: child.style.display });
-        child.style.display = 'none';
-      }
-    });
+    if (article.contentType !== 'video') {
+      Array.from(document.body.children).forEach(child => {
+        if (child.style.display !== 'none') {
+          ReaderView._hiddenElements.push({ el: child, prev: child.style.display });
+          child.style.display = 'none';
+        }
+      });
+    }
     
     // Create reader container
     ReaderView.container = document.createElement('div');
@@ -237,6 +240,11 @@ export const ReaderView = {
     `;
     
     document.body.appendChild(ReaderView.container);
+    
+    // Apply half-page video layout for YouTube/video content
+    if (article.contentType === 'video') {
+      ReaderView.container.classList.add('nac-video-layout');
+    }
     
     // Attach event listeners
     document.getElementById('nac-back-btn').addEventListener('click', ReaderView.hide);
@@ -829,6 +837,7 @@ export const ReaderView = {
     }
 
     if (ReaderView.container) {
+      ReaderView.container.classList.remove('nac-video-layout');
       ReaderView.container.remove();
       ReaderView.container = null;
     }

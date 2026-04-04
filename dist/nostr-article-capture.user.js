@@ -5410,7 +5410,22 @@ ${items}
               markdownContent += "\n\n## Description\n\n" + article.description;
             }
             if (article.transcript) {
-              markdownContent += "\n\n## Transcript\n\n" + article.transcript;
+              markdownContent += "\n\n## Transcript\n\n";
+              const sentences = article.transcript.match(/[^.!?]+[.!?]+\s*/g) || [article.transcript];
+              let paragraph = "";
+              let count = 0;
+              for (const sentence of sentences) {
+                paragraph += sentence;
+                count++;
+                if (count >= 3) {
+                  markdownContent += paragraph.trim() + "\n\n";
+                  paragraph = "";
+                  count = 0;
+                }
+              }
+              if (paragraph.trim()) {
+                markdownContent += paragraph.trim() + "\n\n";
+              }
             }
           } else {
             if (article.transcript) {
@@ -6659,10 +6674,19 @@ Enter number:`);
     return Math.floor(Date.now() / 1e3);
   }
   function extractDescription() {
-    const descEl = document.querySelector(
-      '#description-inline-expander yt-attributed-string, #description yt-formatted-string, meta[property="og:description"], meta[name="description"]'
+    const expandedDesc = document.querySelector(
+      '#description-inline-expander .ytd-text-inline-expander, #description-inner .ytd-text-inline-expander, ytd-text-inline-expander[slot="content"], #description ytd-attributed-string[slot="content"]'
     );
-    return descEl?.textContent?.trim() || descEl?.content || "";
+    if (expandedDesc?.textContent?.trim()) {
+      return expandedDesc.textContent.trim();
+    }
+    const collapsedDesc = document.querySelector(
+      "#description-inline-expander, #description yt-formatted-string, #description ytd-attributed-string"
+    );
+    if (collapsedDesc?.textContent?.trim()) {
+      return collapsedDesc.textContent.trim();
+    }
+    return document.querySelector('meta[property="og:description"]')?.content || document.querySelector('meta[name="description"]')?.content || "";
   }
   function extractThumbnail() {
     const videoId = new URLSearchParams(window.location.search).get("v");
@@ -6882,30 +6906,12 @@ Enter number:`);
   }
   function buildVideoContent() {
     const meta = extractVideoMeta();
-    const desc = extractDescription();
-    const thumbnail = extractThumbnail();
-    let html = "";
-    if (meta.videoId) {
-      html += `<div class="nac-video-embed" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;max-width:100%;margin:1em 0;">
-            <iframe src="https://www.youtube.com/embed/${meta.videoId}"
-                    style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
-                    allowfullscreen loading="lazy"></iframe>
-        </div>`;
-    } else if (thumbnail) {
-      html += `<figure><img src="${thumbnail}" alt="Video thumbnail"></figure>`;
-    }
-    html += '<div class="nac-video-meta">';
+    let html = '<div class="nac-video-meta">';
     const channel = extractChannelName();
     if (channel) html += `<p><strong>Channel:</strong> ${Utils.escapeHtml(channel)}</p>`;
     if (meta.duration) html += `<p><strong>Duration:</strong> ${Utils.escapeHtml(meta.duration)}</p>`;
     if (meta.isLive) html += `<p>\u{1F534} <strong>Live Stream</strong></p>`;
     html += "</div>";
-    if (desc) {
-      html += `<div class="nac-video-description">
-            <h3>\u{1F4C4} Description</h3>
-            <div class="nac-video-description-text">${desc.split("\n").filter((l) => l.trim()).map((l) => `<p>${Utils.escapeHtml(l)}</p>`).join("")}</div>
-        </div>`;
-    }
     return html;
   }
   function buildTextContent() {
@@ -7113,12 +7119,14 @@ ${extractDescription()}`;
             ReaderView._injectedViewport = meta;
           }
           ReaderView._hiddenElements = [];
-          Array.from(document.body.children).forEach((child) => {
-            if (child.style.display !== "none") {
-              ReaderView._hiddenElements.push({ el: child, prev: child.style.display });
-              child.style.display = "none";
-            }
-          });
+          if (article.contentType !== "video") {
+            Array.from(document.body.children).forEach((child) => {
+              if (child.style.display !== "none") {
+                ReaderView._hiddenElements.push({ el: child, prev: child.style.display });
+                child.style.display = "none";
+              }
+            });
+          }
           ReaderView.container = document.createElement("div");
           ReaderView.container.id = "nac-reader-view";
           ReaderView.container.className = "nac-reader-container";
@@ -7298,6 +7306,9 @@ ${extractDescription()}`;
       </div>
     `;
           document.body.appendChild(ReaderView.container);
+          if (article.contentType === "video") {
+            ReaderView.container.classList.add("nac-video-layout");
+          }
           document.getElementById("nac-back-btn").addEventListener("click", ReaderView.hide);
           const closeWatchBtn = document.getElementById("nac-close-watch-btn");
           if (closeWatchBtn) {
@@ -7794,6 +7805,7 @@ ${extractDescription()}`;
             ReaderView._injectedViewport = null;
           }
           if (ReaderView.container) {
+            ReaderView.container.classList.remove("nac-video-layout");
             ReaderView.container.remove();
             ReaderView.container = null;
           }
@@ -10447,6 +10459,21 @@ Enter option (1-4):`;
     display: flex;
     flex-direction: column;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  
+  /* YouTube video layout \u2014 half-page overlay leaving player visible */
+  .nac-reader-container.nac-video-layout {
+    top: 40vh !important;
+    height: 60vh !important;
+    border-top: 2px solid var(--nac-primary);
+    border-radius: 12px 12px 0 0;
+  }
+
+  @media (max-width: 768px) {
+    .nac-reader-container.nac-video-layout {
+      top: 35vh !important;
+      height: 65vh !important;
+    }
   }
   
   /* Toolbar */

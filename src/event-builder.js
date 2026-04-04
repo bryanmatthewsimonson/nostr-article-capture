@@ -41,9 +41,25 @@ export const EventBuilder = {
         markdownContent += '\n\n## Description\n\n' + article.description;
       }
 
-      // Include clean transcript text as formatted paragraphs
+      // Include clean transcript text as formatted markdown paragraphs
       if (article.transcript) {
-        markdownContent += '\n\n## Transcript\n\n' + article.transcript;
+        markdownContent += '\n\n## Transcript\n\n';
+        // Break into paragraphs (every ~3 sentences) for readable markdown
+        const sentences = article.transcript.match(/[^.!?]+[.!?]+\s*/g) || [article.transcript];
+        let paragraph = '';
+        let count = 0;
+        for (const sentence of sentences) {
+          paragraph += sentence;
+          count++;
+          if (count >= 3) {
+            markdownContent += paragraph.trim() + '\n\n';
+            paragraph = '';
+            count = 0;
+          }
+        }
+        if (paragraph.trim()) {
+          markdownContent += paragraph.trim() + '\n\n';
+        }
       }
     } else {
       // Append transcript for non-video content (legacy format)
