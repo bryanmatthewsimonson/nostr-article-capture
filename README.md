@@ -1,6 +1,6 @@
 # NOSTR Content Capture
 
-![Version](https://img.shields.io/badge/version-3.9.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.12.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -12,7 +12,7 @@ A Tampermonkey userscript that captures content from any website — articles, s
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.9.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.12.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
   </a>
 </p>
 
@@ -70,7 +70,7 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **WYSIWYG visual editor** — `contentEditable` rich-text editing directly in the reader view
 - **Raw markdown editor** — toggle between visual and markdown mode (auto-resizing textarea)
 - **Preview as Published** — HTML → markdown → HTML roundtrip to see exactly what NOSTR will display
-- **Inline metadata editing** — click author, publication, date, or URL to edit in place
+- **Inline metadata editing** — click author, publication, date, or URL to edit in place; editing the author auto-creates or links a Person entity
 - **Dark mode** support via `prefers-color-scheme`
 - **Editable URL** — canonical URL displayed and editable; expanded tracking parameter cleanup (`utm_*`, `fbclid`, `gclid`, etc.)
 
@@ -79,7 +79,7 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Four entity types**: Person 👤, Organization 🏢, Place 📍, Thing 🔷
 - **Text selection popover** — select text in content, choose entity type from a floating popover
 - **Manual tagging** — add entities by name via the "+ Tag Entity" button
-- **Auto-detection** — author (Person) and publication (Organization) automatically tagged on capture
+- **Auto-detection** — author (Person) and publication (Organization) automatically tagged on capture and when the author field is edited
 - **Keypair per entity** — each entity gets its own secp256k1 keypair (npub/nsec) for NOSTR identity
 - **Entity aliases** (`canonical_id`) — entities can be linked as aliases of a canonical entity, enabling deduplication across name variants
 - **Auto-suggestion** — automatically detects known entities from your registry in content text (name + alias matching)

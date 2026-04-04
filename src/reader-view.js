@@ -425,65 +425,7 @@ export const ReaderView = {
     
     // Auto-detect author entity from byline
     if (article.byline && article.byline.trim().length >= CONFIG.tagging.min_selection_length) {
-      try {
-        const authorName = article.byline.trim();
-        const authorResults = await Storage.entities.search(authorName, 'person');
-        
-        if (authorResults.length > 0) {
-          // Link existing author entity
-          const entity = authorResults[0];
-          if (!entity.articles) entity.articles = [];
-          const authorArticleEntry = {
-            url: article.url,
-            title: article.title,
-            context: 'author',
-            tagged_at: Math.floor(Date.now() / 1000)
-          };
-          const existingAuthorIdx = entity.articles.findIndex(a => a.url === authorArticleEntry.url);
-          if (existingAuthorIdx >= 0) {
-            entity.articles[existingAuthorIdx].tagged_at = authorArticleEntry.tagged_at;
-          } else {
-            entity.articles.push(authorArticleEntry);
-          }
-          await Storage.entities.save(entity.id, entity);
-          ReaderView.entities.push({ entity_id: entity.id, context: 'author' });
-          EntityTagger.addChip(entity);
-        } else {
-          // Create new person entity for author
-          const privkey = Crypto.generatePrivateKey();
-          const pubkey = Crypto.getPublicKey(privkey);
-          const entityId = 'entity_' + await Crypto.sha256('person' + authorName);
-          const userIdentity = await Storage.identity.get();
-          
-          const entity = await Storage.entities.save(entityId, {
-            id: entityId,
-            type: 'person',
-            name: authorName,
-            aliases: [],
-            canonical_id: null,
-            keypair: {
-              pubkey,
-              privkey,
-              npub: Crypto.hexToNpub(pubkey),
-              nsec: Crypto.hexToNsec(privkey)
-            },
-            created_by: userIdentity?.pubkey || 'unknown',
-            created_at: Math.floor(Date.now() / 1000),
-            articles: [{
-              url: article.url,
-              title: article.title,
-              context: 'author',
-              tagged_at: Math.floor(Date.now() / 1000)
-            }],
-            metadata: {}
-          });
-          
-          ReaderView.entities.push({ entity_id: entityId, context: 'author' });
-          EntityTagger.addChip(entity);
-        }
-      } catch (e) {
-        Utils.error('Failed to auto-tag author:', e);
-      }
+      await ReaderView._tagAuthorEntity(article.byline);
     }
     
     // Auto-detect publication entity from siteName/domain
@@ -674,6 +616,10 @@ export const ReaderView = {
         ReaderView.article[fieldKey] = newValue || '';
         if (newValue) {
           element.textContent = newValue;
+          // Auto-tag/create Person entity when author is edited
+          if (fieldKey === 'byline') {
+            ReaderView._tagAuthorEntity(newValue);
+          }
         } else {
           // Show a placeholder indicating the field is empty
           element.textContent = fieldKey === 'byline' ? '(No author — click to set)' : '(No publication — click to set)';
@@ -700,6 +646,83 @@ export const ReaderView = {
     input.addEventListener('blur', onBlur);
     input.addEventListener('keydown', onKeydown);
     if (isDate) input.addEventListener('change', onChange);
+  },
+
+  // Tag or create a Person entity for the given author name.
+  // Removes any prior author entity reference, then searches for an existing
+  // person entity or creates a new one, links it to the current article,
+  // pushes it into ReaderView.entities with context 'author', and adds a chip.
+  _tagAuthorEntity: async (authorName) => {
+    if (!authorName || authorName.trim().length < CONFIG.tagging.min_selection_length) return;
+
+    const name = authorName.trim();
+
+    try {
+      // Remove any existing author entity reference (will be replaced)
+      const existingAuthorIdx = ReaderView.entities.findIndex(e => e.context === 'author');
+      if (existingAuthorIdx >= 0) {
+        ReaderView.entities.splice(existingAuthorIdx, 1);
+      }
+
+      const authorResults = await Storage.entities.search(name, 'person');
+
+      if (authorResults.length > 0) {
+        // Link existing author entity
+        const entity = authorResults[0];
+        if (!entity.articles) entity.articles = [];
+        const articleEntry = {
+          url: ReaderView.article.url,
+          title: ReaderView.article.title,
+          context: 'author',
+          tagged_at: Math.floor(Date.now() / 1000)
+        };
+        const existingIdx = entity.articles.findIndex(a => a.url === articleEntry.url);
+        if (existingIdx >= 0) {
+          entity.articles[existingIdx].tagged_at = articleEntry.tagged_at;
+        } else {
+          entity.articles.push(articleEntry);
+        }
+        await Storage.entities.save(entity.id, entity);
+        ReaderView.entities.push({ entity_id: entity.id, context: 'author' });
+        EntityTagger.addChip(entity);
+        Utils.showToast(`Author entity linked: ${entity.name}`, 'success');
+      } else {
+        // Create new person entity for author
+        const privkey = Crypto.generatePrivateKey();
+        const pubkey = Crypto.getPublicKey(privkey);
+        const entityId = 'entity_' + await Crypto.sha256('person' + name);
+        const userIdentity = await Storage.identity.get();
+
+        const entity = await Storage.entities.save(entityId, {
+          id: entityId,
+          type: 'person',
+          name,
+          aliases: [],
+          canonical_id: null,
+          keypair: {
+            pubkey,
+            privkey,
+            npub: Crypto.hexToNpub(pubkey),
+            nsec: Crypto.hexToNsec(privkey)
+          },
+          created_by: userIdentity?.pubkey || 'unknown',
+          created_at: Math.floor(Date.now() / 1000),
+          articles: [{
+            url: ReaderView.article.url,
+            title: ReaderView.article.title,
+            context: 'author',
+            tagged_at: Math.floor(Date.now() / 1000)
+          }],
+          metadata: {}
+        });
+
+        ReaderView.entities.push({ entity_id: entityId, context: 'author' });
+        EntityTagger.addChip(entity);
+        Utils.showToast(`Author entity created: ${name}`, 'success');
+      }
+    } catch (e) {
+      Utils.error('Failed to tag author entity:', e);
+    }
   },
 
   // Hide reader view and restore original page

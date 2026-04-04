@@ -7344,60 +7344,7 @@ ${extractDescription()}`;
           document.addEventListener("keydown", ReaderView.handleKeyboard);
           ReaderView.container.focus();
           if (article.byline && article.byline.trim().length >= CONFIG.tagging.min_selection_length) {
-            try {
-              const authorName = article.byline.trim();
-              const authorResults = await Storage.entities.search(authorName, "person");
-              if (authorResults.length > 0) {
-                const entity = authorResults[0];
-                if (!entity.articles) entity.articles = [];
-                const authorArticleEntry = {
-                  url: article.url,
-                  title: article.title,
-                  context: "author",
-                  tagged_at: Math.floor(Date.now() / 1e3)
-                };
-                const existingAuthorIdx = entity.articles.findIndex((a) => a.url === authorArticleEntry.url);
-                if (existingAuthorIdx >= 0) {
-                  entity.articles[existingAuthorIdx].tagged_at = authorArticleEntry.tagged_at;
-                } else {
-                  entity.articles.push(authorArticleEntry);
-                }
-                await Storage.entities.save(entity.id, entity);
-                ReaderView.entities.push({ entity_id: entity.id, context: "author" });
-                EntityTagger.addChip(entity);
-              } else {
-                const privkey = Crypto.generatePrivateKey();
-                const pubkey = Crypto.getPublicKey(privkey);
-                const entityId = "entity_" + await Crypto.sha256("person" + authorName);
-                const userIdentity = await Storage.identity.get();
-                const entity = await Storage.entities.save(entityId, {
-                  id: entityId,
-                  type: "person",
-                  name: authorName,
-                  aliases: [],
-                  canonical_id: null,
-                  keypair: {
-                    pubkey,
-                    privkey,
-                    npub: Crypto.hexToNpub(pubkey),
-                    nsec: Crypto.hexToNsec(privkey)
-                  },
-                  created_by: userIdentity?.pubkey || "unknown",
-                  created_at: Math.floor(Date.now() / 1e3),
-                  articles: [{
-                    url: article.url,
-                    title: article.title,
-                    context: "author",
-                    tagged_at: Math.floor(Date.now() / 1e3)
-                  }],
-                  metadata: {}
-                });
-                ReaderView.entities.push({ entity_id: entityId, context: "author" });
-                EntityTagger.addChip(entity);
-              }
-            } catch (e) {
-              Utils.error("Failed to auto-tag author:", e);
-            }
+            await ReaderView._tagAuthorEntity(article.byline);
           }
           const publicationName = (article.siteName || article.domain || "").trim();
           if (publicationName.length >= CONFIG.tagging.min_selection_length) {
@@ -7554,6 +7501,9 @@ ${extractDescription()}`;
               ReaderView.article[fieldKey] = newValue || "";
               if (newValue) {
                 element.textContent = newValue;
+                if (fieldKey === "byline") {
+                  ReaderView._tagAuthorEntity(newValue);
+                }
               } else {
                 element.textContent = fieldKey === "byline" ? "(No author \u2014 click to set)" : "(No publication \u2014 click to set)";
                 element.style.opacity = "0.5";
@@ -7584,6 +7534,73 @@ ${extractDescription()}`;
           input.addEventListener("blur", onBlur);
           input.addEventListener("keydown", onKeydown);
           if (isDate) input.addEventListener("change", onChange);
+        },
+        // Tag or create a Person entity for the given author name.
+        // Removes any prior author entity reference, then searches for an existing
+        // person entity or creates a new one, links it to the current article,
+        // pushes it into ReaderView.entities with context 'author', and adds a chip.
+        _tagAuthorEntity: async (authorName) => {
+          if (!authorName || authorName.trim().length < CONFIG.tagging.min_selection_length) return;
+          const name = authorName.trim();
+          try {
+            const existingAuthorIdx = ReaderView.entities.findIndex((e) => e.context === "author");
+            if (existingAuthorIdx >= 0) {
+              ReaderView.entities.splice(existingAuthorIdx, 1);
+            }
+            const authorResults = await Storage.entities.search(name, "person");
+            if (authorResults.length > 0) {
+              const entity = authorResults[0];
+              if (!entity.articles) entity.articles = [];
+              const articleEntry = {
+                url: ReaderView.article.url,
+                title: ReaderView.article.title,
+                context: "author",
+                tagged_at: Math.floor(Date.now() / 1e3)
+              };
+              const existingIdx = entity.articles.findIndex((a) => a.url === articleEntry.url);
+              if (existingIdx >= 0) {
+                entity.articles[existingIdx].tagged_at = articleEntry.tagged_at;
+              } else {
+                entity.articles.push(articleEntry);
+              }
+              await Storage.entities.save(entity.id, entity);
+              ReaderView.entities.push({ entity_id: entity.id, context: "author" });
+              EntityTagger.addChip(entity);
+              Utils.showToast(`Author entity linked: ${entity.name}`, "success");
+            } else {
+              const privkey = Crypto.generatePrivateKey();
+              const pubkey = Crypto.getPublicKey(privkey);
+              const entityId = "entity_" + await Crypto.sha256("person" + name);
+              const userIdentity = await Storage.identity.get();
+              const entity = await Storage.entities.save(entityId, {
+                id: entityId,
+                type: "person",
+                name,
+                aliases: [],
+                canonical_id: null,
+                keypair: {
+                  pubkey,
+                  privkey,
+                  npub: Crypto.hexToNpub(pubkey),
+                  nsec: Crypto.hexToNsec(privkey)
+                },
+                created_by: userIdentity?.pubkey || "unknown",
+                created_at: Math.floor(Date.now() / 1e3),
+                articles: [{
+                  url: ReaderView.article.url,
+                  title: ReaderView.article.title,
+                  context: "author",
+                  tagged_at: Math.floor(Date.now() / 1e3)
+                }],
+                metadata: {}
+              });
+              ReaderView.entities.push({ entity_id: entityId, context: "author" });
+              EntityTagger.addChip(entity);
+              Utils.showToast(`Author entity created: ${name}`, "success");
+            }
+          } catch (e) {
+            Utils.error("Failed to tag author entity:", e);
+          }
         },
         // Hide reader view and restore original page
         hide: () => {
