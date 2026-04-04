@@ -6679,6 +6679,21 @@ Enter number:`);
     }
     return data;
   }
+  function extractPlatformAccount() {
+    const channelName = extractChannelName();
+    const channelUrl = document.querySelector("#channel-name a, ytd-channel-name a")?.href || "";
+    const channelId = document.querySelector('[itemprop="channelId"]')?.content || "";
+    const channelHandle = document.querySelector('a[href*="/@"]')?.href?.match(/@([^/]+)/)?.[1] || "";
+    const channelAvatarUrl = document.querySelector("#owner img, ytd-channel-name img, #channel-thumbnail img")?.src || "";
+    return {
+      username: channelName,
+      handle: channelHandle || channelName,
+      profileUrl: channelUrl,
+      avatarUrl: channelAvatarUrl,
+      platform: "youtube",
+      channelId
+    };
+  }
   async function extractTranscript() {
     console.log("[NAC YouTube] Attempting transcript extraction...");
     try {
@@ -6890,6 +6905,7 @@ ${extractDescription()}`;
               videoMeta: extractVideoMeta(),
               transcript: await extractTranscript(),
               engagement: extractEngagement(),
+              platformAccount: extractPlatformAccount(),
               // Standard metadata fields
               wordCount: 0,
               // Will be set from transcript
@@ -7018,6 +7034,7 @@ ${extractDescription()}`;
         <button class="nac-btn-back" id="nac-back-btn" aria-label="Close reader and return to page">\u2190 Back to Page</button>
         <div class="nac-toolbar-title">${article.domain || "Article"}</div>
         <div class="nac-toolbar-actions">
+          ${article.contentType === "video" ? '<button class="nac-btn-toolbar nac-btn-close-watch" id="nac-close-watch-btn">\u25B6 Close &amp; Watch</button>' : ""}
           <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published" aria-label="Preview as published">\u{1F441} Preview</button>
           <button class="nac-btn-toolbar" id="nac-edit-btn" aria-label="Edit article">Edit</button>
           <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing" aria-label="Toggle markdown editor">\u{1F4DD} Markdown</button>
@@ -7125,6 +7142,17 @@ ${extractDescription()}`;
             <div class="nac-transcript-body" id="nac-transcript-body" style="display:none">
               <pre class="nac-transcript-text" id="nac-transcript-text"></pre>
             </div>
+            <div class="nac-transcript-instructions">
+              <p>To capture the transcript:</p>
+              <ol>
+                <li>Close this view (\u25B6 Close &amp; Watch above)</li>
+                <li>On YouTube, click <strong>\u22EF</strong> \u2192 <strong>Show transcript</strong></li>
+                <li>Select all transcript text and copy</li>
+                <li>Re-open this view and paste below</li>
+              </ol>
+            </div>
+            <textarea class="nac-transcript-input" id="nac-transcript-input" placeholder="Paste transcript here..." rows="10"></textarea>
+            <button class="nac-btn-toolbar nac-transcript-save-btn" id="nac-transcript-save-btn">\u{1F4BE} Save Transcript</button>
           </div>` : ""}
         </div>
         
@@ -7169,6 +7197,10 @@ ${extractDescription()}`;
     `;
           document.body.appendChild(ReaderView.container);
           document.getElementById("nac-back-btn").addEventListener("click", ReaderView.hide);
+          const closeWatchBtn = document.getElementById("nac-close-watch-btn");
+          if (closeWatchBtn) {
+            closeWatchBtn.addEventListener("click", ReaderView.hide);
+          }
           document.getElementById("nac-edit-btn").addEventListener("click", ReaderView.toggleEditMode);
           document.getElementById("nac-md-toggle-btn").addEventListener("click", ReaderView.toggleMarkdownMode);
           document.getElementById("nac-preview-btn").addEventListener("click", ReaderView.togglePreviewMode);
@@ -7304,6 +7336,42 @@ ${extractDescription()}`;
                   transcriptLoadBtn.disabled = false;
                 }, 3e3);
               }
+            });
+          }
+          const transcriptSaveBtn = document.getElementById("nac-transcript-save-btn");
+          if (transcriptSaveBtn) {
+            transcriptSaveBtn.addEventListener("click", () => {
+              const textarea = document.getElementById("nac-transcript-input");
+              if (!textarea) return;
+              const text = textarea.value.trim();
+              if (!text) {
+                Utils.showToast("Paste transcript text first", "error");
+                return;
+              }
+              ReaderView.article.transcript = text;
+              ReaderView.article.wordCount = text.split(/\s+/).filter((w) => w).length;
+              ReaderView.article.readingTimeMinutes = Math.ceil(ReaderView.article.wordCount / 225);
+              const instructionsEl = textarea.previousElementSibling;
+              if (instructionsEl && instructionsEl.classList.contains("nac-transcript-instructions")) {
+                instructionsEl.remove();
+              }
+              const formattedDiv = document.createElement("pre");
+              formattedDiv.className = "nac-transcript-text";
+              formattedDiv.textContent = text;
+              textarea.parentNode.replaceChild(formattedDiv, textarea);
+              transcriptSaveBtn.remove();
+              const body = document.getElementById("nac-transcript-body");
+              const textEl = document.getElementById("nac-transcript-text");
+              if (body && textEl) {
+                textEl.textContent = text;
+                body.style.display = "";
+              }
+              const loadBtn = document.getElementById("nac-transcript-load-btn");
+              if (loadBtn) {
+                loadBtn.textContent = "\u2713 Transcript saved";
+                loadBtn.disabled = true;
+              }
+              Utils.showToast(`Transcript saved (${ReaderView.article.wordCount} words)`);
             });
           }
           try {
@@ -13465,6 +13533,48 @@ Enter option (1-4):`;
     .nac-tt-hashtag {
       color: #ff6a8a;
     }
+  }
+
+  /* YouTube Transcript Paste */
+  .nac-transcript-input {
+    width: 100%;
+    min-height: 200px;
+    font-family: monospace;
+    font-size: 0.9em;
+    line-height: 1.6;
+    padding: 12px;
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    background: var(--nac-surface);
+    color: var(--nac-text);
+    resize: vertical;
+    margin-top: 8px;
+    box-sizing: border-box;
+  }
+
+  .nac-transcript-instructions {
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    margin: 12px 0;
+    line-height: 1.5;
+  }
+
+  .nac-transcript-instructions ol {
+    padding-left: 20px;
+    margin: 8px 0;
+  }
+
+  .nac-transcript-save-btn {
+    margin-top: 8px;
+  }
+
+  .nac-btn-close-watch {
+    background: #ff0000 !important;
+    color: white !important;
+  }
+
+  .nac-btn-close-watch:hover {
+    background: #cc0000 !important;
   }
 `;
     }

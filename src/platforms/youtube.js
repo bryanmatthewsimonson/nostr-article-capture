@@ -31,6 +31,7 @@ const YouTubeHandler = {
                 videoMeta: extractVideoMeta(),
                 transcript: await extractTranscript(),
                 engagement: extractEngagement(),
+                platformAccount: extractPlatformAccount(),
 
                 // Standard metadata fields
                 wordCount: 0,  // Will be set from transcript
@@ -225,6 +226,23 @@ function extractStructuredData() {
         }
     } catch(e) { /* ignore parse errors */ }
     return data;
+}
+
+function extractPlatformAccount() {
+    const channelName = extractChannelName();
+    const channelUrl = document.querySelector('#channel-name a, ytd-channel-name a')?.href || '';
+    const channelId = document.querySelector('[itemprop="channelId"]')?.content || '';
+    const channelHandle = document.querySelector('a[href*="/@"]')?.href?.match(/@([^/]+)/)?.[1] || '';
+    const channelAvatarUrl = document.querySelector('#owner img, ytd-channel-name img, #channel-thumbnail img')?.src || '';
+
+    return {
+        username: channelName,
+        handle: channelHandle || channelName,
+        profileUrl: channelUrl,
+        avatarUrl: channelAvatarUrl,
+        platform: 'youtube',
+        channelId: channelId
+    };
 }
 
 async function extractTranscript() {

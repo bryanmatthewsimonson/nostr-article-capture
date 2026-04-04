@@ -68,6 +68,7 @@ export const ReaderView = {
         <button class="nac-btn-back" id="nac-back-btn" aria-label="Close reader and return to page">← Back to Page</button>
         <div class="nac-toolbar-title">${article.domain || 'Article'}</div>
         <div class="nac-toolbar-actions">
+          ${article.contentType === 'video' ? '<button class="nac-btn-toolbar nac-btn-close-watch" id="nac-close-watch-btn">▶ Close &amp; Watch</button>' : ''}
           <button class="nac-btn-toolbar" id="nac-preview-btn" title="Preview as Published" aria-label="Preview as published">👁 Preview</button>
           <button class="nac-btn-toolbar" id="nac-edit-btn" aria-label="Edit article">Edit</button>
           <button class="nac-btn-toolbar nac-btn-md-toggle" id="nac-md-toggle-btn" style="display:none;" title="Switch to Markdown editing" aria-label="Toggle markdown editor">📝 Markdown</button>
@@ -175,6 +176,17 @@ export const ReaderView = {
             <div class="nac-transcript-body" id="nac-transcript-body" style="display:none">
               <pre class="nac-transcript-text" id="nac-transcript-text"></pre>
             </div>
+            <div class="nac-transcript-instructions">
+              <p>To capture the transcript:</p>
+              <ol>
+                <li>Close this view (▶ Close &amp; Watch above)</li>
+                <li>On YouTube, click <strong>⋯</strong> → <strong>Show transcript</strong></li>
+                <li>Select all transcript text and copy</li>
+                <li>Re-open this view and paste below</li>
+              </ol>
+            </div>
+            <textarea class="nac-transcript-input" id="nac-transcript-input" placeholder="Paste transcript here..." rows="10"></textarea>
+            <button class="nac-btn-toolbar nac-transcript-save-btn" id="nac-transcript-save-btn">💾 Save Transcript</button>
           </div>` : ''}
         </div>
         
@@ -222,6 +234,11 @@ export const ReaderView = {
     
     // Attach event listeners
     document.getElementById('nac-back-btn').addEventListener('click', ReaderView.hide);
+    // Close & Watch button (video content only)
+    const closeWatchBtn = document.getElementById('nac-close-watch-btn');
+    if (closeWatchBtn) {
+      closeWatchBtn.addEventListener('click', ReaderView.hide);
+    }
     document.getElementById('nac-edit-btn').addEventListener('click', ReaderView.toggleEditMode);
     document.getElementById('nac-md-toggle-btn').addEventListener('click', ReaderView.toggleMarkdownMode);
     document.getElementById('nac-preview-btn').addEventListener('click', ReaderView.togglePreviewMode);
@@ -372,6 +389,52 @@ export const ReaderView = {
             transcriptLoadBtn.disabled = false;
           }, 3000);
         }
+      });
+    }
+
+    // Save Transcript button handler — manual paste for video content
+    const transcriptSaveBtn = document.getElementById('nac-transcript-save-btn');
+    if (transcriptSaveBtn) {
+      transcriptSaveBtn.addEventListener('click', () => {
+        const textarea = document.getElementById('nac-transcript-input');
+        if (!textarea) return;
+        const text = textarea.value.trim();
+        if (!text) {
+          Utils.showToast('Paste transcript text first', 'error');
+          return;
+        }
+        // Store transcript
+        ReaderView.article.transcript = text;
+        ReaderView.article.wordCount = text.split(/\s+/).filter(w => w).length;
+        ReaderView.article.readingTimeMinutes = Math.ceil(ReaderView.article.wordCount / 225);
+
+        // Replace textarea with formatted text
+        const instructionsEl = textarea.previousElementSibling;
+        if (instructionsEl && instructionsEl.classList.contains('nac-transcript-instructions')) {
+          instructionsEl.remove();
+        }
+        const formattedDiv = document.createElement('pre');
+        formattedDiv.className = 'nac-transcript-text';
+        formattedDiv.textContent = text;
+        textarea.parentNode.replaceChild(formattedDiv, textarea);
+        transcriptSaveBtn.remove();
+
+        // Also show in the transcript body if it was hidden
+        const body = document.getElementById('nac-transcript-body');
+        const textEl = document.getElementById('nac-transcript-text');
+        if (body && textEl) {
+          textEl.textContent = text;
+          body.style.display = '';
+        }
+
+        // Update the transcript load button
+        const loadBtn = document.getElementById('nac-transcript-load-btn');
+        if (loadBtn) {
+          loadBtn.textContent = '✓ Transcript saved';
+          loadBtn.disabled = true;
+        }
+
+        Utils.showToast(`Transcript saved (${ReaderView.article.wordCount} words)`);
       });
     }
 

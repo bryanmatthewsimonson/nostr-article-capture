@@ -3238,4 +3238,46 @@ export const STYLES = `
       color: #ff6a8a;
     }
   }
+
+  /* YouTube Transcript Paste */
+  .nac-transcript-input {
+    width: 100%;
+    min-height: 200px;
+    font-family: monospace;
+    font-size: 0.9em;
+    line-height: 1.6;
+    padding: 12px;
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    background: var(--nac-surface);
+    color: var(--nac-text);
+    resize: vertical;
+    margin-top: 8px;
+    box-sizing: border-box;
+  }
+
+  .nac-transcript-instructions {
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    margin: 12px 0;
+    line-height: 1.5;
+  }
+
+  .nac-transcript-instructions ol {
+    padding-left: 20px;
+    margin: 8px 0;
+  }
+
+  .nac-transcript-save-btn {
+    margin-top: 8px;
+  }
+
+  .nac-btn-close-watch {
+    background: #ff0000 !important;
+    color: white !important;
+  }
+
+  .nac-btn-close-watch:hover {
+    background: #cc0000 !important;
+  }
 `;
