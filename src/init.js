@@ -5,9 +5,13 @@ import { ContentExtractor } from './content-extractor.js';
 import { ContentDetector } from './content-detector.js';
 import { PlatformHandler } from './platform-handler.js';
 import { ReaderView } from './reader-view.js';
+import { CapturePanel } from './capture-panel.js';
 import { EntityMigration } from './entity-migration.js';
 import { APIInterceptor } from './api-interceptor.js';
 import { STYLES } from './styles.js';
+
+/** Platforms that use the capture panel instead of reader view */
+const CAPTURE_PANEL_PLATFORMS = ['facebook', 'instagram', 'tiktok'];
 
 /**
  * Check if the user has text selected on the page.
@@ -309,6 +313,41 @@ function createFAB() {
     console.log('[NAC] Content detected:', detection.platform, detection.type, 'confidence:', detection.confidence);
     Utils.log('Content detected:', detection);
     
+    // Determine which mode to use — Capture Panel for CSP-restricted social media
+    const useCapturePanel = detection.platform &&
+      CAPTURE_PANEL_PLATFORMS.includes(detection.platform);
+
+    if (useCapturePanel) {
+      // ── Capture Panel mode — non-invasive side panel ──
+      console.log('[NAC] Using Capture Panel mode for', detection.platform);
+      const textSel = getTextSelection();
+
+      const article = {
+        url: window.location.href,
+        platform: detection.platform,
+        contentType: detection.type,
+        title: '',
+        byline: '',
+        content: '',
+        textContent: textSel?.text || '',
+        domain: window.location.hostname,
+        siteName: detection.platform.charAt(0).toUpperCase() + detection.platform.slice(1),
+        publishedAt: Math.floor(Date.now() / 1000),
+        featuredImage: document.querySelector('meta[property="og:image"]')?.content || '',
+        publicationIcon: '',
+        platformAccount: null
+      };
+
+      CapturePanel.open(article);
+
+      // If there was a text selection, auto-add it as the first block
+      if (textSel?.text) {
+        CapturePanel.addBlock(textSel.text, 'Selected text');
+      }
+      return;
+    }
+
+    // ── Reader Mode — full-page takeover (existing behavior) ──
     // Extract article — dual-mode: text selection first, then click-to-select
     let article;
     if (detection.platform && PlatformHandler.has(detection.platform)) {

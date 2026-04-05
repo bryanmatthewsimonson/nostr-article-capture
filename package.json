@@ -1,6 +1,6 @@
 {
   "name": "nostr-article-capture",
-  "version": "3.12.0",
+  "version": "4.0.0",
   "description": "Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing",
   "main": "dist/nostr-article-capture.user.js",
   "directories": {

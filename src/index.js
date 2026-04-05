@@ -18,6 +18,8 @@ import { EventBuilder } from './event-builder.js';
 import { EntitySync } from './entity-sync.js';
 import { EntityBrowser } from './entity-browser.js';
 import { ReaderView } from './reader-view.js';
+import { CapturePanel } from './capture-panel.js';
+import { PendingCaptures } from './pending-captures.js';
 import { EntityMigration } from './entity-migration.js';
 import { APIInterceptor } from './api-interceptor.js';
 import { ModuleHook } from './module-hook.js';
