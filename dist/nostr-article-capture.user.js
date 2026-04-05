@@ -7229,10 +7229,16 @@ ${extractDescription()}`;
             ${article.content || ""}
           </div>
           
-          ${(article.contentType === "video" || article.platform === "youtube") && article.description ? `
+          ${article.contentType === "video" || article.platform === "youtube" ? `
           <div class="nac-description-section" id="nac-description-section">
-            <h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">\u{1F4C4} Description</h3>
-            <div class="nac-description-body" id="nac-description-body" style="padding: 12px; background: var(--nac-bg-secondary, #1a1a2e); border-radius: 8px; margin-bottom: 1em; line-height: 1.6; white-space: pre-wrap; font-size: 14px; color: var(--nac-text-secondary, #ccc);">${Utils.escapeHtml(article.description)}</div>
+            <div class="nac-description-header">\u{1F4C4} Description</div>
+            <div class="nac-description-body" id="nac-description-body">
+              <div class="nac-description-instructions">
+                <p>On YouTube, click <strong>...more</strong> under the video to expand the full description, then select all and copy.</p>
+              </div>
+              <textarea class="nac-description-input" id="nac-description-input" placeholder="Paste video description here..." rows="8">${article.description ? Utils.escapeHtml(article.description) : ""}</textarea>
+              <button class="nac-btn-toolbar nac-description-save-btn" id="nac-description-save-btn">\u{1F4BE} Save Description</button>
+            </div>
           </div>` : ""}
           
           ${article.transcript ? `
@@ -7493,6 +7499,32 @@ ${extractDescription()}`;
                 loadBtn.disabled = true;
               }
               Utils.showToast(`Transcript saved (${ReaderView.article.wordCount} words)`);
+            });
+          }
+          const descriptionSaveBtn = document.getElementById("nac-description-save-btn");
+          if (descriptionSaveBtn) {
+            descriptionSaveBtn.addEventListener("click", () => {
+              const textarea = document.getElementById("nac-description-input");
+              if (!textarea) return;
+              const rawText = textarea.value.trim();
+              if (!rawText) {
+                Utils.showToast("Paste description text first", "error");
+                return;
+              }
+              ReaderView.article.description = rawText;
+              const formattedHtml = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>').replace(/\n/g, "<br>");
+              const instructionsEl = document.querySelector("#nac-description-section .nac-description-instructions");
+              if (instructionsEl) instructionsEl.remove();
+              const contentEl2 = document.getElementById("nac-content");
+              if (contentEl2) {
+                const descSection = document.createElement("div");
+                descSection.className = "nac-description-content";
+                descSection.innerHTML = `<h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">\u{1F4C4} Description</h3><div style="line-height: 1.6; white-space: pre-wrap; font-size: 14px;">${formattedHtml}</div>`;
+                contentEl2.appendChild(descSection);
+              }
+              textarea.remove();
+              descriptionSaveBtn.remove();
+              Utils.showToast("Description saved", "success");
             });
           }
           try {
@@ -13330,6 +13362,55 @@ Enter option (1-4):`;
     border: 1px solid var(--nac-border);
     color: var(--nac-text);
     margin: 0;
+  }
+
+  /* YouTube Description Section (paste option) */
+  .nac-description-section {
+    margin: 1.5em 0;
+    border: 1px solid var(--nac-border);
+    border-radius: 8px;
+  }
+
+  .nac-description-header {
+    padding: 12px 16px;
+    font-weight: 600;
+    font-size: 1.1em;
+    color: var(--nac-text);
+  }
+
+  .nac-description-body {
+    padding: 0 16px 16px;
+  }
+
+  .nac-description-input {
+    width: 100%;
+    min-height: 150px;
+    font-family: system-ui, sans-serif;
+    font-size: 0.9em;
+    line-height: 1.5;
+    padding: 12px;
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    background: var(--nac-surface);
+    color: var(--nac-text);
+    resize: vertical;
+    margin-top: 8px;
+    box-sizing: border-box;
+  }
+
+  .nac-description-input:focus {
+    outline: 2px solid var(--nac-primary);
+    outline-offset: -1px;
+  }
+
+  .nac-description-instructions {
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    margin: 8px 0;
+  }
+
+  .nac-description-save-btn {
+    margin-top: 8px;
   }
 
   /* YouTube Video Embed */

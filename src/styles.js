@@ -2914,6 +2914,55 @@ export const STYLES = `
     margin: 0;
   }
 
+  /* YouTube Description Section (paste option) */
+  .nac-description-section {
+    margin: 1.5em 0;
+    border: 1px solid var(--nac-border);
+    border-radius: 8px;
+  }
+
+  .nac-description-header {
+    padding: 12px 16px;
+    font-weight: 600;
+    font-size: 1.1em;
+    color: var(--nac-text);
+  }
+
+  .nac-description-body {
+    padding: 0 16px 16px;
+  }
+
+  .nac-description-input {
+    width: 100%;
+    min-height: 150px;
+    font-family: system-ui, sans-serif;
+    font-size: 0.9em;
+    line-height: 1.5;
+    padding: 12px;
+    border: 1px solid var(--nac-border);
+    border-radius: 6px;
+    background: var(--nac-surface);
+    color: var(--nac-text);
+    resize: vertical;
+    margin-top: 8px;
+    box-sizing: border-box;
+  }
+
+  .nac-description-input:focus {
+    outline: 2px solid var(--nac-primary);
+    outline-offset: -1px;
+  }
+
+  .nac-description-instructions {
+    font-size: 0.85em;
+    color: var(--nac-text-muted);
+    margin: 8px 0;
+  }
+
+  .nac-description-save-btn {
+    margin-top: 8px;
+  }
+
   /* YouTube Video Embed */
   .nac-video-embed {
     border-radius: 8px;

@@ -162,10 +162,16 @@ export const ReaderView = {
             ${article.content || ''}
           </div>
           
-          ${(article.contentType === 'video' || article.platform === 'youtube') && article.description ? `
+          ${(article.contentType === 'video' || article.platform === 'youtube') ? `
           <div class="nac-description-section" id="nac-description-section">
-            <h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">📄 Description</h3>
-            <div class="nac-description-body" id="nac-description-body" style="padding: 12px; background: var(--nac-bg-secondary, #1a1a2e); border-radius: 8px; margin-bottom: 1em; line-height: 1.6; white-space: pre-wrap; font-size: 14px; color: var(--nac-text-secondary, #ccc);">${Utils.escapeHtml(article.description)}</div>
+            <div class="nac-description-header">📄 Description</div>
+            <div class="nac-description-body" id="nac-description-body">
+              <div class="nac-description-instructions">
+                <p>On YouTube, click <strong>...more</strong> under the video to expand the full description, then select all and copy.</p>
+              </div>
+              <textarea class="nac-description-input" id="nac-description-input" placeholder="Paste video description here..." rows="8">${article.description ? Utils.escapeHtml(article.description) : ''}</textarea>
+              <button class="nac-btn-toolbar nac-description-save-btn" id="nac-description-save-btn">💾 Save Description</button>
+            </div>
           </div>` : ''}
           
           ${article.transcript ? `
@@ -466,6 +472,50 @@ export const ReaderView = {
         }
 
         Utils.showToast(`Transcript saved (${ReaderView.article.wordCount} words)`);
+      });
+    }
+
+    // Save Description button handler — manual paste for video content
+    const descriptionSaveBtn = document.getElementById('nac-description-save-btn');
+    if (descriptionSaveBtn) {
+      descriptionSaveBtn.addEventListener('click', () => {
+        const textarea = document.getElementById('nac-description-input');
+        if (!textarea) return;
+        const rawText = textarea.value.trim();
+        if (!rawText) {
+          Utils.showToast('Paste description text first', 'error');
+          return;
+        }
+
+        // Store description
+        ReaderView.article.description = rawText;
+
+        // Convert plain text to formatted HTML (preserve links and line breaks)
+        const formattedHtml = rawText
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+          .replace(/\n/g, '<br>');
+
+        // Remove instructions
+        const instructionsEl = document.querySelector('#nac-description-section .nac-description-instructions');
+        if (instructionsEl) instructionsEl.remove();
+
+        // Replace textarea and save button with formatted text inside content area (taggable)
+        const contentEl = document.getElementById('nac-content');
+        if (contentEl) {
+          const descSection = document.createElement('div');
+          descSection.className = 'nac-description-content';
+          descSection.innerHTML = `<h3 style="margin: 1.5em 0 0.5em; font-size: 1.1em; color: var(--nac-text-primary, #e0e0e0);">📄 Description</h3><div style="line-height: 1.6; white-space: pre-wrap; font-size: 14px;">${formattedHtml}</div>`;
+          contentEl.appendChild(descSection);
+        }
+
+        // Remove the textarea and save button
+        textarea.remove();
+        descriptionSaveBtn.remove();
+
+        Utils.showToast('Description saved', 'success');
       });
     }
 
