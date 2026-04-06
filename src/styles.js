@@ -3344,4 +3344,64 @@ export const STYLES = `
   .nac-btn-close-watch:hover {
     background: #cc0000 !important;
   }
+
+  /* ===== Pending Captures Banner ===== */
+  .nac-pending-banner {
+    background: linear-gradient(135deg, #6366f1, #4f46e5);
+    color: white;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    margin: -40px -20px 16px -20px;
+    border-radius: 0;
+    flex-wrap: wrap;
+  }
+
+  .nac-pending-banner span {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .nac-pending-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+
+  .nac-pending-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .nac-pending-publish {
+    background: white;
+    color: #4f46e5;
+    font-weight: 600;
+  }
+
+  .nac-pending-publish:hover:not(:disabled) {
+    background: #f0f0f0;
+  }
+
+  .nac-pending-dismiss {
+    background: rgba(255,255,255,0.2);
+    color: white;
+  }
+
+  .nac-pending-dismiss:hover {
+    background: rgba(255,255,255,0.3);
+  }
+
+  @media (max-width: 768px) {
+    .nac-pending-banner {
+      margin: -12px -12px 12px -12px;
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+  }
 `;

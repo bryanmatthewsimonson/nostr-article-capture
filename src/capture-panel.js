@@ -4,6 +4,7 @@ import { Storage } from './storage.js';
 import { RelayClient } from './relay-client.js';
 import { EventBuilder } from './event-builder.js';
 import { Utils } from './utils.js';
+import { parseYouTubeTranscript, formatTranscriptAsParagraphs } from './platforms/youtube.js';
 
 /**
  * Shadow-DOM-isolated right-side panel for capturing social media content.
@@ -162,6 +163,24 @@ export const CapturePanel = {
         <!-- Blocks rendered dynamically -->
       </div>
 
+      ${article.platform === 'youtube' ? `
+      <!-- YouTube Description Paste Section -->
+      <div class="nac-cp-section">
+        <div class="nac-cp-section-header">📄 Description</div>
+        <textarea class="nac-cp-textarea" id="nac-cp-description"
+                  placeholder="Paste video description here..." rows="5"></textarea>
+        <button class="nac-cp-btn nac-cp-section-save" data-section="description">💾 Save</button>
+      </div>
+      <!-- YouTube Transcript Paste Section -->
+      <div class="nac-cp-section">
+        <div class="nac-cp-section-header">📝 Transcript</div>
+        <div class="nac-cp-hint">Copy from YouTube: ⋯ → Show transcript → Select all → Copy → Paste below</div>
+        <textarea class="nac-cp-textarea" id="nac-cp-transcript"
+                  placeholder="Paste transcript here..." rows="8"></textarea>
+        <button class="nac-cp-btn nac-cp-section-save" data-section="transcript">💾 Save</button>
+      </div>
+      ` : ''}
+
       <!-- Add Selection Button -->
       <div class="nac-cp-actions">
         <button class="nac-cp-add-selection" id="nac-cp-add">
@@ -223,6 +242,52 @@ export const CapturePanel = {
     if (settingsBtn) {
       settingsBtn.addEventListener('click', () => {
         CapturePanel._setStatus('Settings coming soon', 'info');
+      });
+    }
+
+    // YouTube Description save button
+    const descSaveBtn = panel.querySelector('[data-section="description"]');
+    if (descSaveBtn) {
+      descSaveBtn.addEventListener('click', () => {
+        const textarea = CapturePanel._shadow?.querySelector('#nac-cp-description');
+        if (!textarea) return;
+        const descText = textarea.value.trim();
+        if (!descText) {
+          CapturePanel._setStatus('⚠️ Paste description text first', 'warn');
+          return;
+        }
+        if (CapturePanel._article) {
+          CapturePanel._article.description = descText;
+        }
+        CapturePanel.addBlock(descText, 'Description');
+        textarea.value = '';
+        descSaveBtn.textContent = '✓ Saved';
+        setTimeout(() => { descSaveBtn.textContent = '💾 Save'; }, 2000);
+      });
+    }
+
+    // YouTube Transcript save button
+    const transcriptSaveBtn = panel.querySelector('[data-section="transcript"]');
+    if (transcriptSaveBtn) {
+      transcriptSaveBtn.addEventListener('click', () => {
+        const textarea = CapturePanel._shadow?.querySelector('#nac-cp-transcript');
+        if (!textarea) return;
+        const rawText = textarea.value.trim();
+        if (!rawText) {
+          CapturePanel._setStatus('⚠️ Paste transcript text first', 'warn');
+          return;
+        }
+        const parsed = parseYouTubeTranscript(rawText);
+        if (CapturePanel._article) {
+          CapturePanel._article.transcript = parsed.cleanText;
+          CapturePanel._article.transcriptTimestamped = parsed.timestampedText;
+          CapturePanel._article.contentType = 'video';
+        }
+        CapturePanel.addBlock(parsed.cleanText, 'Transcript');
+        textarea.value = '';
+        transcriptSaveBtn.textContent = '✓ Saved';
+        setTimeout(() => { transcriptSaveBtn.textContent = '💾 Save'; }, 2000);
+        CapturePanel._setStatus(`✓ Transcript parsed (${parsed.segments.length} segments)`, 'success');
       });
     }
   },
@@ -743,6 +808,42 @@ const CAPTURE_PANEL_CSS = `
     border-top: 1px solid #333;
     flex-shrink: 0;
     min-height: 28px;
+  }
+
+  .nac-cp-section {
+    padding: 8px 12px;
+    border-top: 1px solid #333;
+  }
+
+  .nac-cp-section-header {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 6px;
+    color: #e0e0e0;
+  }
+
+  .nac-cp-textarea {
+    width: 100%;
+    min-height: 80px;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 8px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #e0e0e0;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .nac-cp-textarea:focus {
+    outline: none;
+    border-color: #6366f1;
+  }
+
+  .nac-cp-section-save {
+    margin-top: 6px;
   }
 
   /* Mobile: bottom panel */

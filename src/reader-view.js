@@ -12,6 +12,7 @@ import { EventBuilder } from './event-builder.js';
 import { EntityBrowser } from './entity-browser.js';
 import { CommentExtractor } from './comment-extractor.js';
 import { PlatformAccount } from './platform-account.js';
+import { PendingCaptures } from './pending-captures.js';
 import { youtubeExtractTranscript, parseYouTubeTranscript, formatTranscriptAsParagraphs } from './platforms/youtube.js';
 
 export const ReaderView = {
@@ -250,6 +251,16 @@ export const ReaderView = {
     // Apply half-page video layout for YouTube/video content
     if (article.contentType === 'video') {
       ReaderView.container.classList.add('nac-video-layout');
+    }
+
+    // Check for pending captures and show banner
+    try {
+      const pendingCount = await PendingCaptures.getCount();
+      if (pendingCount > 0) {
+        ReaderView._showPendingCapturesBanner(pendingCount);
+      }
+    } catch (e) {
+      console.warn('[NAC] Failed to check pending captures for banner:', e);
     }
     
     // Attach event listeners
@@ -645,6 +656,103 @@ export const ReaderView = {
    // Load claims for this article
    await ClaimExtractor.loadForArticle(article.url);
  },
+
+  // Show pending captures banner at the top of the reader view
+  _showPendingCapturesBanner: (count) => {
+    const container = ReaderView.container;
+    if (!container) return;
+
+    const readerContent = container.querySelector('.nac-reader-content');
+    if (!readerContent) return;
+
+    const banner = document.createElement('div');
+    banner.className = 'nac-pending-banner';
+    banner.id = 'nac-pending-banner';
+    banner.innerHTML = `
+      <span>📤 You have ${count} pending capture${count !== 1 ? 's' : ''} from social media</span>
+      <button class="nac-pending-btn nac-pending-publish" id="nac-publish-pending">Publish Now</button>
+      <button class="nac-pending-btn nac-pending-dismiss" id="nac-dismiss-pending">Dismiss</button>
+    `;
+
+    readerContent.insertBefore(banner, readerContent.firstChild);
+
+    // Dismiss handler
+    banner.querySelector('#nac-dismiss-pending').addEventListener('click', () => {
+      banner.remove();
+    });
+
+    // Publish Now handler
+    banner.querySelector('#nac-publish-pending').addEventListener('click', async () => {
+      const publishBtn = banner.querySelector('#nac-publish-pending');
+      publishBtn.disabled = true;
+      publishBtn.textContent = '⏳ Publishing...';
+
+      try {
+        const identity = await Storage.identity.get();
+        if (!identity || !identity.pubkey) {
+          Utils.showToast('No identity configured. Set up signing in settings first.', 'error');
+          publishBtn.textContent = 'Publish Now';
+          publishBtn.disabled = false;
+          return;
+        }
+
+        const relayConfig = await Storage.relays.get();
+        const relayUrls = relayConfig.relays.filter(r => r.enabled).map(r => r.url);
+        if (relayUrls.length === 0) {
+          Utils.showToast('No relays configured', 'error');
+          publishBtn.textContent = 'Publish Now';
+          publishBtn.disabled = false;
+          return;
+        }
+
+        const pending = await PendingCaptures.getAll();
+        let publishedCount = 0;
+
+        for (let i = 0; i < pending.length; i++) {
+          const capture = pending[i];
+          publishBtn.textContent = `⏳ Publishing ${i + 1}/${pending.length}...`;
+
+          try {
+            const event = await EventBuilder.buildArticleEvent(
+              capture,
+              [],
+              identity.pubkey,
+              []
+            );
+
+            let signedEvent;
+            if (identity.privkey) {
+              const { Crypto } = await import('./crypto.js');
+              signedEvent = await Crypto.signEvent(event, identity.privkey);
+            } else if (typeof unsafeWindow !== 'undefined' && unsafeWindow.nostr) {
+              signedEvent = await unsafeWindow.nostr.signEvent(event);
+            } else {
+              throw new Error('No signing method available');
+            }
+
+            if (signedEvent) {
+              const results = await RelayClient.publish(signedEvent, relayUrls);
+              const ok = Object.values(results).some(r => r.success);
+              if (ok) publishedCount++;
+            }
+          } catch (pubErr) {
+            console.error(`[NAC] Failed to publish pending capture ${i}:`, pubErr);
+          }
+        }
+
+        // Clear all pending captures after publishing
+        await PendingCaptures.clear();
+
+        banner.remove();
+        Utils.showToast(`Published ${publishedCount}/${pending.length} pending capture${pending.length !== 1 ? 's' : ''}`, publishedCount > 0 ? 'success' : 'error');
+      } catch (e) {
+        console.error('[NAC] Pending captures publish error:', e);
+        Utils.showToast('Failed to publish pending captures: ' + e.message, 'error');
+        publishBtn.textContent = 'Publish Now';
+        publishBtn.disabled = false;
+      }
+    });
+  },
 
   // Format a Unix timestamp as a readable date string
   _formatDate: (timestamp) => {

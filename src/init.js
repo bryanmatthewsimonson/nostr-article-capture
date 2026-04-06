@@ -6,12 +6,13 @@ import { ContentDetector } from './content-detector.js';
 import { PlatformHandler } from './platform-handler.js';
 import { ReaderView } from './reader-view.js';
 import { CapturePanel } from './capture-panel.js';
+import { PendingCaptures } from './pending-captures.js';
 import { EntityMigration } from './entity-migration.js';
 import { APIInterceptor } from './api-interceptor.js';
 import { STYLES } from './styles.js';
 
 /** Platforms that use the capture panel instead of reader view */
-const CAPTURE_PANEL_PLATFORMS = ['facebook', 'instagram', 'tiktok'];
+const CAPTURE_PANEL_PLATFORMS = ['facebook', 'instagram', 'tiktok', 'youtube'];
 
 /**
  * Check if the user has text selected on the page.
@@ -197,6 +198,22 @@ function waitForBody() {
 let _fabHost = null;
 let _fab = null;
 
+/**
+ * Add a small red notification badge to the FAB showing pending capture count.
+ * @param {number} count
+ */
+function addFABBadge(count) {
+  if (!_fab) return;
+  const existing = _fab.querySelector('.nac-fab-badge');
+  if (existing) existing.remove();
+
+  const badge = document.createElement('span');
+  badge.className = 'nac-fab-badge';
+  badge.textContent = count > 9 ? '9+' : String(count);
+  badge.style.cssText = 'position:absolute!important;top:-4px!important;right:-4px!important;background:#ef4444!important;color:white!important;font-size:11px!important;font-weight:700!important;min-width:18px!important;height:18px!important;border-radius:9px!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:0 4px!important;line-height:1!important;pointer-events:none!important;box-sizing:border-box!important;';
+  _fab.appendChild(badge);
+}
+
 function ensureFABExists() {
   if (_fabHost && document.body && document.body.contains(_fabHost)) {
     return; // FAB host is still in DOM
@@ -337,6 +354,16 @@ function createFAB() {
         publicationIcon: '',
         platformAccount: null
       };
+
+      // Auto-fill YouTube metadata when using capture panel
+      if (detection.platform === 'youtube') {
+        const videoTitle = document.querySelector('meta[property="og:title"]')?.content || document.title.replace(' - YouTube', '');
+        const channelName = document.querySelector('#channel-name a, ytd-channel-name a')?.textContent?.trim() || '';
+        article.title = videoTitle;
+        article.byline = channelName;
+        article.featuredImage = document.querySelector('meta[property="og:image"]')?.content || '';
+        article.contentType = 'video';
+      }
 
       CapturePanel.open(article);
 
@@ -485,6 +512,17 @@ async function init() {
     // Create the FAB
     createFAB();
     console.log('[NAC] FAB created successfully');
+
+    // Check for pending captures and show badge on FAB
+    try {
+      const pendingCount = await PendingCaptures.getCount();
+      if (pendingCount > 0) {
+        addFABBadge(pendingCount);
+        console.log('[NAC] Pending captures badge added:', pendingCount);
+      }
+    } catch (e) {
+      console.warn('[NAC] Failed to check pending captures:', e);
+    }
 
     // Periodically verify FAB host is still in DOM and visible
     // Guards against dynamic overlays removing or hiding the host element

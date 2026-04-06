@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      4.0.0
+// @version      4.1.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "4.0.0",
+        version: "4.1.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -121,6 +121,10 @@
   });
 
   // src/crypto.js
+  var crypto_exports = {};
+  __export(crypto_exports, {
+    Crypto: () => Crypto
+  });
   function _mod(a, m = _SECP256K1.P) {
     const r = a % m;
     return r >= 0n ? r : m + r;
@@ -6619,6 +6623,41 @@ Enter number:`);
     }
   });
 
+  // src/pending-captures.js
+  var PendingCaptures;
+  var init_pending_captures = __esm({
+    "src/pending-captures.js"() {
+      init_storage();
+      PendingCaptures = {
+        save: async (captureData) => {
+          const pending = await Storage.get("pending_captures", []);
+          pending.push({
+            ...captureData,
+            savedAt: Date.now(),
+            status: "pending"
+          });
+          await Storage.set("pending_captures", pending);
+          return pending.length;
+        },
+        getAll: async () => {
+          return await Storage.get("pending_captures", []);
+        },
+        remove: async (index) => {
+          const pending = await Storage.get("pending_captures", []);
+          pending.splice(index, 1);
+          await Storage.set("pending_captures", pending);
+        },
+        clear: async () => {
+          await Storage.set("pending_captures", []);
+        },
+        getCount: async () => {
+          const pending = await Storage.get("pending_captures", []);
+          return pending.length;
+        }
+      };
+    }
+  });
+
   // src/platforms/youtube.js
   function extractVideoTitle() {
     const ogTitle = document.querySelector('meta[property="og:title"]')?.content;
@@ -7091,6 +7130,7 @@ ${extractDescription()}`;
       init_entity_browser();
       init_comment_extractor();
       init_platform_account();
+      init_pending_captures();
       init_youtube();
       ReaderView = {
         container: null,
@@ -7314,6 +7354,14 @@ ${extractDescription()}`;
           document.body.appendChild(ReaderView.container);
           if (article.contentType === "video") {
             ReaderView.container.classList.add("nac-video-layout");
+          }
+          try {
+            const pendingCount = await PendingCaptures.getCount();
+            if (pendingCount > 0) {
+              ReaderView._showPendingCapturesBanner(pendingCount);
+            }
+          } catch (e) {
+            console.warn("[NAC] Failed to check pending captures for banner:", e);
           }
           document.getElementById("nac-back-btn").addEventListener("click", ReaderView.hide);
           const closeWatchBtn = document.getElementById("nac-close-watch-btn");
@@ -7629,6 +7677,85 @@ ${extractDescription()}`;
             setTimeout(() => EntityAutoSuggest.scan(article), 500);
           }
           await ClaimExtractor.loadForArticle(article.url);
+        },
+        // Show pending captures banner at the top of the reader view
+        _showPendingCapturesBanner: (count) => {
+          const container = ReaderView.container;
+          if (!container) return;
+          const readerContent = container.querySelector(".nac-reader-content");
+          if (!readerContent) return;
+          const banner = document.createElement("div");
+          banner.className = "nac-pending-banner";
+          banner.id = "nac-pending-banner";
+          banner.innerHTML = `
+      <span>\u{1F4E4} You have ${count} pending capture${count !== 1 ? "s" : ""} from social media</span>
+      <button class="nac-pending-btn nac-pending-publish" id="nac-publish-pending">Publish Now</button>
+      <button class="nac-pending-btn nac-pending-dismiss" id="nac-dismiss-pending">Dismiss</button>
+    `;
+          readerContent.insertBefore(banner, readerContent.firstChild);
+          banner.querySelector("#nac-dismiss-pending").addEventListener("click", () => {
+            banner.remove();
+          });
+          banner.querySelector("#nac-publish-pending").addEventListener("click", async () => {
+            const publishBtn = banner.querySelector("#nac-publish-pending");
+            publishBtn.disabled = true;
+            publishBtn.textContent = "\u23F3 Publishing...";
+            try {
+              const identity = await Storage.identity.get();
+              if (!identity || !identity.pubkey) {
+                Utils.showToast("No identity configured. Set up signing in settings first.", "error");
+                publishBtn.textContent = "Publish Now";
+                publishBtn.disabled = false;
+                return;
+              }
+              const relayConfig = await Storage.relays.get();
+              const relayUrls = relayConfig.relays.filter((r) => r.enabled).map((r) => r.url);
+              if (relayUrls.length === 0) {
+                Utils.showToast("No relays configured", "error");
+                publishBtn.textContent = "Publish Now";
+                publishBtn.disabled = false;
+                return;
+              }
+              const pending = await PendingCaptures.getAll();
+              let publishedCount = 0;
+              for (let i = 0; i < pending.length; i++) {
+                const capture = pending[i];
+                publishBtn.textContent = `\u23F3 Publishing ${i + 1}/${pending.length}...`;
+                try {
+                  const event = await EventBuilder.buildArticleEvent(
+                    capture,
+                    [],
+                    identity.pubkey,
+                    []
+                  );
+                  let signedEvent;
+                  if (identity.privkey) {
+                    const { Crypto: Crypto2 } = await Promise.resolve().then(() => (init_crypto(), crypto_exports));
+                    signedEvent = await Crypto2.signEvent(event, identity.privkey);
+                  } else if (typeof unsafeWindow !== "undefined" && unsafeWindow.nostr) {
+                    signedEvent = await unsafeWindow.nostr.signEvent(event);
+                  } else {
+                    throw new Error("No signing method available");
+                  }
+                  if (signedEvent) {
+                    const results = await RelayClient.publish(signedEvent, relayUrls);
+                    const ok = Object.values(results).some((r) => r.success);
+                    if (ok) publishedCount++;
+                  }
+                } catch (pubErr) {
+                  console.error(`[NAC] Failed to publish pending capture ${i}:`, pubErr);
+                }
+              }
+              await PendingCaptures.clear();
+              banner.remove();
+              Utils.showToast(`Published ${publishedCount}/${pending.length} pending capture${pending.length !== 1 ? "s" : ""}`, publishedCount > 0 ? "success" : "error");
+            } catch (e) {
+              console.error("[NAC] Pending captures publish error:", e);
+              Utils.showToast("Failed to publish pending captures: " + e.message, "error");
+              publishBtn.textContent = "Publish Now";
+              publishBtn.disabled = false;
+            }
+          });
         },
         // Format a Unix timestamp as a readable date string
         _formatDate: (timestamp) => {
@@ -9792,41 +9919,6 @@ Enter option (1-4):`;
     }
   });
 
-  // src/pending-captures.js
-  var PendingCaptures;
-  var init_pending_captures = __esm({
-    "src/pending-captures.js"() {
-      init_storage();
-      PendingCaptures = {
-        save: async (captureData) => {
-          const pending = await Storage.get("pending_captures", []);
-          pending.push({
-            ...captureData,
-            savedAt: Date.now(),
-            status: "pending"
-          });
-          await Storage.set("pending_captures", pending);
-          return pending.length;
-        },
-        getAll: async () => {
-          return await Storage.get("pending_captures", []);
-        },
-        remove: async (index) => {
-          const pending = await Storage.get("pending_captures", []);
-          pending.splice(index, 1);
-          await Storage.set("pending_captures", pending);
-        },
-        clear: async () => {
-          await Storage.set("pending_captures", []);
-        },
-        getCount: async () => {
-          const pending = await Storage.get("pending_captures", []);
-          return pending.length;
-        }
-      };
-    }
-  });
-
   // src/capture-panel.js
   var CapturePanel, CAPTURE_PANEL_CSS;
   var init_capture_panel = __esm({
@@ -9837,6 +9929,7 @@ Enter option (1-4):`;
       init_relay_client();
       init_event_builder();
       init_utils();
+      init_youtube();
       CapturePanel = {
         _panelHost: null,
         _shadow: null,
@@ -9969,6 +10062,24 @@ Enter option (1-4):`;
         <!-- Blocks rendered dynamically -->
       </div>
 
+      ${article.platform === "youtube" ? `
+      <!-- YouTube Description Paste Section -->
+      <div class="nac-cp-section">
+        <div class="nac-cp-section-header">\u{1F4C4} Description</div>
+        <textarea class="nac-cp-textarea" id="nac-cp-description"
+                  placeholder="Paste video description here..." rows="5"></textarea>
+        <button class="nac-cp-btn nac-cp-section-save" data-section="description">\u{1F4BE} Save</button>
+      </div>
+      <!-- YouTube Transcript Paste Section -->
+      <div class="nac-cp-section">
+        <div class="nac-cp-section-header">\u{1F4DD} Transcript</div>
+        <div class="nac-cp-hint">Copy from YouTube: \u22EF \u2192 Show transcript \u2192 Select all \u2192 Copy \u2192 Paste below</div>
+        <textarea class="nac-cp-textarea" id="nac-cp-transcript"
+                  placeholder="Paste transcript here..." rows="8"></textarea>
+        <button class="nac-cp-btn nac-cp-section-save" data-section="transcript">\u{1F4BE} Save</button>
+      </div>
+      ` : ""}
+
       <!-- Add Selection Button -->
       <div class="nac-cp-actions">
         <button class="nac-cp-add-selection" id="nac-cp-add">
@@ -10015,6 +10126,52 @@ Enter option (1-4):`;
           if (settingsBtn) {
             settingsBtn.addEventListener("click", () => {
               CapturePanel._setStatus("Settings coming soon", "info");
+            });
+          }
+          const descSaveBtn = panel.querySelector('[data-section="description"]');
+          if (descSaveBtn) {
+            descSaveBtn.addEventListener("click", () => {
+              const textarea = CapturePanel._shadow?.querySelector("#nac-cp-description");
+              if (!textarea) return;
+              const descText = textarea.value.trim();
+              if (!descText) {
+                CapturePanel._setStatus("\u26A0\uFE0F Paste description text first", "warn");
+                return;
+              }
+              if (CapturePanel._article) {
+                CapturePanel._article.description = descText;
+              }
+              CapturePanel.addBlock(descText, "Description");
+              textarea.value = "";
+              descSaveBtn.textContent = "\u2713 Saved";
+              setTimeout(() => {
+                descSaveBtn.textContent = "\u{1F4BE} Save";
+              }, 2e3);
+            });
+          }
+          const transcriptSaveBtn = panel.querySelector('[data-section="transcript"]');
+          if (transcriptSaveBtn) {
+            transcriptSaveBtn.addEventListener("click", () => {
+              const textarea = CapturePanel._shadow?.querySelector("#nac-cp-transcript");
+              if (!textarea) return;
+              const rawText = textarea.value.trim();
+              if (!rawText) {
+                CapturePanel._setStatus("\u26A0\uFE0F Paste transcript text first", "warn");
+                return;
+              }
+              const parsed = parseYouTubeTranscript(rawText);
+              if (CapturePanel._article) {
+                CapturePanel._article.transcript = parsed.cleanText;
+                CapturePanel._article.transcriptTimestamped = parsed.timestampedText;
+                CapturePanel._article.contentType = "video";
+              }
+              CapturePanel.addBlock(parsed.cleanText, "Transcript");
+              textarea.value = "";
+              transcriptSaveBtn.textContent = "\u2713 Saved";
+              setTimeout(() => {
+                transcriptSaveBtn.textContent = "\u{1F4BE} Save";
+              }, 2e3);
+              CapturePanel._setStatus(`\u2713 Transcript parsed (${parsed.segments.length} segments)`, "success");
             });
           }
         },
@@ -10479,6 +10636,42 @@ Enter option (1-4):`;
     border-top: 1px solid #333;
     flex-shrink: 0;
     min-height: 28px;
+  }
+
+  .nac-cp-section {
+    padding: 8px 12px;
+    border-top: 1px solid #333;
+  }
+
+  .nac-cp-section-header {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 6px;
+    color: #e0e0e0;
+  }
+
+  .nac-cp-textarea {
+    width: 100%;
+    min-height: 80px;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 8px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #e0e0e0;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .nac-cp-textarea:focus {
+    outline: none;
+    border-color: #6366f1;
+  }
+
+  .nac-cp-section-save {
+    margin-top: 6px;
   }
 
   /* Mobile: bottom panel */
@@ -14498,6 +14691,66 @@ Enter option (1-4):`;
   .nac-btn-close-watch:hover {
     background: #cc0000 !important;
   }
+
+  /* ===== Pending Captures Banner ===== */
+  .nac-pending-banner {
+    background: linear-gradient(135deg, #6366f1, #4f46e5);
+    color: white;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    margin: -40px -20px 16px -20px;
+    border-radius: 0;
+    flex-wrap: wrap;
+  }
+
+  .nac-pending-banner span {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .nac-pending-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+
+  .nac-pending-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .nac-pending-publish {
+    background: white;
+    color: #4f46e5;
+    font-weight: 600;
+  }
+
+  .nac-pending-publish:hover:not(:disabled) {
+    background: #f0f0f0;
+  }
+
+  .nac-pending-dismiss {
+    background: rgba(255,255,255,0.2);
+    color: white;
+  }
+
+  .nac-pending-dismiss:hover {
+    background: rgba(255,255,255,0.3);
+  }
+
+  @media (max-width: 768px) {
+    .nac-pending-banner {
+      margin: -12px -12px 12px -12px;
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+  }
 `;
     }
   });
@@ -14622,6 +14875,16 @@ Enter option (1-4):`;
       }, 5e3);
     });
   }
+  function addFABBadge(count) {
+    if (!_fab) return;
+    const existing = _fab.querySelector(".nac-fab-badge");
+    if (existing) existing.remove();
+    const badge = document.createElement("span");
+    badge.className = "nac-fab-badge";
+    badge.textContent = count > 9 ? "9+" : String(count);
+    badge.style.cssText = "position:absolute!important;top:-4px!important;right:-4px!important;background:#ef4444!important;color:white!important;font-size:11px!important;font-weight:700!important;min-width:18px!important;height:18px!important;border-radius:9px!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:0 4px!important;line-height:1!important;pointer-events:none!important;box-sizing:border-box!important;";
+    _fab.appendChild(badge);
+  }
   function ensureFABExists() {
     if (_fabHost && document.body && document.body.contains(_fabHost)) {
       return;
@@ -14734,6 +14997,14 @@ Enter option (1-4):`;
             publicationIcon: "",
             platformAccount: null
           };
+          if (detection2.platform === "youtube") {
+            const videoTitle = document.querySelector('meta[property="og:title"]')?.content || document.title.replace(" - YouTube", "");
+            const channelName = document.querySelector("#channel-name a, ytd-channel-name a")?.textContent?.trim() || "";
+            article2.title = videoTitle;
+            article2.byline = channelName;
+            article2.featuredImage = document.querySelector('meta[property="og:image"]')?.content || "";
+            article2.contentType = "video";
+          }
           CapturePanel.open(article2);
           if (textSel?.text) {
             CapturePanel.addBlock(textSel.text, "Selected text");
@@ -14838,6 +15109,15 @@ Enter option (1-4):`;
       }
       createFAB();
       console.log("[NAC] FAB created successfully");
+      try {
+        const pendingCount = await PendingCaptures.getCount();
+        if (pendingCount > 0) {
+          addFABBadge(pendingCount);
+          console.log("[NAC] Pending captures badge added:", pendingCount);
+        }
+      } catch (e) {
+        console.warn("[NAC] Failed to check pending captures:", e);
+      }
       setInterval(() => {
         try {
           ensureFABExists();
@@ -14899,10 +15179,11 @@ Enter option (1-4):`;
       init_platform_handler();
       init_reader_view();
       init_capture_panel();
+      init_pending_captures();
       init_entity_migration();
       init_api_interceptor();
       init_styles();
-      CAPTURE_PANEL_PLATFORMS = ["facebook", "instagram", "tiktok"];
+      CAPTURE_PANEL_PLATFORMS = ["facebook", "instagram", "tiktok", "youtube"];
       _fabHost = null;
       _fab = null;
     }
