@@ -109,6 +109,15 @@
           min_content_length: 200,
           max_title_length: 300
         },
+        articleCache: {
+          enabled: true,
+          maxSizeBytes: 3 * 1024 * 1024,
+          // 3MB budget
+          evictionTarget: 0.75,
+          // Evict to 75% of budget
+          compressionThreshold: 1e5
+          // Compress articles > 100KB
+        },
         tagging: {
           selection_debounce_ms: 300,
           min_selection_length: 2,
@@ -693,6 +702,14 @@
   });
 
   // src/storage.js
+  async function _hashUrl(url) {
+    const normalized = url.split("#")[0].split("?")[0].replace(/\/$/, "").toLowerCase();
+    const encoder = new TextEncoder();
+    const data = encoder.encode(normalized);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
   var Storage;
   var init_storage = __esm({
     "src/storage.js"() {
@@ -1028,6 +1045,150 @@
             return await Storage.set("evidence_links", links);
           }
         },
+        // Article cache — per-article storage with LRU eviction
+        articleCache: {
+          // Get the index (lightweight lookup: { urlHash: { url, title, cachedAt, publishedToRelay, size } })
+          getIndex: async () => {
+            return await Storage.get("article_cache_index", {});
+          },
+          // Check if a URL is cached
+          has: async (url) => {
+            const index = await Storage.get("article_cache_index", {});
+            const hash = await _hashUrl(url);
+            return !!index[hash];
+          },
+          // Get a cached article by URL
+          getForUrl: async (url) => {
+            const hash = await _hashUrl(url);
+            return await Storage.get("article_cache_" + hash, null);
+          },
+          // Save an article to cache
+          save: async (article) => {
+            if (!article?.url) return;
+            const hash = await _hashUrl(article.url);
+            const cached = {
+              // Identity
+              url: article.url,
+              urlHash: hash,
+              // Core content
+              content: article.content || "",
+              textContent: article.textContent || "",
+              // Metadata
+              title: article.title || "",
+              byline: article.byline || "",
+              siteName: article.siteName || "",
+              domain: article.domain || "",
+              publishedAt: article.publishedAt || null,
+              featuredImage: article.featuredImage || "",
+              publicationIcon: article.publicationIcon || "",
+              excerpt: article.excerpt || "",
+              // Classification
+              isPaywalled: article.isPaywalled || false,
+              contentType: article.contentType || "article",
+              platform: article.platform || null,
+              language: article.language || null,
+              keywords: article.keywords || [],
+              wordCount: article.wordCount || 0,
+              section: article.section || null,
+              // Platform-specific
+              engagement: article.engagement || null,
+              tweetMeta: article.tweetMeta || null,
+              videoMeta: article.videoMeta || null,
+              substackMeta: article.substackMeta || null,
+              transcript: article.transcript || null,
+              transcriptTimestamped: article.transcriptTimestamped || null,
+              description: article.description || null,
+              platformAccount: article.platformAccount || null,
+              // Cache metadata
+              cachedAt: Date.now(),
+              publishedToRelay: false,
+              nostrEventId: null,
+              captureCount: 1
+            };
+            const jsonStr = JSON.stringify(cached);
+            if (jsonStr.length > CONFIG.articleCache.compressionThreshold) {
+              cached.textContent = "";
+              if (cached.transcriptTimestamped) cached.transcriptTimestamped = "";
+            }
+            await Storage.set("article_cache_" + hash, cached);
+            const index = await Storage.get("article_cache_index", {});
+            index[hash] = {
+              url: article.url,
+              title: (article.title || "").substring(0, 100),
+              cachedAt: Date.now(),
+              publishedToRelay: false,
+              size: JSON.stringify(cached).length
+            };
+            await Storage.set("article_cache_index", index);
+            await Storage.articleCache.evictIfNeeded();
+            console.log("[NAC Cache] Saved article:", (article.title || "").substring(0, 50), "(", Math.round(jsonStr.length / 1024), "KB)");
+          },
+          // Mark an article as published to relay
+          markPublished: async (url, eventId) => {
+            const hash = await _hashUrl(url);
+            const cached = await Storage.get("article_cache_" + hash, null);
+            if (cached) {
+              cached.publishedToRelay = true;
+              cached.nostrEventId = eventId;
+              await Storage.set("article_cache_" + hash, cached);
+            }
+            const index = await Storage.get("article_cache_index", {});
+            if (index[hash]) {
+              index[hash].publishedToRelay = true;
+              await Storage.set("article_cache_index", index);
+            }
+          },
+          // Delete a cached article
+          delete: async (url) => {
+            const hash = await _hashUrl(url);
+            await Storage.delete("article_cache_" + hash);
+            const index = await Storage.get("article_cache_index", {});
+            delete index[hash];
+            await Storage.set("article_cache_index", index);
+          },
+          // Clear all cached articles
+          clear: async () => {
+            const index = await Storage.get("article_cache_index", {});
+            for (const hash of Object.keys(index)) {
+              await Storage.delete("article_cache_" + hash);
+            }
+            await Storage.set("article_cache_index", {});
+          },
+          // Get total cache size and count
+          getStats: async () => {
+            const index = await Storage.get("article_cache_index", {});
+            const entries = Object.values(index);
+            return {
+              count: entries.length,
+              totalSize: entries.reduce((sum, e) => sum + (e.size || 0), 0),
+              publishedCount: entries.filter((e) => e.publishedToRelay).length
+            };
+          },
+          // Evict oldest articles if over budget
+          evictIfNeeded: async () => {
+            const BUDGET = CONFIG.articleCache.maxSizeBytes;
+            const TARGET = CONFIG.articleCache.evictionTarget * BUDGET;
+            const index = await Storage.get("article_cache_index", {});
+            const entries = Object.entries(index).map(([hash, meta]) => ({ hash, ...meta })).sort((a, b) => {
+              if (a.publishedToRelay !== b.publishedToRelay) {
+                return a.publishedToRelay ? -1 : 1;
+              }
+              return a.cachedAt - b.cachedAt;
+            });
+            let totalSize = entries.reduce((sum, e) => sum + (e.size || 0), 0);
+            if (totalSize <= BUDGET) return;
+            console.log("[NAC Cache] Over budget:", Math.round(totalSize / 1024), "KB. Evicting...");
+            while (totalSize > TARGET && entries.length > 0) {
+              const oldest = entries.shift();
+              await Storage.delete("article_cache_" + oldest.hash);
+              delete index[oldest.hash];
+              totalSize -= oldest.size || 0;
+              console.log("[NAC Cache] Evicted:", oldest.title?.substring(0, 40));
+            }
+            await Storage.set("article_cache_index", index);
+            console.log("[NAC Cache] After eviction:", Math.round(totalSize / 1024), "KB");
+          }
+        },
         // Relay configuration
         relays: {
           get: async () => {
@@ -1066,6 +1227,7 @@
           const evidenceLinks = await Storage.get("evidence_links", {});
           const platformAccounts = await Storage.get("platform_accounts", {});
           const comments = await Storage.get("captured_comments", {});
+          const cacheStats = await Storage.articleCache.getStats();
           const identitySize = JSON.stringify(identity || "").length;
           const entitiesSize = JSON.stringify(entities || "").length;
           const relaysSize = JSON.stringify(relays || "").length;
@@ -1074,7 +1236,8 @@
           const evidenceLinksSize = JSON.stringify(evidenceLinks || "").length;
           const platformAccountsSize = JSON.stringify(platformAccounts || "").length;
           const commentsSize = JSON.stringify(comments || "").length;
-          const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize + evidenceLinksSize + platformAccountsSize + commentsSize;
+          const articleCacheSize = cacheStats.totalSize;
+          const totalBytes = identitySize + entitiesSize + relaysSize + syncSize + claimsSize + evidenceLinksSize + platformAccountsSize + commentsSize + articleCacheSize;
           return {
             totalBytes,
             breakdown: {
@@ -1085,7 +1248,8 @@
               claims: claimsSize,
               evidenceLinks: evidenceLinksSize,
               platformAccounts: platformAccountsSize,
-              comments: commentsSize
+              comments: commentsSize,
+              articleCache: articleCacheSize
             }
           };
         }
@@ -7677,6 +7841,11 @@ ${extractDescription()}`;
             setTimeout(() => EntityAutoSuggest.scan(article), 500);
           }
           await ClaimExtractor.loadForArticle(article.url);
+          try {
+            await Storage.articleCache.save(article);
+          } catch (e) {
+            console.warn("[NAC] Article cache save failed:", e.message);
+          }
         },
         // Show pending captures banner at the top of the reader view
         _showPendingCapturesBanner: (count) => {
@@ -8518,6 +8687,11 @@ ${eventJson}`;
               const commentMsg = capturedComments.length > 0 ? ` ${commentSuccessCount} comment${commentSuccessCount !== 1 ? "s" : ""} published.` : "";
               btn.textContent = `Published to ${successCount} relay${successCount > 1 ? "s" : ""}`;
               Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? "s" : ""}.${claimMsg}${linkMsg}${relMsg}${commentMsg}`, "success");
+              try {
+                await Storage.articleCache.markPublished(ReaderView.article.url, signedEvent.id);
+              } catch (e) {
+                console.warn("[NAC] Cache mark published failed:", e.message);
+              }
             } else {
               btn.textContent = "Publish Failed";
               btn.disabled = false;
@@ -8769,7 +8943,7 @@ ${eventJson}`;
             }
             const el = document.getElementById("nac-storage-usage");
             if (el) {
-              el.innerHTML = `<strong style="color: ${color};">Storage: ~${formatSize(usage.totalBytes)}</strong>${label}<br><span style="font-size: 10px;">Entities: ${formatSize(usage.breakdown.entities)}, Claims: ${formatSize(usage.breakdown.claims)}, Evidence: ${formatSize(usage.breakdown.evidenceLinks)}, Comments: ${formatSize(usage.breakdown.comments)}, Accounts: ${formatSize(usage.breakdown.platformAccounts)}, Identity: ${formatSize(usage.breakdown.identity)}, Relays: ${formatSize(usage.breakdown.relays)}</span>`;
+              el.innerHTML = `<strong style="color: ${color};">Storage: ~${formatSize(usage.totalBytes)}</strong>${label}<br><span style="font-size: 10px;">Entities: ${formatSize(usage.breakdown.entities)}, Claims: ${formatSize(usage.breakdown.claims)}, Evidence: ${formatSize(usage.breakdown.evidenceLinks)}, Comments: ${formatSize(usage.breakdown.comments)}, Accounts: ${formatSize(usage.breakdown.platformAccounts)}, Article Cache: ${formatSize(usage.breakdown.articleCache)}, Identity: ${formatSize(usage.breakdown.identity)}, Relays: ${formatSize(usage.breakdown.relays)}</span>`;
             }
           } catch (e) {
             console.error("[NAC] Failed to calculate storage usage:", e);

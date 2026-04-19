@@ -655,6 +655,13 @@ export const ReaderView = {
 
    // Load claims for this article
    await ClaimExtractor.loadForArticle(article.url);
+
+   // Cache article (draft save)
+   try {
+     await Storage.articleCache.save(article);
+   } catch(e) {
+     console.warn('[NAC] Article cache save failed:', e.message);
+   }
  },
 
   // Show pending captures banner at the top of the reader view
@@ -1685,6 +1692,13 @@ export const ReaderView = {
         const commentMsg = capturedComments.length > 0 ? ` ${commentSuccessCount} comment${commentSuccessCount !== 1 ? 's' : ''} published.` : '';
         btn.textContent = `Published to ${successCount} relay${successCount > 1 ? 's' : ''}`;
         Utils.showToast(`Article published to ${successCount} relay${successCount > 1 ? 's' : ''}.${claimMsg}${linkMsg}${relMsg}${commentMsg}`, 'success');
+
+        // Mark article as published in cache
+        try {
+          await Storage.articleCache.markPublished(ReaderView.article.url, signedEvent.id);
+        } catch(e) {
+          console.warn('[NAC] Cache mark published failed:', e.message);
+        }
       } else {
         btn.textContent = 'Publish Failed';
         btn.disabled = false;
@@ -1974,6 +1988,7 @@ export const ReaderView = {
           `Evidence: ${formatSize(usage.breakdown.evidenceLinks)}, ` +
           `Comments: ${formatSize(usage.breakdown.comments)}, ` +
           `Accounts: ${formatSize(usage.breakdown.platformAccounts)}, ` +
+          `Article Cache: ${formatSize(usage.breakdown.articleCache)}, ` +
           `Identity: ${formatSize(usage.breakdown.identity)}, ` +
           `Relays: ${formatSize(usage.breakdown.relays)}</span>`;
       }

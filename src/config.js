@@ -22,6 +22,12 @@ export const CONFIG = {
     min_content_length: 200,
     max_title_length: 300
   },
+  articleCache: {
+    enabled: true,
+    maxSizeBytes: 3 * 1024 * 1024,  // 3MB budget
+    evictionTarget: 0.75,            // Evict to 75% of budget
+    compressionThreshold: 100000,    // Compress articles > 100KB
+  },
   tagging: {
     selection_debounce_ms: 300,
     min_selection_length: 2,
