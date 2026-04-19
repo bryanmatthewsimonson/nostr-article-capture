@@ -94,6 +94,19 @@ export const ReaderView = {
               <a class="nac-masthead-link" href="${Utils.escapeHtml(article.url)}" target="_blank" title="View original">↗ Original</a>
             </div>
           </div>
+          ${article._fromArchive ? `
+          <div class="nac-archive-banner">
+            <div class="nac-archive-banner-icon">📦</div>
+            <div class="nac-archive-banner-info">
+              <div class="nac-archive-banner-title">ARCHIVED VERSION</div>
+              <div class="nac-archive-banner-meta">
+                Captured ${article.cachedAt ? new Date(article.cachedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : 'previously'}
+                • Source: ${article._archiveSource === 'cache' ? 'Local Cache' : 'NOSTR Relay'}
+                ${article._liveWordCount ? ` • Live: ${article._liveWordCount} words → Archive: ${article.wordCount || '?'} words` : ''}
+              </div>
+            </div>
+            <button class="nac-archive-re-extract" id="nac-re-extract-btn">🔄 Re-extract from page</button>
+          </div>` : ''}
           <div class="nac-article-header">
             <h1 class="nac-article-title" contenteditable="false" id="nac-title">${Utils.escapeHtml(article.title || 'Untitled')}</h1>
             <div class="nac-article-meta">
@@ -269,6 +282,31 @@ export const ReaderView = {
     const closeWatchBtn = document.getElementById('nac-close-watch-btn');
     if (closeWatchBtn) {
       closeWatchBtn.addEventListener('click', ReaderView.hide);
+    }
+    // Re-extract button (archive mode)
+    const reExtractBtn = document.getElementById('nac-re-extract-btn');
+    if (reExtractBtn) {
+      reExtractBtn.addEventListener('click', async () => {
+        try {
+          reExtractBtn.disabled = true;
+          reExtractBtn.textContent = '🔄 Extracting...';
+          const freshArticle = ContentExtractor.extractArticle();
+          if (freshArticle) {
+            ReaderView.hide();
+            freshArticle._fromArchive = false;
+            await ReaderView.show(freshArticle);
+            Utils.showToast('Re-extracted fresh content from page');
+          } else {
+            Utils.showToast('Could not extract fresh content', 'error');
+            reExtractBtn.disabled = false;
+            reExtractBtn.textContent = '🔄 Re-extract from page';
+          }
+        } catch (e) {
+          console.error('[NAC] Re-extract failed:', e);
+          reExtractBtn.disabled = false;
+          reExtractBtn.textContent = '🔄 Re-extract from page';
+        }
+      });
     }
     document.getElementById('nac-edit-btn').addEventListener('click', ReaderView.toggleEditMode);
     document.getElementById('nac-md-toggle-btn').addEventListener('click', ReaderView.toggleMarkdownMode);

@@ -7515,6 +7515,19 @@ ${extractDescription()}`;
               <a class="nac-masthead-link" href="${Utils.escapeHtml(article.url)}" target="_blank" title="View original">\u2197 Original</a>
             </div>
           </div>
+          ${article._fromArchive ? `
+          <div class="nac-archive-banner">
+            <div class="nac-archive-banner-icon">\u{1F4E6}</div>
+            <div class="nac-archive-banner-info">
+              <div class="nac-archive-banner-title">ARCHIVED VERSION</div>
+              <div class="nac-archive-banner-meta">
+                Captured ${article.cachedAt ? new Date(article.cachedAt).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }) : "previously"}
+                \u2022 Source: ${article._archiveSource === "cache" ? "Local Cache" : "NOSTR Relay"}
+                ${article._liveWordCount ? ` \u2022 Live: ${article._liveWordCount} words \u2192 Archive: ${article.wordCount || "?"} words` : ""}
+              </div>
+            </div>
+            <button class="nac-archive-re-extract" id="nac-re-extract-btn">\u{1F504} Re-extract from page</button>
+          </div>` : ""}
           <div class="nac-article-header">
             <h1 class="nac-article-title" contenteditable="false" id="nac-title">${Utils.escapeHtml(article.title || "Untitled")}</h1>
             <div class="nac-article-meta">
@@ -7682,6 +7695,30 @@ ${extractDescription()}`;
           const closeWatchBtn = document.getElementById("nac-close-watch-btn");
           if (closeWatchBtn) {
             closeWatchBtn.addEventListener("click", ReaderView.hide);
+          }
+          const reExtractBtn = document.getElementById("nac-re-extract-btn");
+          if (reExtractBtn) {
+            reExtractBtn.addEventListener("click", async () => {
+              try {
+                reExtractBtn.disabled = true;
+                reExtractBtn.textContent = "\u{1F504} Extracting...";
+                const freshArticle = ContentExtractor.extractArticle();
+                if (freshArticle) {
+                  ReaderView.hide();
+                  freshArticle._fromArchive = false;
+                  await ReaderView.show(freshArticle);
+                  Utils.showToast("Re-extracted fresh content from page");
+                } else {
+                  Utils.showToast("Could not extract fresh content", "error");
+                  reExtractBtn.disabled = false;
+                  reExtractBtn.textContent = "\u{1F504} Re-extract from page";
+                }
+              } catch (e) {
+                console.error("[NAC] Re-extract failed:", e);
+                reExtractBtn.disabled = false;
+                reExtractBtn.textContent = "\u{1F504} Re-extract from page";
+              }
+            });
           }
           document.getElementById("nac-edit-btn").addEventListener("click", ReaderView.toggleEditMode);
           document.getElementById("nac-md-toggle-btn").addEventListener("click", ReaderView.toggleMarkdownMode);
@@ -15075,6 +15112,62 @@ Enter option (1-4):`;
       padding: 10px 12px;
       font-size: 13px;
     }
+  }
+
+  /* Archive Banner */
+  .nac-archive-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.04));
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+
+  .nac-archive-banner-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+  }
+
+  .nac-archive-banner-info {
+    flex: 1;
+  }
+
+  .nac-archive-banner-title {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    color: #f59e0b;
+    text-transform: uppercase;
+  }
+
+  .nac-archive-banner-meta {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+    margin-top: 2px;
+  }
+
+  .nac-archive-re-extract {
+    padding: 6px 12px;
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .nac-archive-re-extract:hover {
+    background: rgba(245, 158, 11, 0.25);
+  }
+
+  .nac-archive-re-extract:disabled {
+    opacity: 0.5;
+    cursor: wait;
   }
 `;
     }

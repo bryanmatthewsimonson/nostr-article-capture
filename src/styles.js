@@ -3404,4 +3404,60 @@ export const STYLES = `
       font-size: 13px;
     }
   }
+
+  /* Archive Banner */
+  .nac-archive-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.04));
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+
+  .nac-archive-banner-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+  }
+
+  .nac-archive-banner-info {
+    flex: 1;
+  }
+
+  .nac-archive-banner-title {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    color: #f59e0b;
+    text-transform: uppercase;
+  }
+
+  .nac-archive-banner-meta {
+    font-size: 12px;
+    color: var(--nac-text-muted);
+    margin-top: 2px;
+  }
+
+  .nac-archive-re-extract {
+    padding: 6px 12px;
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .nac-archive-re-extract:hover {
+    background: rgba(245, 158, 11, 0.25);
+  }
+
+  .nac-archive-re-extract:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
 `;
