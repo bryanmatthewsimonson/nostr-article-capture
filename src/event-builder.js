@@ -499,8 +499,8 @@ export const EventBuilder = {
    */
   queryArticleFromRelays: async (url, userPubkey) => {
     try {
-      const relays = await Storage.relays.get();
-      const readRelays = relays.filter(r => r.enabled && r.read).map(r => r.url);
+      const relayConfig = await Storage.relays.get();
+      const readRelays = (relayConfig.relays || relayConfig || []).filter(r => r.enabled && r.read).map(r => r.url);
       if (readRelays.length === 0) return null;
 
       console.log('[NAC Archive] Querying relays for:', url);

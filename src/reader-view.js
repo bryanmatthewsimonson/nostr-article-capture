@@ -2150,8 +2150,8 @@ export const ReaderView = {
         btn.disabled = true;
         btn.textContent = '🔄 Syncing...';
 
-        const relays = await Storage.relays.get();
-        const readRelays = relays.filter(r => r.enabled && r.read).map(r => r.url);
+        const relayConfig = await Storage.relays.get();
+        const readRelays = (relayConfig.relays || relayConfig || []).filter(r => r.enabled && r.read).map(r => r.url);
         if (readRelays.length === 0) {
           Utils.showToast('No read-enabled relays', 'error');
           btn.disabled = false;

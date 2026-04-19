@@ -5971,8 +5971,8 @@ ${items}
          */
         queryArticleFromRelays: async (url, userPubkey) => {
           try {
-            const relays = await Storage.relays.get();
-            const readRelays = relays.filter((r) => r.enabled && r.read).map((r) => r.url);
+            const relayConfig = await Storage.relays.get();
+            const readRelays = (relayConfig.relays || relayConfig || []).filter((r) => r.enabled && r.read).map((r) => r.url);
             if (readRelays.length === 0) return null;
             console.log("[NAC Archive] Querying relays for:", url);
             const filter = { kinds: [30023], "#r": [url], limit: 5 };
@@ -9238,8 +9238,8 @@ Enter option (1-4):`;
               const btn = document.getElementById("nac-sync-from-relays");
               btn.disabled = true;
               btn.textContent = "\u{1F504} Syncing...";
-              const relays = await Storage.relays.get();
-              const readRelays = relays.filter((r) => r.enabled && r.read).map((r) => r.url);
+              const relayConfig2 = await Storage.relays.get();
+              const readRelays = (relayConfig2.relays || relayConfig2 || []).filter((r) => r.enabled && r.read).map((r) => r.url);
               if (readRelays.length === 0) {
                 Utils.showToast("No read-enabled relays", "error");
                 btn.disabled = false;
