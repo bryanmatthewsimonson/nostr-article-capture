@@ -1,6 +1,7 @@
 import { Storage } from './storage.js';
 import { Crypto } from './crypto.js';
 import { ContentExtractor } from './content-extractor.js';
+import { RelayClient } from './relay-client.js';
 
 export const EventBuilder = {
   // Build NIP-23 article event (kind 30023)
@@ -385,5 +386,168 @@ export const EventBuilder = {
       tags,
       content: link.note || ''
     };
+  },
+
+  // ─── Archive Reader: Relay Retrieval ───
+
+  /**
+   * Reconstruct an article object from a kind 30023 NOSTR event.
+   * Inverse of buildArticleEvent().
+   */
+  reconstructArticleFromEvent: (event) => {
+    if (!event || event.kind !== 30023) return null;
+
+    // Parse tags into lookup maps
+    const tags = {};
+    const tagArrays = {};
+    for (const tag of (event.tags || [])) {
+      const [key, ...values] = tag;
+      if (!tags[key]) tags[key] = values[0] || '';
+      if (!tagArrays[key]) tagArrays[key] = [];
+      tagArrays[key].push(values);
+    }
+
+    // Extract markdown content, stripping our metadata header
+    let markdown = event.content || '';
+    let description = '';
+    let transcript = '';
+
+    // Strip metadata header (between --- markers)
+    const headerMatch = markdown.match(/^---\n[\s\S]*?\n---\n\n?/);
+    if (headerMatch) {
+      markdown = markdown.substring(headerMatch[0].length);
+    }
+
+    // Extract ## Description section
+    const descMatch = markdown.match(/## Description\n\n([\s\S]*?)(?=\n## |\n---|\n$|$)/);
+    if (descMatch) {
+      description = descMatch[1].trim();
+      markdown = markdown.replace(descMatch[0], '').trim();
+    }
+
+    // Extract ## Transcript section
+    const transMatch = markdown.match(/## Transcript\n\n([\s\S]*?)$/);
+    if (transMatch) {
+      transcript = transMatch[1].trim();
+      markdown = markdown.replace(transMatch[0], '').trim();
+    }
+
+    // Convert remaining markdown back to HTML
+    let htmlContent = '';
+    try {
+      htmlContent = ContentExtractor.markdownToHtml(markdown);
+    } catch (e) {
+      htmlContent = markdown.split('\n\n').map(p => `<p>${p}</p>`).join('');
+    }
+
+    const article = {
+      url: tags['r'] || '',
+      content: htmlContent,
+      textContent: markdown,
+      title: tags['title'] || '',
+      byline: tags['author'] || '',
+      siteName: tags['site_name'] || '',
+      domain: (tags['r'] || '').match(/https?:\/\/([^/]+)/)?.[1] || '',
+      publishedAt: parseInt(tags['published_at']) || event.created_at,
+      featuredImage: tags['image'] || '',
+      publicationIcon: tags['icon'] || '',
+      excerpt: tags['summary'] || '',
+      isPaywalled: tags['paywalled'] === 'true',
+      contentType: tags['content_format'] || 'article',
+      platform: tags['platform'] || null,
+      language: tags['lang'] || null,
+      keywords: (tagArrays['t'] || []).map(v => v[0]),
+      wordCount: parseInt(tags['word_count']) || 0,
+      section: tags['section'] || null,
+      description: description || null,
+      transcript: transcript || null,
+      engagement: null,
+      videoMeta: null,
+      tweetMeta: null,
+      platformAccount: null,
+      _fromArchive: true,
+      _archiveSource: 'relay',
+      _nostrEventId: event.id,
+      _nostrCreatedAt: event.created_at,
+      _nostrPubkey: event.pubkey,
+    };
+
+    // Reconstruct engagement
+    const eLikes = parseInt(tags['engagement_likes']);
+    const eShares = parseInt(tags['engagement_shares']);
+    const eComments = parseInt(tags['engagement_comments']);
+    if (eLikes || eShares || eComments) {
+      article.engagement = { likes: eLikes || 0, shares: eShares || 0, comments: eComments || 0, views: 0 };
+    }
+
+    // Video-specific
+    if (tags['video_id']) {
+      article.videoMeta = { videoId: tags['video_id'], duration: tags['duration'] || '', channelName: tags['channel'] || '' };
+    }
+
+    // Tweet-specific
+    if (tags['tweet_id']) {
+      article.tweetMeta = { tweetId: tags['tweet_id'], authorHandle: (tags['author_handle'] || '').replace('@', ''), isThread: tags['thread'] === 'true', threadLength: parseInt(tags['thread_length']) || 1 };
+    }
+
+    return article;
+  },
+
+  /**
+   * Query NOSTR relays for a kind 30023 event matching a URL.
+   * Returns a reconstructed article object or null.
+   */
+  queryArticleFromRelays: async (url, userPubkey) => {
+    try {
+      const relays = await Storage.relays.get();
+      const readRelays = relays.filter(r => r.enabled && r.read).map(r => r.url);
+      if (readRelays.length === 0) return null;
+
+      console.log('[NAC Archive] Querying relays for:', url);
+      const filter = { kinds: [30023], '#r': [url], limit: 5 };
+      if (userPubkey) filter.authors = [userPubkey];
+
+      const events = await RelayClient.subscribe(readRelays, filter, { timeout: 10000 });
+      if (!events || events.length === 0) {
+        console.log('[NAC Archive] No events found on relays');
+        return null;
+      }
+
+      events.sort((a, b) => b.created_at - a.created_at);
+      console.log('[NAC Archive] Found', events.length, 'events, using newest from', new Date(events[0].created_at * 1000).toLocaleDateString());
+
+      const article = EventBuilder.reconstructArticleFromEvent(events[0]);
+      if (article) {
+        // Cache locally for future instant access
+        try { await Storage.articleCache.save(article); } catch (e) { /* non-critical */ }
+      }
+      return article;
+    } catch (e) {
+      console.log('[NAC Archive] Relay query failed:', e.message);
+      return null;
+    }
+  },
+
+  /**
+   * Get an archived article — checks local cache first, then relays.
+   */
+  getArchivedArticle: async (url, userPubkey) => {
+    // 1. Local cache (instant)
+    try {
+      const cached = await Storage.articleCache.getForUrl(url);
+      if (cached) {
+        console.log('[NAC Archive] Found in local cache');
+        cached._fromArchive = true;
+        cached._archiveSource = 'cache';
+        return cached;
+      }
+    } catch (e) { /* continue to relay */ }
+
+    // 2. Relay query (up to 10s)
+    if (userPubkey) {
+      return await EventBuilder.queryArticleFromRelays(url, userPubkey);
+    }
+
+    return null;
   }
 };
