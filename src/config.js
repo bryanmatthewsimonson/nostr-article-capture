@@ -1,5 +1,5 @@
 export const CONFIG = {
-  version: '4.1.0',
+  version: '4.2.0',
   debug: false,
   relays_default: [
     { url: 'wss://nos.lol', read: true, write: true, enabled: true },

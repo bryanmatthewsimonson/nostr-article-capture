@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      4.1.0
+// @version      4.2.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js
 // @description  Capture content from any website — articles, social media, YouTube videos, comments — with entity tagging, claim extraction, and NOSTR publishing
@@ -86,7 +86,7 @@
   var init_config = __esm({
     "src/config.js"() {
       CONFIG = {
-        version: "4.1.0",
+        version: "4.2.0",
         debug: false,
         relays_default: [
           { url: "wss://nos.lol", read: true, write: true, enabled: true },
@@ -8984,6 +8984,15 @@ ${eventJson}`;
         <div style="margin-top: 8px;">
           <button class="nac-btn" id="nac-storage-cleanup" style="font-size: 11px; padding: 4px 10px;">\u{1F9F9} Storage Cleanup</button>
         </div>
+
+        <div id="nac-article-cache-section" style="margin-top: 16px; padding: 10px; background: #1a1a2e; border: 1px solid #333; border-radius: 6px; font-size: 12px;">
+          <div style="font-weight: 600; margin-bottom: 6px;">\u{1F4E6} Article Cache</div>
+          <div id="nac-cache-stats" style="color: #aaa; font-size: 11px;">Loading...</div>
+          <div style="margin-top: 8px; display: flex; gap: 8px;">
+            <button class="nac-btn" id="nac-sync-from-relays" style="font-size: 11px; padding: 4px 10px;">\u{1F504} Sync from Relays</button>
+            <button class="nac-btn" id="nac-clear-cache" style="font-size: 11px; padding: 4px 10px; color: #ef4444;">\u{1F5D1} Clear Cache</button>
+          </div>
+        </div>
         
         <div class="nac-version">Version ${CONFIG.version}</div>
       </div>
@@ -9202,6 +9211,63 @@ Enter option (1-4):`;
                 break;
             }
             ReaderView.showSettings();
+          });
+          try {
+            const cacheStats = await Storage.articleCache.getStats();
+            const cacheEl = document.getElementById("nac-cache-stats");
+            if (cacheEl) {
+              const formatSize = (bytes) => bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " MB" : Math.round(bytes / 1024) + " KB";
+              cacheEl.innerHTML = `Cached articles: <strong>${cacheStats.count}</strong> (${formatSize(cacheStats.totalSize)})` + (cacheStats.publishedCount > 0 ? ` \u2022 ${cacheStats.publishedCount} published to relays` : "");
+            }
+          } catch (e) {
+          }
+          document.getElementById("nac-clear-cache")?.addEventListener("click", async () => {
+            if (confirm("Clear all cached articles? Published articles can be re-retrieved from relays.")) {
+              await Storage.articleCache.clear();
+              Utils.showToast("Article cache cleared", "success");
+              ReaderView.showSettings();
+            }
+          });
+          document.getElementById("nac-sync-from-relays")?.addEventListener("click", async () => {
+            try {
+              const identity2 = await Storage.identity.get();
+              if (!identity2?.pubkey) {
+                Utils.showToast("Set up identity first (NIP-07 or local key)", "error");
+                return;
+              }
+              const btn = document.getElementById("nac-sync-from-relays");
+              btn.disabled = true;
+              btn.textContent = "\u{1F504} Syncing...";
+              const relays = await Storage.relays.get();
+              const readRelays = relays.filter((r) => r.enabled && r.read).map((r) => r.url);
+              if (readRelays.length === 0) {
+                Utils.showToast("No read-enabled relays", "error");
+                btn.disabled = false;
+                btn.textContent = "\u{1F504} Sync from Relays";
+                return;
+              }
+              const events = await RelayClient.subscribe(readRelays, { kinds: [30023], authors: [identity2.pubkey], limit: 100 }, { timeout: 15e3 });
+              let imported = 0;
+              for (const event of events || []) {
+                const article = EventBuilder.reconstructArticleFromEvent(event);
+                if (article?.url) {
+                  await Storage.articleCache.save(article);
+                  imported++;
+                }
+              }
+              Utils.showToast(`Imported ${imported} articles from relays`, "success");
+              btn.disabled = false;
+              btn.textContent = "\u{1F504} Sync from Relays";
+              ReaderView.showSettings();
+            } catch (e) {
+              console.error("[NAC] Sync from relays failed:", e);
+              Utils.showToast("Sync failed: " + e.message, "error");
+              const btn = document.getElementById("nac-sync-from-relays");
+              if (btn) {
+                btn.disabled = false;
+                btn.textContent = "\u{1F504} Sync from Relays";
+              }
+            }
           });
         }
       };
