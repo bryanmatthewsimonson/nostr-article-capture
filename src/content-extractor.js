@@ -196,9 +196,34 @@ export const ContentExtractor = {
         // Content language
         article.language = article.structuredData.language || null;
 
-        // Paywall detection
+        // Enhanced paywall detection
         article.isPaywalled = article.structuredData.isAccessibleForFree === false ||
-                              !!document.querySelector('[class*="paywall"], [class*="subscriber"], [data-paywall]');
+                              !!document.querySelector(
+                                '[class*="paywall"], [class*="subscriber"], [data-paywall], ' +
+                                '[class*="piano-offer"], [id*="piano"], [class*="tp-modal"], ' +         // Piano/Tinypass
+                                '[class*="regwall"], [class*="registration-wall"], ' +                    // Registration walls
+                                '[class*="gateway"], [class*="metered"], ' +                              // Metered paywalls
+                                '.paywall-fade, [class*="truncated-content"], ' +                         // Gradient overlays
+                                '.available-content + .paywall, [class*="PaywallBanner"], ' +             // Substack
+                                '[class*="locked-content"], [data-testid*="paywall"]'                     // Generic
+                              );
+
+        // Post-extraction truncation detection
+        if (!article.isPaywalled && article.structuredData.wordCount) {
+          const claimedWords = parseInt(article.structuredData.wordCount);
+          if (claimedWords > 0 && article.wordCount > 0 && article.wordCount / claimedWords < 0.3) {
+            article.isPaywalled = true;
+            console.log('[NAC] Paywall detected via truncation ratio:', article.wordCount, '/', claimedWords);
+          }
+        }
+
+        // Medium metered paywall
+        if (!article.isPaywalled) {
+          const robotsMeta = document.querySelector('meta[name="robots"]')?.content || '';
+          if (robotsMeta.includes('noindex') && window.location.hostname.includes('medium.com')) {
+            article.isPaywalled = true;
+          }
+        }
 
         return article;
       }

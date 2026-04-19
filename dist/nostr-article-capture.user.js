@@ -4326,7 +4326,23 @@
               article.section = article.structuredData.section || null;
               article.keywords = article.structuredData.keywords || [];
               article.language = article.structuredData.language || null;
-              article.isPaywalled = article.structuredData.isAccessibleForFree === false || !!document.querySelector('[class*="paywall"], [class*="subscriber"], [data-paywall]');
+              article.isPaywalled = article.structuredData.isAccessibleForFree === false || !!document.querySelector(
+                '[class*="paywall"], [class*="subscriber"], [data-paywall], [class*="piano-offer"], [id*="piano"], [class*="tp-modal"], [class*="regwall"], [class*="registration-wall"], [class*="gateway"], [class*="metered"], .paywall-fade, [class*="truncated-content"], .available-content + .paywall, [class*="PaywallBanner"], [class*="locked-content"], [data-testid*="paywall"]'
+                // Generic
+              );
+              if (!article.isPaywalled && article.structuredData.wordCount) {
+                const claimedWords = parseInt(article.structuredData.wordCount);
+                if (claimedWords > 0 && article.wordCount > 0 && article.wordCount / claimedWords < 0.3) {
+                  article.isPaywalled = true;
+                  console.log("[NAC] Paywall detected via truncation ratio:", article.wordCount, "/", claimedWords);
+                }
+              }
+              if (!article.isPaywalled) {
+                const robotsMeta = document.querySelector('meta[name="robots"]')?.content || "";
+                if (robotsMeta.includes("noindex") && window.location.hostname.includes("medium.com")) {
+                  article.isPaywalled = true;
+                }
+              }
               return article;
             }
           } catch (e) {
@@ -15194,6 +15210,15 @@ Enter option (1-4):`;
     badge.style.cssText = "position:absolute!important;top:-4px!important;right:-4px!important;background:#ef4444!important;color:white!important;font-size:11px!important;font-weight:700!important;min-width:18px!important;height:18px!important;border-radius:9px!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:0 4px!important;line-height:1!important;pointer-events:none!important;box-sizing:border-box!important;";
     _fab.appendChild(badge);
   }
+  function addFABArchiveBadge() {
+    if (!_fab) return;
+    if (_fab.querySelector(".nac-fab-archive-badge")) return;
+    const badge = document.createElement("span");
+    badge.className = "nac-fab-archive-badge";
+    badge.textContent = "\u{1F4E6}";
+    badge.style.cssText = "position:absolute!important;bottom:-2px!important;left:-2px!important;font-size:14px!important;pointer-events:none!important;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5))!important;";
+    _fab.appendChild(badge);
+  }
   function ensureFABExists() {
     if (_fabHost && document.body && document.body.contains(_fabHost)) {
       return;
@@ -15378,6 +15403,22 @@ Enter option (1-4):`;
         article.platformMetadata = detection2.metadata;
         article.contentConfidence = detection2.confidence;
         article.hasComments = ContentDetector.hasComments();
+        if (article.isPaywalled || article.wordCount && article.wordCount < 200) {
+          try {
+            const identity = await Storage.identity.get();
+            const archived = await EventBuilder.getArchivedArticle(article.url, identity?.pubkey);
+            if (archived && (archived.wordCount || 0) > (article.wordCount || 0)) {
+              console.log("[NAC] Archive has more content:", archived.wordCount, "vs", article.wordCount, "words");
+              Utils.showToast("\u{1F4E6} Using archived version \u2014 more complete content available", "success");
+              archived.url = article.url;
+              archived.isPaywalled = article.isPaywalled;
+              archived._liveWordCount = article.wordCount;
+              article = archived;
+            }
+          } catch (e) {
+            console.log("[NAC] Archive check failed:", e.message);
+          }
+        }
         console.log("[NAC] Opening reader view with article:", article.title?.substring(0, 60));
         await ReaderView.show(article);
       } catch (clickError) {
@@ -15426,6 +15467,15 @@ Enter option (1-4):`;
         }
       } catch (e) {
         console.warn("[NAC] Failed to check pending captures:", e);
+      }
+      try {
+        const currentUrl = window.location.href;
+        const isCached = await Storage.articleCache.has(currentUrl);
+        if (isCached) {
+          addFABArchiveBadge();
+          console.log("[NAC] Archive badge added \u2014 cached article detected");
+        }
+      } catch (e) {
       }
       setInterval(() => {
         try {
@@ -15486,6 +15536,7 @@ Enter option (1-4):`;
       init_content_extractor();
       init_content_detector();
       init_platform_handler();
+      init_event_builder();
       init_reader_view();
       init_capture_panel();
       init_pending_captures();

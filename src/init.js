@@ -4,6 +4,7 @@ import { Utils } from './utils.js';
 import { ContentExtractor } from './content-extractor.js';
 import { ContentDetector } from './content-detector.js';
 import { PlatformHandler } from './platform-handler.js';
+import { EventBuilder } from './event-builder.js';
 import { ReaderView } from './reader-view.js';
 import { CapturePanel } from './capture-panel.js';
 import { PendingCaptures } from './pending-captures.js';
@@ -211,6 +212,19 @@ function addFABBadge(count) {
   badge.className = 'nac-fab-badge';
   badge.textContent = count > 9 ? '9+' : String(count);
   badge.style.cssText = 'position:absolute!important;top:-4px!important;right:-4px!important;background:#ef4444!important;color:white!important;font-size:11px!important;font-weight:700!important;min-width:18px!important;height:18px!important;border-radius:9px!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:0 4px!important;line-height:1!important;pointer-events:none!important;box-sizing:border-box!important;';
+  _fab.appendChild(badge);
+}
+
+/**
+ * Add a small 📦 archive indicator to the FAB
+ */
+function addFABArchiveBadge() {
+  if (!_fab) return;
+  if (_fab.querySelector('.nac-fab-archive-badge')) return; // Already has one
+  const badge = document.createElement('span');
+  badge.className = 'nac-fab-archive-badge';
+  badge.textContent = '📦';
+  badge.style.cssText = 'position:absolute!important;bottom:-2px!important;left:-2px!important;font-size:14px!important;pointer-events:none!important;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5))!important;';
   _fab.appendChild(badge);
 }
 
@@ -455,6 +469,25 @@ function createFAB() {
     article.contentConfidence = detection.confidence;
     article.hasComments = ContentDetector.hasComments();
     
+    // Archive-aware: if article is paywalled or truncated, check for cached version
+    if (article.isPaywalled || (article.wordCount && article.wordCount < 200)) {
+      try {
+        const identity = await Storage.identity.get();
+        const archived = await EventBuilder.getArchivedArticle(article.url, identity?.pubkey);
+        if (archived && (archived.wordCount || 0) > (article.wordCount || 0)) {
+          console.log('[NAC] Archive has more content:', archived.wordCount, 'vs', article.wordCount, 'words');
+          Utils.showToast('📦 Using archived version — more complete content available', 'success');
+          // Keep the fresh URL and metadata, but use archived content
+          archived.url = article.url;
+          archived.isPaywalled = article.isPaywalled;
+          archived._liveWordCount = article.wordCount;
+          article = archived;
+        }
+      } catch (e) {
+        console.log('[NAC] Archive check failed:', e.message);
+      }
+    }
+    
     // Show reader view
     console.log('[NAC] Opening reader view with article:', article.title?.substring(0, 60));
     await ReaderView.show(article);
@@ -522,6 +555,18 @@ async function init() {
       }
     } catch (e) {
       console.warn('[NAC] Failed to check pending captures:', e);
+    }
+
+    // Archive: check if current URL is cached (fast, no relay query)
+    try {
+      const currentUrl = window.location.href;
+      const isCached = await Storage.articleCache.has(currentUrl);
+      if (isCached) {
+        addFABArchiveBadge();
+        console.log('[NAC] Archive badge added — cached article detected');
+      }
+    } catch (e) {
+      // Non-critical
     }
 
     // Periodically verify FAB host is still in DOM and visible
