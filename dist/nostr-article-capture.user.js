@@ -5977,7 +5977,7 @@ ${items}
             console.log("[NAC Archive] Querying relays for:", url);
             const filter = { kinds: [30023], "#r": [url], limit: 5 };
             if (userPubkey) filter.authors = [userPubkey];
-            const events = await RelayClient.subscribe(readRelays, filter, { timeout: 1e4 });
+            const events = await RelayClient.subscribe(filter, readRelays, { timeout: 1e4 });
             if (!events || events.length === 0) {
               console.log("[NAC Archive] No events found on relays");
               return null;
@@ -9246,7 +9246,7 @@ Enter option (1-4):`;
                 btn.textContent = "\u{1F504} Sync from Relays";
                 return;
               }
-              const events = await RelayClient.subscribe(readRelays, { kinds: [30023], authors: [identity2.pubkey], limit: 100 }, { timeout: 15e3 });
+              const events = await RelayClient.subscribe({ kinds: [30023], authors: [identity2.pubkey], limit: 100 }, readRelays, { timeout: 15e3 });
               let imported = 0;
               for (const event of events || []) {
                 const article = EventBuilder.reconstructArticleFromEvent(event);

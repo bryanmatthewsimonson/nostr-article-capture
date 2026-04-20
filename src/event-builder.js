@@ -507,7 +507,7 @@ export const EventBuilder = {
       const filter = { kinds: [30023], '#r': [url], limit: 5 };
       if (userPubkey) filter.authors = [userPubkey];
 
-      const events = await RelayClient.subscribe(readRelays, filter, { timeout: 10000 });
+      const events = await RelayClient.subscribe(filter, readRelays, { timeout: 10000 });
       if (!events || events.length === 0) {
         console.log('[NAC Archive] No events found on relays');
         return null;

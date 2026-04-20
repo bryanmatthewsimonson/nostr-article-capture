@@ -2160,7 +2160,7 @@ export const ReaderView = {
         }
 
         // Query all kind 30023 by this user
-        const events = await RelayClient.subscribe(readRelays, { kinds: [30023], authors: [identity.pubkey], limit: 100 }, { timeout: 15000 });
+        const events = await RelayClient.subscribe({ kinds: [30023], authors: [identity.pubkey], limit: 100 }, readRelays, { timeout: 15000 });
         let imported = 0;
         for (const event of (events || [])) {
           const article = EventBuilder.reconstructArticleFromEvent(event);
