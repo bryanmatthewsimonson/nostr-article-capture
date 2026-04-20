@@ -378,11 +378,11 @@ For maximum adoption:
 
 ---
 
-## NIPs Currently Used in v3
+## NIPs Currently Used in v4
 
-The v3 NOSTR Content Capture implementation uses the following NIPs:
+The v4 NOSTR Content Capture implementation uses the following NIPs:
 
-| NIP | Name | Usage in v3 |
+| NIP | Name | Usage in v4 |
 |-----|------|-------------|
 | **NIP-01** | Basic Protocol | Event structure, relay communication (REQ/EVENT/EOSE/OK/NOTICE/CLOSE) |
 | **NIP-04** | Encrypted DMs (Legacy) | AES-256-CBC decryption fallback for older entity sync events |
@@ -394,12 +394,12 @@ The v3 NOSTR Content Capture implementation uses the following NIPs:
 | **NIP-44** | Encrypted Payloads v2 | ChaCha20 + HKDF-SHA256 encryption for entity sync (primary) |
 | **NIP-78** | Application Data | Kind 30078 for encrypted entity storage and cross-browser sync |
 
-### Event Kinds Used in v3
+### Event Kinds Used in v4
 
 | Kind | Name | Usage |
 |------|------|-------|
 | **0** | Profile Metadata | Optional public identity for entities; alias entities include `["refers_to", canonical_npub]` |
-| **30023** | Long-form Content | Published content (articles, videos, social posts) in Markdown with entity `p` tags, platform/engagement tags, and summary `claim` tags |
+| **30023** | Long-form Content | Published content (articles, videos, social posts) in Markdown with entity `p` tags, platform/engagement tags, and summary `claim` tags. Also used by the Archive Reader for relay retrieval of previously-captured content. |
 | **30040** | Claim Event | Individual claim with claimant/subject/object `p` tags, attribution type, confidence, crux flag, predicate, quote-date |
 | **30041** | Comment/Statement | Individual captured comment with author, platform, thread structure, engagement (new in v3) |
 | **30043** | Evidence Link | Cross-content claim relationship: supports, contradicts, or contextualizes |
@@ -411,15 +411,24 @@ The v3 NOSTR Content Capture implementation uses the following NIPs:
 
 ## Summary
 
-**NIPs used in v3:** NIP-01, NIP-04, NIP-07, NIP-19, NIP-23, NIP-32, NIP-33, NIP-44, NIP-78
+**NIPs used in v4:** NIP-01, NIP-04, NIP-07, NIP-19, NIP-23, NIP-32, NIP-33, NIP-44, NIP-78
 
-**Event kinds implemented in v3:** 0, 30023, 30040, 30041, 30043, 30078, 32125, 32126
+**Event kinds implemented in v4:** 0, 30023, 30040, 30041, 30043, 30078, 32125, 32126
 
 **New in v3 (vs. v2):**
 - Kind 30041: Comment/Statement events — individual captured comments as addressable NOSTR events
 - Kind 32126: Platform Account events — platform identity fragments (previously proposed as "Rating Aggregates")
 - Extended kind 30023 with `content_format`, `platform`, video/tweet metadata, and engagement metric tags
 - Extended kind 30040 with `subject_text`, `object_text` freetext fields
+
+**New in v4 (vs. v3):**
+- Two-mode capture: Reader Mode (full-page) + Capture Panel (non-invasive side panel)
+- Pending captures for CSP-restricted sites (saved locally, published later)
+- Archive Reader: local article cache with relay retrieval (queries kind 30023 by URL)
+- Article reconstruction from kind 30023 events (`EventBuilder.reconstructArticleFromEvent()`)
+- Anti-obfuscation: API interception (fetch/XHR hooks), React fiber traversal, module hook
+- Trusted Types CSP compatibility for YouTube/Google domains
+- Shadow DOM FAB isolation with periodic style re-enforcement
 
 **v1 proposed event kinds (not implemented):**
 - 32123: URL Annotations

@@ -1,6 +1,6 @@
 # NOSTR Content Capture
 
-![Version](https://img.shields.io/badge/version-3.12.0-blue.svg)
+![Version](https://img.shields.io/badge/version-4.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-orange.svg)
 
@@ -16,7 +16,7 @@ A Tampermonkey userscript that captures content from any website — articles, s
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/dist/nostr-article-capture.user.js">
-    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-3.12.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
+    <img src="https://img.shields.io/badge/➡️_Install_NOSTR_Content_Capture-4.2.0-blue?style=for-the-badge&logo=tampermonkey" alt="Install NOSTR Content Capture" />
   </a>
 </p>
 
@@ -38,15 +38,21 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 |------|----------|---------------|----------------|
 | 📰 | **Articles** (any website via Readability) | Article text, metadata, comments | Automatic |
 | ✉️ | **Substack** newsletters | Articles, author bios, subscriber info, comments | Automatic |
-| ▶️ | **YouTube** videos | Video metadata, transcripts (4 methods), embedded player, comments, engagement | Automatic |
+| ▶️ | **YouTube** videos | Video metadata, transcripts (4 methods), embedded player, comments, engagement | Automatic / Capture Panel |
 | 𝕏 | **Twitter/X** | Tweets, threads, profiles, replies | Automatic (stable `data-testid` selectors) |
-| f | **Facebook** posts | Post text, media, comments | User-assisted (click on post) |
-| 📷 | **Instagram** posts and reels | Captions, media, comments | User-assisted (click on post) |
-| ♪ | **TikTok** videos | Video metadata, captions, hashtags, comments, engagement | User-assisted (click on post) |
+| f | **Facebook** posts | Post text, media, comments | User-assisted / Capture Panel |
+| 📷 | **Instagram** posts and reels | Captions, media, comments | User-assisted / Capture Panel |
+| ♪ | **TikTok** videos | Video metadata, captions, hashtags, comments, engagement | User-assisted / Capture Panel |
 
 ---
 
 ## ✨ Features
+
+### 📰 Two Capture Modes
+
+**Reader Mode** — Full-page takeover for articles and Substack. Clean typography with inline editing, entity tagging, claim extraction, and NOSTR publishing.
+
+**Capture Panel** — Non-invasive 350px right-side panel (Shadow DOM isolated) for CSP-restricted social media platforms (Facebook, Instagram, TikTok, YouTube). Accepts text selection blocks, builds article objects incrementally, and saves as pending captures for later publishing.
 
 ### 📰 Content Capture
 
@@ -56,17 +62,34 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Smart date detection** — JSON-LD, meta tags (`article:published_time`, `datePublished`), platform-specific selectors
 - **Enhanced metadata** — word count, reading time, language, section, keywords, structured data (JSON-LD + OpenGraph), paywall detection
 - **User-assisted capture** — Facebook, Instagram, and TikTok use a click-to-select flow: a semi-transparent overlay prompts the user to click on the specific post to capture, then walks up the DOM to find the post container
-- **Platform-native styling** — captured Facebook, Instagram, and TikTok posts render with platform-specific styled HTML (`.nac-facebook-post`, `.nac-instagram-post`, `.nac-tiktok-post`)
-- **`platformAccount` data model** — social platform handlers extract platform account identity (username, profileUrl, avatarUrl) as a separate `platformAccount` object, distinct from `byline`/author
+- **Platform-native styling** — captured Facebook, Instagram, and TikTok posts render with platform-specific styled HTML
+- **`platformAccount` data model** — social platform handlers extract platform account identity (username, profileUrl, avatarUrl) as a separate `platformAccount` object
 - **Platform-specific extractors** — each platform has its own handler with tailored DOM selectors and metadata extraction
 - **YouTube transcript extraction** — four methods: player API `getTranscript()`, timedtext API, `GM_xmlhttpRequest` CORS bypass, and DOM scraping with automatic fallback
 - **YouTube video embed** — embedded player in reader view with responsive iframe
-- **On-demand transcript loading** — "Load Transcript" button in reader view for deferred extraction
 - **YouTube SPA navigation** — detects `yt-navigate-finish` events for seamless page transition support
-- **Twitter/X thread detection** — captures multi-tweet threads by the same author as a single piece of content (DOM-based extraction with stable `data-testid` selectors)
+- **Twitter/X thread detection** — captures multi-tweet threads by the same author as a single piece of content
 - **Engagement metrics** — likes, shares, views, comments captured as evidentiary signals
 - **Trusted Types CSP compatibility** — creates CSP-compliant Trusted Types policies for YouTube and Google domains
 - **Quality-hardened platform handlers** — comprehensive try/catch wrapping with XSS prevention (`escapeHtml`) across all extractors
+- **Pending captures** — for CSP-restricted sites, saves captures locally with a red badge on the FAB
+
+### 📦 Archive Reader
+
+- **Local article cache** — per-article GM storage keys with lightweight index, LRU eviction with 3MB budget
+- **Relay retrieval** — queries kind 30023 events by URL, reconstructs article objects from events
+- **Paywall detection** — JSON-LD, DOM selectors (Piano/Tinypass, registration walls, gradient overlays), truncation ratio analysis
+- **Archive-aware FAB** — 📦 badge when cached article detected; automatic archive fallback when fresh extraction fails
+- **SPA navigation** — rechecks cache on URL changes via MutationObserver
+
+### 🔍 Anti-Obfuscation
+
+- **API interception** — hooks `fetch()` and `XMLHttpRequest` to capture structured data from Meta's GraphQL APIs
+- **React fiber traversal** — walks `__reactFiber$` properties on DOM elements to extract component props
+- **Global data store probing** — accesses Relay Store, `_sharedData`, LD+JSON, webpack module registries
+- **ARIA extraction** — uses `role="article"`, `aria-label`, `data-testid` as stable selectors
+- **Computed style analysis** — detects post boundaries using visual characteristics (size, borders, shadows)
+- **Module hook** — probes Facebook's internal module system (`__d`/`require`) for data-rich modules
 
 ### 📝 Reader View
 
@@ -74,21 +97,20 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **WYSIWYG visual editor** — `contentEditable` rich-text editing directly in the reader view
 - **Raw markdown editor** — toggle between visual and markdown mode (auto-resizing textarea)
 - **Preview as Published** — HTML → markdown → HTML roundtrip to see exactly what NOSTR will display
-- **Inline metadata editing** — click author, publication, date, or URL to edit in place; editing the author auto-creates or links a Person entity
+- **Inline metadata editing** — click author, publication, date, or URL to edit in place
 - **Dark mode** support via `prefers-color-scheme`
-- **Editable URL** — canonical URL displayed and editable; expanded tracking parameter cleanup (`utm_*`, `fbclid`, `gclid`, etc.)
+- **Editable URL** — canonical URL displayed and editable; expanded tracking parameter cleanup
 
 ### 🏷️ Entity System
 
 - **Four entity types**: Person 👤, Organization 🏢, Place 📍, Thing 🔷
 - **Text selection popover** — select text in content, choose entity type from a floating popover
 - **Manual tagging** — add entities by name via the "+ Tag Entity" button
-- **Auto-detection** — author (Person) and publication (Organization) automatically tagged on capture and when the author field is edited
+- **Auto-detection** — author (Person) and publication (Organization) automatically tagged on capture
 - **Keypair per entity** — each entity gets its own secp256k1 keypair (npub/nsec) for NOSTR identity
-- **Entity aliases** (`canonical_id`) — entities can be linked as aliases of a canonical entity, enabling deduplication across name variants
-- **Auto-suggestion** — automatically detects known entities from your registry in content text (name + alias matching)
-- **Entity discovery** — heuristic-based detection of proper nouns, organization names, places using capitalized phrase analysis
-- **Suggestion bar** — accept or dismiss entity suggestions with one click
+- **Entity aliases** (`canonical_id`) — entities can be linked as aliases of a canonical entity
+- **Auto-suggestion** — automatically detects known entities from your registry in content text
+- **Entity discovery** — heuristic-based detection of proper nouns, organization names, places
 - **Entity browser** with search and type filtering (All / 👤 / 🏢 / 📍 / 🔷)
 - **Entity detail view** — rename, manage aliases, view keypair (npub/nsec with copy), articles list
 - **JSON export/import** for full entity registry backup and restore
@@ -100,7 +122,6 @@ The script auto-updates via `@updateURL` / `@downloadURL` in the userscript head
 - **Crux marking** — mark key claims as "crux" (the most important claims)
 - **Confidence slider** — set confidence level (0–100%) on crux claims
 - **Structured claim triples** — `[Subject] → [Predicate] → [Object]` with entity references or freetext
-- **Sentence builder** — subject and object fields accept both entity selections and freetext input
 - **Attribution types** — direct quote, paraphrase, editorial assertion, or article thesis
 - **Quote date** — when the statement was made (distinct from article publish date)
 - **Claims bar** — displays extracted claims with type badges, claimant labels, and crux indicators
@@ -178,15 +199,16 @@ All cryptographic operations implemented in pure JavaScript:
 
 - **`GM_setValue` / `GM_getValue`** for persistent Tampermonkey storage with **`localStorage` fallback**
 - **Storage quota monitoring** — color-coded display in settings (green → orange at 1 MB → red at 5 MB)
-- **Size breakdown** — entities, identity, relays, claims, platform accounts shown separately
+- **Size breakdown** — entities, identity, relays, claims, platform accounts, article cache shown separately
 - **Compression fallback** — `_compressForSave()` strips optional fields when writes fail
+- **Article cache** — per-article storage with LRU eviction (3MB budget)
 - **Graceful error handling** — storage save failures show user-facing toasts
 
 ### 🎨 UI & Accessibility
 
 - **Responsive design** — mobile-friendly FAB positioning and layout
 - **Dark mode** — full `prefers-color-scheme` support
-- **Shadow DOM FAB** — floating action button isolated from page CSS via closed shadow root (with regular DOM fallback), prevents overlays from hiding it
+- **Shadow DOM FAB** — floating action button isolated from page CSS via closed shadow root (with regular DOM fallback)
 - **Platform-adaptive FAB icon** — 📰 for articles, 🎬 for videos, 🐦 for tweets, etc.
 - **ARIA labels** on interactive elements (buttons, dialogs, entity chips, cards, filters)
 - **Focus trap** within the reader view — Tab / Shift+Tab cycles through focusable elements
@@ -200,7 +222,7 @@ All cryptographic operations implemented in pure JavaScript:
 
 1. **Navigate** to any article, tweet, YouTube video, or social media post
 2. **Click** the floating action button (bottom-right corner) — icon adapts to platform
-3. **Read** the content in the clean reader view
+3. **Read** the content in the clean reader view (or use the capture panel on social media)
 4. **Edit metadata** — click author, publication, date, or URL to edit inline
 5. **Toggle Edit mode** for content editing (visual WYSIWYG or raw markdown)
 6. **Tag entities** — select text to tag people, orgs, places, or things
@@ -214,14 +236,14 @@ All cryptographic operations implemented in pure JavaScript:
 
 ## 🏗️ Architecture
 
-Modular ES modules compiled via esbuild into a single Tampermonkey userscript (~11,400 lines across 30 source files):
+Modular ES modules compiled via esbuild into a single Tampermonkey userscript (~34 source files):
 
 ```
 src/
 ├── config.js                  # Configuration constants and shared state
 ├── trusted-types.js           # Trusted Types CSP policy creation
 ├── crypto.js                  # secp256k1, BIP-340, bech32, NIP-04, NIP-44
-├── storage.js                 # GM_setValue/localStorage persistence, CRUD
+├── storage.js                 # GM_setValue/localStorage persistence, CRUD, article cache
 ├── utils.js                   # escapeHtml, showToast, log, accessibility
 ├── content-extractor.js       # Readability + Turndown pipeline
 ├── content-detector.js        # Platform detection (URL + DOM analysis)
@@ -238,6 +260,10 @@ src/
 ├── event-builder.js           # Kinds 0/30023/30040/30041/30043/30078/32125/32126
 ├── relay-client.js            # WebSocket relay client with retry
 ├── reader-view.js             # Full-page reader view UI
+├── capture-panel.js           # Side panel for social media capture
+├── pending-captures.js        # Deferred capture storage
+├── api-interceptor.js         # fetch/XHR hooks for Meta GraphQL
+├── module-hook.js             # Facebook module registry access
 ├── styles.js                  # All CSS (dark mode, responsive)
 ├── init.js                    # FAB creation, Shadow DOM, startup
 ├── index.js                   # Entry point
@@ -448,7 +474,7 @@ npm test
 
 ```
 nostr-article-capture/
-├── src/                                   # ES module source (30 files, ~11,400 lines)
+├── src/                                   # ES module source (34 files)
 │   ├── index.js                           # Entry point
 │   ├── header.js                          # Tampermonkey ==UserScript== block
 │   ├── init.js                            # FAB creation, Shadow DOM, startup
@@ -460,7 +486,9 @@ nostr-article-capture/
 │   ├── entity-auto-suggest.js, entity-browser.js
 │   ├── entity-sync.js, entity-migration.js
 │   ├── event-builder.js, relay-client.js
-│   ├── reader-view.js, styles.js
+│   ├── reader-view.js, capture-panel.js, pending-captures.js
+│   ├── api-interceptor.js, module-hook.js
+│   ├── styles.js
 │   └── platforms/
 │       ├── substack.js, youtube.js, twitter.js
 │       ├── facebook.js, instagram.js, tiktok.js
@@ -472,15 +500,18 @@ nostr-article-capture/
 │   ├── crypto-tests.js                    # 65 crypto tests
 │   └── nip44-test.js                      # 5 NIP-44 tests
 ├── docs/                                  # Documentation
+│   ├── project-history-and-migration.md   # Complete project history & browser extension migration guide
 │   ├── data-model.md                      # Entity, claim, comment, platform account data structures
 │   ├── nostr-nips-analysis.md             # NIP usage and rationale
 │   ├── entity-hierarchy-design.md         # Entity alias system design
 │   ├── entity-sync-design.md              # NIP-78 encrypted sync protocol
+│   ├── archive-reader-design.md           # Archive reader & local cache design
+│   ├── capture-panel-design.md            # Capture panel design
 │   ├── article-data-collection.md         # Article capture field reference
 │   ├── article-complete-inventory.md      # Full inventory of captured data
 │   └── tampermonkey-article-capture-plan.md  # Original v1 plan
 ├── plans/
-│   ├── v3-expansion-plan.md               # v3 architecture and expansion plan
+│   ├── v3-expansion-plan.md               # v3 architecture and expansion plan (all phases complete)
 │   └── v2-redesign-plan.md                # v2 design decisions (historical)
 └── README.md
 ```
@@ -491,13 +522,15 @@ nostr-article-capture/
 
 | Document | Description |
 |----------|-------------|
+| [Project History & Migration Guide](docs/project-history-and-migration.md) | Complete project history, data model reference, NOSTR event specs, and browser extension migration guide |
 | [Data Model](docs/data-model.md) | Entity, claim, comment, platform account, and evidence data structures |
 | [Entity Hierarchy Design](docs/entity-hierarchy-design.md) | Entity alias system and canonical_id design |
 | [Entity Sync Design](docs/entity-sync-design.md) | NIP-78 encrypted sync protocol (NIP-44 + NIP-04 fallback) |
+| [Archive Reader Design](docs/archive-reader-design.md) | Local article cache, relay retrieval, paywall detection |
 | [NOSTR NIPs Analysis](docs/nostr-nips-analysis.md) | NIP usage and rationale |
 | [Article Data Collection](docs/article-data-collection.md) | Article capture field reference |
 | [v3 Expansion Plan](plans/v3-expansion-plan.md) | v3 architecture, platform extractors, data model |
-| [v2 Redesign Plan](plans/v2-redesign-plan.md) | v2 design decisions (historical — superseded by v3) |
+| [v2 Redesign Plan](plans/v2-redesign-plan.md) | v2 design decisions (historical — superseded by v3/v4) |
 
 ---
 

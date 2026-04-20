@@ -1,7 +1,7 @@
 # NOSTR Content Capture v3 — Universal Content Expansion Plan
 
-> **Status**: v3.6.0 — Phases 0–7 implemented. Phase 8 (cross-content features) is future work.
-> **Based on**: v2.9.2 codebase, evolved to v3.6.0 modular architecture (~11,000 lines across 28 source files)
+> **Status**: v4.2.0 — Phases 0–7 fully implemented and deployed. Phase 8 (cross-content features) is future work. The project has since evolved through v4.x with two-mode capture (Reader + Capture Panel), archive reader, anti-obfuscation system, and comprehensive documentation.
+> **Based on**: v2.9.2 codebase, evolved through v3.6.0 to v4.2.0 modular architecture (~34 source files)
 
 ---
 

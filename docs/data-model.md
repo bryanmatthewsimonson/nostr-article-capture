@@ -1,6 +1,6 @@
 # NOSTR Content Capture — Data Model
 
-> **Version**: 3.6.0 — This document describes the data structures used in the current v3 implementation.
+> **Version**: 4.2.0 — This document describes the data structures used in the current v4 implementation.
 
 ## Entity Types
 
@@ -457,6 +457,107 @@ When subject or object is freetext (no entity in registry), the `p` tag is omitt
 
 ---
 
+## Article Cache Data Structure (v4)
+
+Per-article local cache for archive reader and paywall bypass. Uses per-article storage keys to avoid loading all cached articles into memory.
+
+### Cache Index
+
+```javascript
+// Storage key: 'article_cache_index'
+{
+  "<urlHash>": {
+    url: "https://example.com/article",
+    title: "Article Title",
+    cachedAt: 1713200000,               // Timestamp (ms)
+    publishedToRelay: true,
+    size: 45230                          // Approximate size in bytes
+  }
+}
+```
+
+### Cached Article
+
+```javascript
+// Storage key: 'article_cache_<urlHash>'
+// where urlHash = SHA-256(normalizedUrl).substring(0, 16)
+{
+  url: "https://example.com/article",
+  urlHash: "<16-char-hex>",
+
+  // Core content
+  content: "<p>Full HTML...</p>",
+  textContent: "Full plain text...",
+
+  // Metadata
+  title: "Article Title",
+  byline: "Author Name",
+  siteName: "Publication",
+  domain: "example.com",
+  publishedAt: 1707350400,
+  featuredImage: "https://...",
+  publicationIcon: "https://...",
+  excerpt: "First 500 chars...",
+
+  // Classification
+  isPaywalled: false,
+  contentType: "article",               // article | video | social_post | tweet
+  platform: null,                        // youtube | twitter | substack | facebook | instagram | tiktok
+  language: "en",
+  keywords: ["politics"],
+  wordCount: 2450,
+  section: "Opinion",
+
+  // Platform-specific
+  engagement: { likes: 0, shares: 0, comments: 0, views: 0 },
+  tweetMeta: null,
+  videoMeta: null,
+  substackMeta: null,
+  transcript: null,
+  transcriptTimestamped: null,
+  description: null,
+  platformAccount: null,
+
+  // Cache metadata
+  cachedAt: 1713200000,
+  publishedToRelay: true,
+  nostrEventId: "abc123...",
+  captureCount: 1
+}
+```
+
+**Eviction policy**: LRU with 3MB budget. Published articles evicted first (relay serves as backup). Compression for articles >100KB strips `textContent` and `transcriptTimestamped`.
+
+---
+
+## Pending Capture Data Structure (v4)
+
+For CSP-restricted sites (Facebook, Instagram, TikTok) where relay connections are blocked. Captures are saved locally and published later from any page.
+
+```javascript
+// Storage key: 'pending_captures'
+[
+  {
+    url: "https://facebook.com/post/123",
+    platform: "facebook",
+    contentType: "social_post",
+    title: "Post by John Doe",
+    byline: "John Doe",
+    content: "<p>Captured content...</p>",
+    textContent: "Captured text...",
+    blocks: [                              // Text blocks captured by user
+      { text: "Post content...", label: "Selected text", timestamp: 1707350400 }
+    ],
+    featuredImage: "https://...",
+    platformAccount: { username: "@johndoe", platform: "facebook" },
+    savedAt: 1707350500,
+    status: "pending"                      // pending | published | failed
+  }
+]
+```
+
+---
+
 ## Storage Keys Summary
 
 | GM Key | Type | Description |
@@ -468,3 +569,8 @@ When subject or object is freetext (no entity in registry), the `p` tag is omitt
 | `evidence_links` | Object | Evidence links indexed by ID |
 | `platform_accounts` | Object | Platform accounts indexed by ID |
 | `captured_comments` | Object | Captured comments indexed by source URL |
+| `article_cache_index` | Object | Lightweight index of all cached articles |
+| `article_cache_<hash>` | Object | Individual cached article content + metadata |
+| `pending_captures` | Array | Deferred captures from CSP-restricted sites |
+| `entity_last_sync` | Number | Timestamp of last entity sync operation |
+| `entity_schema_version` | Number | Schema version for entity migration (current: 2) |
