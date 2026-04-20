@@ -6,6 +6,10 @@
 
 A Tampermonkey userscript that captures content from any website — articles, social media posts, YouTube videos, comments — extracts metadata, tags entities, identifies claims, and publishes to NOSTR relays. All cryptography — including secp256k1, BIP-340 Schnorr signing, NIP-44 v2 encryption, and bech32 encoding — is implemented from scratch with zero external crypto dependencies.
 
+> 💡 **Prefer a browser extension?** A subset of this userscript has been ported to a Chrome/Firefox WebExtension (MV3):
+> **[bryanmatthewsimonson/xray](https://github.com/bryanmatthewsimonson/xray)** — no userscript manager required.
+> It covers article capture + URL-scoped metadata (annotations, fact-checks, ratings, comments, headline corrections) and is the development target for the platform work that will eventually live in the **Keystone** browser. The userscript here remains the richer, more actively-developed reference.
+
 ---
 
 ## 📥 Install
