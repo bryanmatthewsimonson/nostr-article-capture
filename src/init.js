@@ -469,23 +469,32 @@ function createFAB() {
     article.contentConfidence = detection.confidence;
     article.hasComments = ContentDetector.hasComments();
     
-    // Archive-aware: if article is paywalled or truncated, check for cached version
-    if (article.isPaywalled || (article.wordCount && article.wordCount < 200)) {
-      try {
+    // Archive-aware: check for cached version
+    // If paywalled or truncated, prefer archive. If cached, offer archive.
+    try {
+      const isCached = await Storage.articleCache.has(article.url);
+      if (isCached || article.isPaywalled || (article.wordCount && article.wordCount < 200)) {
         const identity = await Storage.identity.get();
         const archived = await EventBuilder.getArchivedArticle(article.url, identity?.pubkey);
-        if (archived && (archived.wordCount || 0) > (article.wordCount || 0)) {
-          console.log('[NAC] Archive has more content:', archived.wordCount, 'vs', article.wordCount, 'words');
-          Utils.showToast('📦 Using archived version — more complete content available', 'success');
-          // Keep the fresh URL and metadata, but use archived content
-          archived.url = article.url;
-          archived.isPaywalled = article.isPaywalled;
-          archived._liveWordCount = article.wordCount;
-          article = archived;
+        if (archived) {
+          const archiveHasMore = (archived.wordCount || 0) > (article.wordCount || 0);
+          const freshFailed = !article.content || article.content.length < 100;
+          
+          if (article.isPaywalled || archiveHasMore || freshFailed) {
+            console.log('[NAC] Using archived version:', archived.wordCount, 'words (live:', article.wordCount, ')');
+            Utils.showToast('📦 Using archived version', 'success');
+            archived.url = article.url;
+            archived.isPaywalled = article.isPaywalled;
+            archived._liveWordCount = article.wordCount;
+            article = archived;
+          } else {
+            // Fresh extraction worked fine — cache it and proceed normally
+            console.log('[NAC] Fresh extraction OK, updating cache');
+          }
         }
-      } catch (e) {
-        console.log('[NAC] Archive check failed:', e.message);
       }
+    } catch (e) {
+      console.log('[NAC] Archive check failed:', e.message);
     }
     
     // Show reader view

@@ -15562,21 +15562,28 @@ Enter option (1-4):`;
         article.platformMetadata = detection2.metadata;
         article.contentConfidence = detection2.confidence;
         article.hasComments = ContentDetector.hasComments();
-        if (article.isPaywalled || article.wordCount && article.wordCount < 200) {
-          try {
+        try {
+          const isCached = await Storage.articleCache.has(article.url);
+          if (isCached || article.isPaywalled || article.wordCount && article.wordCount < 200) {
             const identity = await Storage.identity.get();
             const archived = await EventBuilder.getArchivedArticle(article.url, identity?.pubkey);
-            if (archived && (archived.wordCount || 0) > (article.wordCount || 0)) {
-              console.log("[NAC] Archive has more content:", archived.wordCount, "vs", article.wordCount, "words");
-              Utils.showToast("\u{1F4E6} Using archived version \u2014 more complete content available", "success");
-              archived.url = article.url;
-              archived.isPaywalled = article.isPaywalled;
-              archived._liveWordCount = article.wordCount;
-              article = archived;
+            if (archived) {
+              const archiveHasMore = (archived.wordCount || 0) > (article.wordCount || 0);
+              const freshFailed = !article.content || article.content.length < 100;
+              if (article.isPaywalled || archiveHasMore || freshFailed) {
+                console.log("[NAC] Using archived version:", archived.wordCount, "words (live:", article.wordCount, ")");
+                Utils.showToast("\u{1F4E6} Using archived version", "success");
+                archived.url = article.url;
+                archived.isPaywalled = article.isPaywalled;
+                archived._liveWordCount = article.wordCount;
+                article = archived;
+              } else {
+                console.log("[NAC] Fresh extraction OK, updating cache");
+              }
             }
-          } catch (e) {
-            console.log("[NAC] Archive check failed:", e.message);
           }
+        } catch (e) {
+          console.log("[NAC] Archive check failed:", e.message);
         }
         console.log("[NAC] Opening reader view with article:", article.title?.substring(0, 60));
         await ReaderView.show(article);
