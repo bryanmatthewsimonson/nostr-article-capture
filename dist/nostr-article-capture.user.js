@@ -15553,6 +15553,20 @@ Enter option (1-4):`;
           article = ContentExtractor.extractArticle();
         }
         if (!article) {
+          console.log("[NAC] Fresh extraction failed, checking archive...");
+          try {
+            const identity = await Storage.identity.get();
+            const archived = await EventBuilder.getArchivedArticle(window.location.href, identity?.pubkey);
+            if (archived) {
+              console.log("[NAC] Using archived version (fresh extraction failed)");
+              Utils.showToast("\u{1F4E6} Using archived version", "success");
+              article = archived;
+            }
+          } catch (e) {
+            console.log("[NAC] Archive fallback failed:", e.message);
+          }
+        }
+        if (!article) {
           console.log("[NAC] No article content found at all");
           Utils.showToast("No article content found on this page", "error");
           return;
