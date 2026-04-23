@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NOSTR Article Capture
 // @namespace    https://github.com/nostr-article-capture
-// @version      2.9.2
+// @version      2.10.0
 // @updateURL    https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @downloadURL  https://raw.githubusercontent.com/bryanmatthewsimonson/nostr-article-capture/main/nostr-article-capture.user.js
 // @description  Capture articles with clean reader view, entity tagging, and NOSTR publishing
@@ -27,11 +27,39 @@
   'use strict';
 
   // ============================================
+  // SECTION 0: TRUSTED TYPES (CSP compatibility)
+  // ============================================
+  // Creates a permissive Trusted Types policy so innerHTML assignments
+  // (including those in bundled Readability/Turndown) don't throw on
+  // sites with `require-trusted-types-for 'script'` CSP headers.
+  if (typeof trustedTypes !== 'undefined' && trustedTypes.createPolicy) {
+    try {
+      if (!trustedTypes.defaultPolicy) {
+        trustedTypes.createPolicy('default', {
+          createHTML: (string) => string,
+          createScript: (string) => string,
+          createScriptURL: (string) => string
+        });
+      }
+    } catch (e) {
+      try {
+        window.__nacTrustedTypesPolicy = trustedTypes.createPolicy('nac-policy', {
+          createHTML: (string) => string,
+          createScript: (string) => string,
+          createScriptURL: (string) => string
+        });
+      } catch (e2) {
+        console.warn('[NAC] Could not create Trusted Types policy:', e2.message);
+      }
+    }
+  }
+
+  // ============================================
   // SECTION 1: CONFIGURATION
   // ============================================
   
   const CONFIG = {
-    version: '2.9.2',
+    version: '2.10.0',
     debug: false,
     relays_default: [
       { url: 'wss://nos.lol', read: true, write: true, enabled: true },
